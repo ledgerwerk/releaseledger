@@ -24,6 +24,15 @@ releaseledger changelog 1.2.0 --target-changelog CHANGELOG.md --release-date 202
 releaseledger release tag 1.2.0
 ```
 
+`changelog` produces source/context for review or drafting; `build` writes the
+final `CHANGELOG.md` section. Build CHANGELOG.md:
+
+```bash
+releaseledger changelog 1.2.0 --format json
+releaseledger build 1.2.0 --dry-run --target-file CHANGELOG.md
+releaseledger build 1.2.0 --release-date 2026-06-13 --target-file CHANGELOG.md
+```
+
 After `init` you get a `.releaseledger.toml` and a `.releaseledger/` layout:
 
 ```text
@@ -54,6 +63,9 @@ releaseledger entry list VERSION
 releaseledger changelog VERSION [--format markdown|json] [--output PATH]
                                 [--include-internal] [--target-changelog PATH]
                                 [--release-date YYYY-MM-DD]
+releaseledger build VERSION [--target-file CHANGELOG.md] [--release-date YYYY-MM-DD]
+                            [--unreleased] [--include-internal] [--dry-run]
+                            [--replace-existing] [--format markdown|json]
 ```
 
 Entry kinds: `added`, `changed`, `fixed`, `removed`, `deprecated`, `security`,
@@ -104,6 +116,7 @@ A narrow, stable surface is re-exported from `releaseledger.api`:
 ```python
 from releaseledger.api.releases import create_release, tag_release, show_release
 from releaseledger.api.entries import add_release_entry
+from releaseledger.api.changelog import build_changelog_file, render_changelog_section
 from releaseledger.api.config import load_project_locator, render_default_releaseledger_toml
 ```
 

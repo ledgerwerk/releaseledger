@@ -6,5 +6,5 @@ taskledger_dir = '../taskledger-state/releaseledger'
 project_uuid = "7864d9da-4d0e-47a6-9074-581a4b2d684c"
 ledger_ref = "main"
 ledger_parent_ref = ""
-ledger_next_task_number = 2
+ledger_next_task_number = 3
 ledger_branch_guard = "off"

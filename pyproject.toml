@@ -28,6 +28,7 @@ dependencies = [
     "typer",
     "click",
     "PyYAML",
+    "Jinja2",
     "ledgercore>=0.1.0",
     'tomli; python_version < "3.11"',
 ]

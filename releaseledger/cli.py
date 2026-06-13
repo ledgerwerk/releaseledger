@@ -19,6 +19,7 @@ from releaseledger.cli_common import (
     CommandResult,
     cli_state_from_context,
     emit_error,
+    emit_payload,
     launch_error_exit_code,
     render_json,
     resolve_workspace_root,
@@ -28,6 +29,7 @@ from releaseledger.cli_common import (
 )
 from releaseledger.errors import ReleaseledgerError
 from releaseledger.services.changelog import build_changelog_context
+from releaseledger.services.changelog_build import build_changelog_file
 from releaseledger.services.entries import (
     add_release_entry,
     list_release_entries,
@@ -525,3 +527,83 @@ def changelog_command(
             typer.echo(f"wrote {out_path}")
         return
     typer.echo(text)
+
+
+@app.command("build")
+def build_command(
+    ctx: typer.Context,
+    version: Annotated[str, typer.Argument(help="Release version string.")],
+    target_file: Annotated[
+        Path | None,
+        typer.Option("--target-file", help="CHANGELOG target file."),
+    ] = None,
+    release_date: Annotated[
+        str | None,
+        typer.Option("--release-date", help="Release date YYYY-MM-DD."),
+    ] = None,
+    unreleased: Annotated[
+        bool,
+        typer.Option("--unreleased", help="Render the date as Unreleased/no date."),
+    ] = False,
+    include_internal: Annotated[
+        bool,
+        typer.Option("--include-internal", help="Include internal entries."),
+    ] = False,
+    template: Annotated[
+        str,
+        typer.Option("--template", help="Named template profile."),
+    ] = "default",
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Print rendered section; do not write."),
+    ] = False,
+    replace_existing: Annotated[
+        bool,
+        typer.Option(
+            "--replace-existing",
+            help="Replace an existing section for VERSION.",
+        ),
+    ] = False,
+    format_name: Annotated[
+        str,
+        typer.Option("--format", help="Output format: markdown or json."),
+    ] = "markdown",
+) -> None:
+    """Build or update CHANGELOG.md for a release."""
+    state = cli_state_from_context(ctx)
+    if format_name not in {"markdown", "json"}:
+        err = ReleaseledgerError(
+            f"Unsupported --format: {format_name!r}",
+            code="USAGE_ERROR",
+            exit_code=2,
+        )
+        emit_error(command="build", error=err, json_output=state.json_output)
+        raise typer.Exit(launch_error_exit_code(err)) from err
+    try:
+        workspace_root = _paths(ctx).workspace_root
+        result = build_changelog_file(
+            workspace_root,
+            version=version,
+            target_file=target_file,
+            include_internal=include_internal,
+            release_date=release_date,
+            unreleased=unreleased,
+            template_name=template,
+            dry_run=dry_run,
+            replace_existing=replace_existing,
+        )
+    except ReleaseledgerError as exc:
+        emit_error(command="build", error=exc, json_output=state.json_output)
+        raise typer.Exit(launch_error_exit_code(exc)) from exc
+    target = str(result.get("target_file", ""))
+    if dry_run:
+        human = str(result.get("section", ""))
+    else:
+        human = f"wrote {target}"
+    emit_payload(
+        command="build",
+        result_type="changelog_build",
+        result=result,
+        human=human,
+        json_output=state.json_output,
+    )
