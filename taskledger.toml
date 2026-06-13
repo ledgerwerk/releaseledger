@@ -1,5 +1,0 @@
-# Taskledger branch-scoped state. This block is intentionally safe to commit.
-ledger_ref = "main"
-ledger_parent_ref = ""
-ledger_next_task_number = 2
-ledger_branch_guard = "off"
