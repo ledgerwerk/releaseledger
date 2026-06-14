@@ -380,11 +380,16 @@ def render_default_releaseledger_toml(
     policy: str = DEFAULT_RELEASELEDGER_DIR_POLICY,
 ) -> str:
     """Render the canonical default ``.releaseledger.toml`` content."""
+    # Normalize path separators to forward slashes so the value is portable
+    # across platforms and yields a valid TOML basic string. Backslashes are
+    # escape characters in TOML and would corrupt Windows values such as
+    # "..\ext-rl" produced by os.path.relpath.
+    normalized_dir = releaseledger_dir.replace("\\", "/")
     lines = [
         "# Project-local releaseledger configuration.",
         "# This file lives in the source project root.",
         f"config_version = {CONFIG_VERSION}",
-        f'releaseledger_dir = "{releaseledger_dir}"',
+        f'releaseledger_dir = "{normalized_dir}"',
     ]
     if policy != DEFAULT_RELEASELEDGER_DIR_POLICY:
         lines.append(f'releaseledger_dir_policy = "{policy}"')

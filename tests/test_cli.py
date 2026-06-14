@@ -1193,7 +1193,9 @@ class TestPhase9ExternalPolicy:
         assert "releaseledger_dir_policy" in toml
         assert "external" in toml
         # Verify the relative path was written (not the absolute path).
-        assert f'releaseledger_dir = "{rel}"' in toml
+        # Backslash separators from os.path.relpath are normalized to forward
+        # slashes in the TOML (TOML basic strings treat backslashes as escapes).
+        assert f'releaseledger_dir = "{rel.replace(chr(92), "/")}"' in toml
 
     def test_external_dir_json_error_has_remediation(self, tmp_path: Path) -> None:
         """JSON error when external dir is rejected includes remediation hints."""
