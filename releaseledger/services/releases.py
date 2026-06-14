@@ -88,6 +88,15 @@ def _validate_date(value: str, field_name: str) -> str:
             code=CODE_USAGE_ERROR,
             exit_code=2,
         )
+    # Validate real calendar date
+    try:
+        datetime.date.fromisoformat(value)
+    except ValueError as exc:
+        raise LaunchError(
+            f"{field_name} must be a valid calendar date, got {value!r}.",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+        ) from exc
     return value
 
 

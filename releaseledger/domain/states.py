@@ -7,6 +7,9 @@ __all__ = [
     "ENTRY_KIND_ALIASES",
     "ENTRY_KIND_TITLES",
     "ENTRY_STATUSES",
+    "KEEPACHANGELOG_GROUP_ORDER",
+    "KEEPACHANGELOG_GROUP_TITLES",
+    "DEFAULT_KEEPACHANGELOG_KIND_MAP",
     "RELEASE_STATUSES",
     "RELEASELEDGER_FILE_VERSION",
     "RELEASELEDGER_SCHEMA_VERSION",
@@ -61,4 +64,38 @@ ENTRY_KIND_TITLES = {
     "docs": "Documentation",
     "quality": "Quality",
     "internal": "Internal",
+}
+
+# Keep a Changelog 1.1.0 canonical group order.
+KEEPACHANGELOG_GROUP_ORDER = (
+    "added",
+    "changed",
+    "deprecated",
+    "removed",
+    "fixed",
+    "security",
+)
+
+# Keep a Changelog 1.1.0 canonical group titles.
+KEEPACHANGELOG_GROUP_TITLES = {
+    "added": "Added",
+    "changed": "Changed",
+    "deprecated": "Deprecated",
+    "removed": "Removed",
+    "fixed": "Fixed",
+    "security": "Security",
+}
+
+# Default mapping from extended entry kinds to Keep a Changelog groups.
+# Extended kinds (docs, quality, internal) map to 'changed' by default.
+DEFAULT_KEEPACHANGELOG_KIND_MAP = {
+    "added": "added",
+    "changed": "changed",
+    "deprecated": "deprecated",
+    "removed": "removed",
+    "fixed": "fixed",
+    "security": "security",
+    "docs": "changed",
+    "quality": "changed",
+    "internal": "changed",
 }

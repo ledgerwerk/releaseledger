@@ -565,7 +565,8 @@ def test_changelog_and_build_filter_statuses_and_render_quality(
         tmp_path, "build", "1.0.0", "--dry-run", "--format", "json"
     )
     section = default_build["result"]["section"]
-    assert "### Quality" in section
+    # In keepachangelog mode, quality entries map to Changed group
+    assert "### Changed" in section
     assert "Improved accepted checks" in section
     assert "Changed draft behavior" not in section
     draft_build = _json_run(
@@ -599,7 +600,10 @@ def test_strict_build_empty_and_source_coverage_gates(tmp_path: Path) -> None:
     )
     empty = _run(tmp_path, "build", "1.0.0", "--dry-run", "--strict")
     assert empty.exit_code != 0
-    allowed = _run(tmp_path, "build", "1.0.0", "--dry-run", "--strict", "--allow-empty")
+    allowed = _run(
+        tmp_path, "build", "1.0.0", "--dry-run", "--strict",
+        "--allow-empty", "--release-date", "2026-06-14"
+    )
     assert allowed.exit_code == 0, allowed.output
 
     assert (
@@ -627,5 +631,8 @@ def test_strict_build_empty_and_source_coverage_gates(tmp_path: Path) -> None:
         ).exit_code
         == 0
     )
-    covered = _run(tmp_path, "build", "1.0.0", "--dry-run", "--strict")
+    covered = _run(
+        tmp_path, "build", "1.0.0", "--dry-run", "--strict",
+        "--release-date", "2026-06-14"
+    )
     assert covered.exit_code == 0, covered.output

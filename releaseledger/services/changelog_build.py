@@ -13,6 +13,7 @@ entries — never Git commits. Templates use a sandboxed Jinja2 environment
 
 from __future__ import annotations
 
+import datetime
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -26,7 +27,12 @@ from jinja2.sandbox import SandboxedEnvironment
 
 from releaseledger.domain.entry import ReleaseEntryRecord, normalize_entry_status
 from releaseledger.domain.release import ReleaseRecord
-from releaseledger.domain.states import ENTRY_KIND_TITLES
+from releaseledger.domain.states import (
+    DEFAULT_KEEPACHANGELOG_KIND_MAP,
+    ENTRY_KIND_TITLES,
+    KEEPACHANGELOG_GROUP_ORDER,
+    KEEPACHANGELOG_GROUP_TITLES,
+)
 from releaseledger.errors import (
     CODE_CONFLICT,
     CODE_NOT_FOUND,
@@ -37,6 +43,7 @@ from releaseledger.errors import (
 from releaseledger.services.entry_lint import lint_release_entries
 from releaseledger.storage.config import (
     DEFAULT_CHANGELOG,
+    KEEPACHANGELOG_PREAMBLE,
     ProjectConfig,
     load_project_config,
 )
@@ -54,7 +61,7 @@ __all__ = [
     "replace_release_section",
 ]
 
-# Fixed group order for rendered changelog output (mirrors changelog.py).
+# Fixed group order for rendered changelog output (extended mode).
 _GROUP_ORDER = (
     "added",
     "changed",
@@ -116,6 +123,16 @@ def _entry_payload(entry: ReleaseEntryRecord) -> dict[str, object]:
 
 def _grouped_entries(
     entries: list[ReleaseEntryRecord],
+    *,
+    config: ProjectConfig | None = None,
+) -> list[tuple[str, list[dict[str, object]]]]:
+    if config and config.changelog_group_mode == "keepachangelog":
+        return _grouped_entries_keepachangelog(entries, config)
+    return _grouped_entries_extended(entries)
+
+
+def _grouped_entries_extended(
+    entries: list[ReleaseEntryRecord],
 ) -> list[tuple[str, list[dict[str, object]]]]:
     grouped: list[tuple[str, list[dict[str, object]]]] = []
     for kind in _GROUP_ORDER:
@@ -125,13 +142,37 @@ def _grouped_entries(
     return grouped
 
 
+def _grouped_entries_keepachangelog(
+    entries: list[ReleaseEntryRecord],
+    config: ProjectConfig,
+) -> list[tuple[str, list[dict[str, object]]]]:
+    mapped: dict[str, list[dict[str, object]]] = {
+        k: [] for k in KEEPACHANGELOG_GROUP_ORDER
+    }
+    for entry in entries:
+        effective_group = DEFAULT_KEEPACHANGELOG_KIND_MAP.get(entry.kind, "changed")
+        mapped[effective_group].append(_entry_payload(entry))
+    grouped: list[tuple[str, list[dict[str, object]]]] = []
+    for group_key in KEEPACHANGELOG_GROUP_ORDER:
+        members = mapped[group_key]
+        if members:
+            grouped.append((group_key, members))
+    return grouped
+
+
 def _groups_payload(
     grouped: list[tuple[str, list[dict[str, object]]]],
+    *,
+    config: ProjectConfig | None = None,
 ) -> list[dict[str, object]]:
+    if config and config.changelog_group_mode == "keepachangelog":
+        titles = KEEPACHANGELOG_GROUP_TITLES
+    else:
+        titles = ENTRY_KIND_TITLES
     return [
         {
             "kind": kind,
-            "title": ENTRY_KIND_TITLES.get(kind, kind.capitalize()),
+            "title": titles.get(kind, kind.capitalize()),
             "entries": members,
         }
         for kind, members in grouped
@@ -158,6 +199,15 @@ def _resolve_release_date(value: str | None) -> str | None:
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
         )
+    # Validate real calendar date
+    try:
+        datetime.date.fromisoformat(value)
+    except ValueError as exc:
+        raise LaunchError(
+            f"Invalid --release-date {value!r}; not a valid calendar date.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        ) from exc
     return value
 
 
@@ -178,6 +228,7 @@ def build_changelog_render_context(
     ``--release-date`` overrides ``released_at``; ``--unreleased`` forces None.
     """
     paths = resolve_project_paths(workspace_root)
+    config = _load_config(paths)
     release = load_release(workspace_root, version)
     all_entries = load_entries(workspace_root, version)
     statuses = tuple(normalize_entry_status(value) for value in include_statuses)
@@ -192,12 +243,13 @@ def build_changelog_render_context(
         release_date=_resolve_release_date(release_date),
         unreleased=unreleased,
     )
-    grouped = _grouped_entries(entries)
+    grouped = _grouped_entries(entries, config=config)
 
     release_payload: dict[str, object] = {
         "version": release.version,
         "title": release.title or f"Release {release.version}",
         "status": release.status,
+        "yanked": release.status == "yanked",
         "date": effective_date,
         "released_at": effective_date,
         "previous_version": release.previous_version,
@@ -205,6 +257,7 @@ def build_changelog_render_context(
         "entry_count": len(entries),
         "boundary_ref": release.boundary_ref,
         "source_refs": list(release.source_refs),
+        "tag": f"v{release.version}",
     }
 
     releases_list: list[dict[str, object]] = []
@@ -230,7 +283,7 @@ def build_changelog_render_context(
         "project": {"name": project_name},
         "release": release_payload,
         "entries": [_entry_payload(e) for e in entries],
-        "groups": _groups_payload(grouped),
+        "groups": _groups_payload(grouped, config=config),
         "releases": releases_list,
         "included_statuses": list(statuses),
         "status_counts": status_counts,
@@ -301,6 +354,41 @@ def _extract_heading(section: str) -> str | None:
     return None
 
 
+
+def _resolve_template_profile(
+    config: ProjectConfig,
+    template_name: str,
+) -> dict[str, Any]:
+    """Resolve a template profile from config.
+
+    Returns the template profile dict, or an empty dict for the default profile.
+    Raises LaunchError if a named template is not found.
+    """
+    if template_name == "default":
+        return {}
+
+    if not config.changelog_templates:
+        raise LaunchError(
+            f"Template {template_name!r} not found. No templates configured.",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+            remediation=["Add [changelog.templates.NAME] to .releaseledger.toml"],
+        )
+
+    if template_name not in config.changelog_templates:
+        available = sorted(config.changelog_templates.keys())
+        avail_str = ', '.join(available)
+        raise LaunchError(
+            f"Template {template_name!r} not found. Available: {avail_str}",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+            remediation=[f"Use one of: {', '.join(available)}"],
+        )
+
+    return config.changelog_templates[template_name]
+
+
+
 def render_changelog_section(
     workspace_root: Path,
     *,
@@ -316,9 +404,17 @@ def render_changelog_section(
     Returns render metadata and the section text. The section has exactly one
     trailing newline. ``section_heading`` is the first ``## `` line in the
     rendered section (or None if the template produced none).
+
+    If ``template_name`` is not ``"default"``, looks up the template profile
+    from ``config.changelog_templates[template_name]``. Raises ``LaunchError``
+    if the template is not found.
     """
     paths = resolve_project_paths(workspace_root)
     config = _load_config(paths)
+
+    # Resolve template profile
+    template_config = _resolve_template_profile(config, template_name)
+
     context = build_changelog_render_context(
         workspace_root,
         version=version,
@@ -328,23 +424,27 @@ def render_changelog_section(
         include_statuses=include_statuses,
     )
 
-    trim_blocks = bool(config.changelog_trim)
+    trim_blocks = bool(template_config.get("trim", config.changelog_trim))
     env = _make_environment(trim_blocks=trim_blocks, lstrip_blocks=trim_blocks)
     render_context = dict(context)
 
     parts: list[str] = []
-    header = config.changelog_header
+    header = template_config.get("header", config.changelog_header)
     if header.strip():
         parts.append(_render_template(env, header, render_context))
-    parts.append(_render_template(env, config.changelog_body, render_context))
-    footer = config.changelog_footer
+    body = template_config.get("body", config.changelog_body)
+    parts.append(_render_template(env, body, render_context))
+    footer = template_config.get("footer", config.changelog_footer)
     if footer.strip():
         parts.append(_render_template(env, footer, render_context))
 
     section = "\n\n".join(part for part in parts if part)
-    if config.changelog_trim:
+    if template_config.get("trim", config.changelog_trim):
         section = _trim_section(section)
-    section = _apply_postprocessors(section, config.changelog_postprocessors)
+    postprocessors = template_config.get(
+        "postprocessors", config.changelog_postprocessors
+    )
+    section = _apply_postprocessors(section, postprocessors)
     # Normalize newlines and ensure exactly one final newline.
     section = ledgercore.normalize_newlines(section)
     section = section.strip("\n") + "\n"
@@ -414,7 +514,154 @@ def _ensure_final_newline(text: str) -> str:
     return text if text.endswith("\n") else text + "\n"
 
 
-def insert_release_section(text: str, section: str) -> str:
+
+
+# ---------------------------------------------------------------------------
+# Link reference management for Keep a Changelog 1.1.0
+# ---------------------------------------------------------------------------
+
+_LINK_REF_RE = re.compile(r"^\[([^\]]+)\]:\s+(\S+)\s*$")
+
+
+def _format_tag(version: str, tag_prefix: str) -> str:
+    """Format a version as a git tag."""
+    if tag_prefix and version.startswith(tag_prefix):
+        return version
+    return f"{tag_prefix}{version}"
+
+
+def parse_changelog_link_refs(text: str) -> dict[str, str]:
+    """Parse existing link references from changelog text.
+
+    Returns a dict mapping reference names to URLs.
+    Only parses references at the end of the file (after all content).
+    """
+    refs: dict[str, str] = {}
+    lines = text.splitlines()
+    # Find the last non-empty, non-link-ref line
+    last_content_idx = len(lines) - 1
+    while last_content_idx >= 0:
+        line = lines[last_content_idx].strip()
+        if line and not _LINK_REF_RE.match(line):
+            break
+        last_content_idx -= 1
+
+    # Parse link refs after the last content line
+    for line in lines[last_content_idx + 1:]:
+        match = _LINK_REF_RE.match(line.strip())
+        if match:
+            refs[match.group(1)] = match.group(2)
+    return refs
+
+
+def render_release_link(
+    config: ProjectConfig,
+    version: str,
+    previous_version: str | None = None,
+) -> str | None:
+    """Render a link reference for a release version.
+
+    Returns the link reference line, or None if repository_url is not configured.
+    """
+    if not config.changelog_repository_url:
+        return None
+
+    repo_url = config.changelog_repository_url.rstrip("/")
+    current_tag = _format_tag(version, config.changelog_tag_prefix)
+
+    if config.changelog_compare_url_template:
+        # Use custom template
+        previous_tag = (
+            _format_tag(previous_version, config.changelog_tag_prefix)
+            if previous_version else ""
+        )
+        url = config.changelog_compare_url_template.format(
+            previous=previous_version or "",
+            current=version,
+            previous_tag=previous_tag,
+            current_tag=current_tag,
+        )
+    elif previous_version:
+        previous_tag = _format_tag(previous_version, config.changelog_tag_prefix)
+        url = f"{repo_url}/compare/{previous_tag}...{current_tag}"
+    else:
+        url = f"{repo_url}/releases/tag/{current_tag}"
+
+    return f"[{version}]: {url}"
+
+
+def render_unreleased_link(
+    config: ProjectConfig,
+    latest_version: str | None = None,
+) -> str | None:
+    """Render a link reference for the Unreleased section.
+
+    Returns the link reference line, or None if repository_url is not configured.
+    """
+    if not config.changelog_repository_url:
+        return None
+
+    repo_url = config.changelog_repository_url.rstrip("/")
+
+    if latest_version:
+        latest_tag = _format_tag(latest_version, config.changelog_tag_prefix)
+        url = f"{repo_url}/compare/{latest_tag}...HEAD"
+    else:
+        url = f"{repo_url}"
+
+    return f"[Unreleased]: {url}"
+
+
+def update_changelog_link_refs(
+    text: str,
+    new_refs: dict[str, str],
+) -> str:
+    """Update link references in changelog text without deleting unrelated refs.
+
+    Only updates/adds refs that are in ``new_refs``. Preserves all other refs.
+    """
+    lines = text.splitlines(keepends=True)
+
+    # Find the last non-empty, non-link-ref line
+    last_content_idx = len(lines) - 1
+    while last_content_idx >= 0:
+        line = lines[last_content_idx].strip()
+        if line and not _LINK_REF_RE.match(line):
+            break
+        last_content_idx -= 1
+
+    # Split into content and existing refs
+    content_lines = lines[:last_content_idx + 1]
+    existing_ref_lines = lines[last_content_idx + 1:]
+
+    # Parse existing refs
+    existing_refs: dict[str, str] = {}
+    for line in existing_ref_lines:
+        match = _LINK_REF_RE.match(line.strip())
+        if match:
+            existing_refs[match.group(1)] = match.group(2)
+
+    # Merge: new_refs override existing, but keep unrelated refs
+    merged_refs = {**existing_refs, **new_refs}
+
+    # Rebuild the file
+    result_lines = list(content_lines)
+    if merged_refs:
+        # Add a blank line before refs if content doesn't end with one
+        if result_lines and result_lines[-1].strip():
+            result_lines.append("\n")
+        for name, url in sorted(merged_refs.items()):
+            result_lines.append(f"[{name}]: {url}\n")
+
+    return _ensure_final_newline("".join(result_lines))
+
+def insert_release_section(
+    text: str,
+    section: str,
+    *,
+    config: ProjectConfig | None = None,
+    version: str = "",
+) -> str:
     """Insert a rendered release section into existing changelog ``text``.
 
     Insertion precedence:
@@ -422,6 +669,9 @@ def insert_release_section(text: str, section: str) -> str:
     2. before the first ``## `` heading, if any;
     3. after the title/intro (first ``# `` line and following non-heading lines);
     4. otherwise create a new changelog with a ``# Changelog`` title.
+
+    In Keep a Changelog mode, case 4 creates a full skeleton with preamble,
+    ``## [Unreleased]`` section, and optional link references.
 
     ``section`` must already have exactly one trailing newline.
     """
@@ -465,8 +715,57 @@ def insert_release_section(text: str, section: str) -> str:
         return _splice(lines, after, section)
 
     # 4. New changelog.
+    if config and config.changelog_standard == "keepachangelog-1.1.0":
+        return _create_keepachangelog_skeleton(section, config=config, version=version)
     body = "# Changelog\n\n" + section
     return _ensure_final_newline(body)
+
+
+def _create_keepachangelog_skeleton(
+    section: str,
+    *,
+    config: ProjectConfig,
+    version: str = "",
+) -> str:
+    """Create a full Keep a Changelog 1.1.0 skeleton for a new file."""
+    parts = ["# Changelog"]
+
+    # Add preamble.
+    preamble = config.changelog_preamble or KEEPACHANGELOG_PREAMBLE
+    if preamble.strip():
+        parts.append("")
+        parts.append(preamble.strip())
+
+    # Add Unreleased section.
+    parts.append("")
+    parts.append("## [Unreleased]")
+
+    # Add the release section.
+    parts.append("")
+    parts.append(section.strip())
+
+    # Add link references if repository_url is configured.
+    if config.changelog_link_references and config.changelog_repository_url:
+        repo_url = config.changelog_repository_url.rstrip("/")
+        tag_prefix = config.changelog_tag_prefix
+        parts.append("")
+        # Unreleased link
+        if version:
+            tag = (
+                f"{tag_prefix}{version}"
+                if not version.startswith(tag_prefix)
+                else version
+            )
+            parts.append(f"[Unreleased]: {repo_url}/compare/{tag}...HEAD")
+            # Release link
+            parts.append(f"[{version}]: {repo_url}/releases/tag/{tag}")
+        else:
+            parts.append(f"[Unreleased]: {repo_url}")
+    elif config.changelog_link_references and not config.changelog_repository_url:
+        # Warn if link_references is on but no repository_url
+        pass  # Warning will be handled by the caller
+
+    return _ensure_final_newline("\n".join(parts))
 
 
 def replace_release_section(text: str, version: str, section: str) -> str:
@@ -687,6 +986,18 @@ def build_changelog_file(
                 f"Entry lint reported {summary['warnings']} warning(s)."
             )
 
+    # In Keep a Changelog mode with strict, require a date for released sections
+    is_kac = config.changelog_standard == "keepachangelog-1.1.0"
+    if strict and is_kac and not unreleased:
+        effective_date = release_date or release.released_at
+        if not effective_date:
+            raise LaunchError(
+                "Strict build in Keep a Changelog mode requires a release date "
+                "for released sections. Pass --release-date or --unreleased.",
+                code=CODE_VALIDATION_ERROR,
+                exit_code=2,
+            )
+
     rendered = render_changelog_section(
         workspace_root,
         version=version,
@@ -738,7 +1049,30 @@ def build_changelog_file(
         merged = replace_release_section(existing, version, section)
         replaced_existing = True
     else:
-        merged = insert_release_section(existing, section)
+        merged = insert_release_section(
+            existing, section, config=config, version=version
+        )
+
+    # Update link references if in Keep a Changelog mode
+    is_kac = config.changelog_standard == "keepachangelog-1.1.0"
+    if is_kac and config.changelog_link_references:
+        new_refs: dict[str, str] = {}
+        # Find the previous version for compare links
+        previous_version = release.previous_version
+        release_link = render_release_link(config, version, previous_version)
+        if release_link:
+            # Extract the ref name and URL
+            match = _LINK_REF_RE.match(release_link)
+            if match:
+                new_refs[match.group(1)] = match.group(2)
+        # Add unreleased link
+        unreleased_link = render_unreleased_link(config, version)
+        if unreleased_link:
+            match = _LINK_REF_RE.match(unreleased_link)
+            if match:
+                new_refs[match.group(1)] = match.group(2)
+        if new_refs:
+            merged = update_changelog_link_refs(merged, new_refs)
 
     merged = _ensure_final_newline(merged)
     try:

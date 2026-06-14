@@ -29,6 +29,7 @@ __all__ = [
     "DEFAULT_CHANGELOG",
     "DEFAULT_CHANGELOG_FOOTER",
     "DEFAULT_CHANGELOG_TEMPLATE_BODY",
+    "DEFAULT_KEEPACHANGELOG_TEMPLATE_BODY",
     "DEFAULT_LEDGER_CODE",
     "DEFAULT_LEDGER_NAME",
     "DEFAULT_LEDGER_REF",
@@ -70,6 +71,31 @@ DEFAULT_CHANGELOG_TEMPLATE_BODY = (
     "{% endfor %}\n"
 )
 
+# Keep a Changelog 1.1.0 body template.
+# Renders [YANKED] marker for yanked releases.
+DEFAULT_KEEPACHANGELOG_TEMPLATE_BODY = (
+    "## [{{ release.version }}] - "
+    "{% if release.date %}{{ release.date }}{% else %}Unreleased{% endif %}"
+    "{% if release.yanked %} [YANKED]{% endif %}\n"
+    "\n"
+    "{% for group in groups %}\n"
+    "### {{ group.title }}\n"
+    "{% for entry in group.entries %}\n"
+    "- {% if entry.breaking %}**BREAKING:** {% endif %}"
+    "{{ entry.summary }}\n"
+    "{% endfor %}\n"
+    "\n"
+    "{% endfor %}\n"
+)
+
+# Keep a Changelog 1.1.0 preamble text.
+KEEPACHANGELOG_PREAMBLE = (
+    "All notable changes to this project will be documented in this file.\n"
+    "\n"
+    "The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), "
+    "and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)."
+)
+
 ALLOWED_TOP_LEVEL_KEYS = {
     "config_version",
     "releaseledger_dir",
@@ -96,6 +122,17 @@ ALLOWED_CHANGELOG_KEYS = {
     "trim",
     "render_always",
     "postprocessors",
+    "standard",
+    "group_mode",
+    "link_references",
+    "repository_url",
+    "tag_prefix",
+    "compare_url_template",
+    "release_url_template",
+    "preamble",
+    "semver",
+    "unreleased",
+    "templates",
 }
 
 
@@ -122,6 +159,19 @@ class ProjectConfig:
     changelog_render_always: bool = False
     changelog_postprocessors: tuple[dict[str, str], ...] = ()
     releaseledger_dir_policy: str = DEFAULT_RELEASELEDGER_DIR_POLICY
+    # Keep a Changelog 1.1.0 profile fields
+    changelog_standard: str = ""
+    changelog_group_mode: str = "extended"
+    changelog_link_references: bool = False
+    changelog_repository_url: str = ""
+    changelog_tag_prefix: str = "v"
+    changelog_compare_url_template: str = ""
+    changelog_release_url_template: str = ""
+    changelog_preamble: str = ""
+    changelog_semver: bool = False
+    changelog_unreleased: bool = True
+    changelog_templates: dict[str, dict[str, Any]] | None = None
+
 
 
 def _require_str(value: object, key: str, source: str) -> str:
@@ -183,6 +233,34 @@ def _require_postprocessors(value: object, source: str) -> tuple[dict[str, str],
             )
         validated.append({"pattern": pattern, "replace": replace})
     return tuple(validated)
+
+
+def _require_templates(value: object, source: str) -> dict[str, dict[str, Any]] | None:
+    """Validate ``[changelog].templates`` as a mapping of template profiles."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise LaunchError(
+            f"Config key 'changelog.templates' in {source} must be a mapping.",
+            code=CODE_CONFIG_ERROR,
+            exit_code=2,
+        )
+    validated: dict[str, dict[str, Any]] = {}
+    for name, profile in value.items():
+        if not isinstance(name, str):
+            raise LaunchError(
+                f"Template name in 'changelog.templates' in {source} must be a string.",
+                code=CODE_CONFIG_ERROR,
+                exit_code=2,
+            )
+        if not isinstance(profile, dict):
+            raise LaunchError(
+                f"Template profile '{name}' in {source} must be a mapping.",
+                code=CODE_CONFIG_ERROR,
+                exit_code=2,
+            )
+        validated[name] = profile
+    return validated
 
 
 def _config_from_dict(data: dict[str, Any], source: str) -> ProjectConfig:
@@ -336,6 +414,50 @@ def _config_from_dict(data: dict[str, Any], source: str) -> ProjectConfig:
         changelog_postprocessors=_require_postprocessors(
             changelog_section.get("postprocessors", []), source
         ),
+        # Keep a Changelog 1.1.0 profile fields
+        changelog_standard=_require_str(
+            changelog_section.get("standard", ""), "changelog.standard", source
+        ),
+        changelog_group_mode=_require_str(
+            changelog_section.get("group_mode", "extended"),
+            "changelog.group_mode",
+            source,
+        ),
+        changelog_link_references=_require_bool(
+            changelog_section.get("link_references", False),
+            "changelog.link_references",
+            source,
+        ),
+        changelog_repository_url=_require_str(
+            changelog_section.get("repository_url", ""),
+            "changelog.repository_url",
+            source,
+        ),
+        changelog_tag_prefix=_require_str(
+            changelog_section.get("tag_prefix", "v"), "changelog.tag_prefix", source
+        ),
+        changelog_compare_url_template=_require_str(
+            changelog_section.get("compare_url_template", ""),
+            "changelog.compare_url_template",
+            source,
+        ),
+        changelog_release_url_template=_require_str(
+            changelog_section.get("release_url_template", ""),
+            "changelog.release_url_template",
+            source,
+        ),
+        changelog_preamble=_require_str(
+            changelog_section.get("preamble", ""), "changelog.preamble", source
+        ),
+        changelog_semver=_require_bool(
+            changelog_section.get("semver", False), "changelog.semver", source
+        ),
+        changelog_unreleased=_require_bool(
+            changelog_section.get("unreleased", True), "changelog.unreleased", source
+        ),
+        changelog_templates=_require_templates(
+            changelog_section.get("templates", None), source
+        ),
     )
 
 
@@ -413,17 +535,27 @@ def render_default_releaseledger_toml(
             f'default_changelog = "{DEFAULT_CHANGELOG}"',
             f'default_status = "{DEFAULT_RELEASE_STATUS}"',
             "allow_dirty_worktree = true",
-            "",
+
             "# Changelog build defaults.",
             "[changelog]",
             f'output = "{DEFAULT_CHANGELOG}"',
+            'standard = "keepachangelog-1.1.0"',
+            'group_mode = "keepachangelog"',
+            "link_references = true",
+            'repository_url = ""',
+            'tag_prefix = "v"',
+            'compare_url_template = ""',
+            'release_url_template = ""',
+            'preamble = ""',
+            "semver = true",
+            "unreleased = true",
             "trim = true",
             "render_always = false",
             'header = ""',
             # The body template holds literal Jinja2 braces; keep it out of any
             # f-string so braces are never doubled. A newline immediately after
             # the opening triple quote is trimmed by the TOML parser on read-back.
-            f'body = """\n{DEFAULT_CHANGELOG_TEMPLATE_BODY}"""',
+            f'body = """\n{DEFAULT_KEEPACHANGELOG_TEMPLATE_BODY}"""',
             f'footer = "{DEFAULT_CHANGELOG_FOOTER}"',
             "postprocessors = []",
         ]
