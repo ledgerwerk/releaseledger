@@ -158,6 +158,44 @@ report so agents and humans do not need to run ``release show``,
 separately. ``--strict`` exits non-zero when the release is not OK (uncovered
 source refs, lint errors, or a changelog build that would fail).
 
+With ``--git``, review also computes coverage from the git commit range
+(``--git-base``/``--git-head`` or the release's stored git metadata). Strict
+mode fails when any include_by_default git commit has no accepted entry
+coverage.
+
+Git-first commands
+-----------------
+
+Releaseledger is git-first: git commit ranges are the canonical evidence of
+shipped changes.
+
+.. code-block:: text
+
+   releaseledger git range VERSION [--base REF] [--head REF]
+                          [--include-merges never|always|nontrivial]
+   releaseledger git range next --base REF [--head REF]
+   releaseledger git import VERSION --base REF [--head REF]
+                          [--status draft] --output PATH
+   releaseledger git import next --base REF [--head REF] --output PATH
+
+``git range`` inspects the commit range and prints candidate entries. ``git
+import`` generates an ``entry add-many`` YAML batch from the range for review
+and curation. The ``next`` forms are non-persisting previews that do not
+require a release record.
+
+Branch commands
+---------------
+
+.. code-block:: text
+
+   releaseledger branch status
+   releaseledger branch start BRANCH --parent PARENT
+   releaseledger branch merge BRANCH --into TARGET --release VERSION
+
+Optional branch-scoped ledgers. ``branch status`` compares the current git
+branch to ``ledger_ref``. ``branch start`` forks a new ledger. ``branch
+merge`` merges entries by ``source_refs`` (``git:<sha>`` dedup).
+
 Changelog section correction commands
 -------------------------------------
 

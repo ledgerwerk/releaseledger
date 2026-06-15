@@ -168,6 +168,8 @@ def run_command(
     result_type: str,
     json_output: bool,
     produce: Callable[[], CommandResult],
+    workspace_root: Path | None = None,
+    mutating: bool = False,
 ) -> None:
     """Run a command body, emitting a success or error envelope.
 
@@ -175,6 +177,10 @@ def run_command(
     :class:`ReleaseledgerError` raised by the service layer is turned into the
     error envelope and a non-zero typer exit.
     """
+    if mutating and workspace_root is not None:
+        check_mutating_branch_guard(
+            workspace_root, json_output=json_output, command=command
+        )
     try:
         result, events, human = produce()
     except ReleaseledgerError as exc:
@@ -188,3 +194,36 @@ def run_command(
         human=human,
         json_output=json_output,
     )
+
+
+def check_mutating_branch_guard(
+    workspace_root: Path,
+    *,
+    json_output: bool,
+    command: str,
+) -> None:
+    """Enforce ledger_branch_guard for mutating commands (design §9.6).
+
+    When the guard is 'warn', prints a warning to stderr. When 'on', raises
+    a BranchGuardViolation that the caller should catch as a ReleaseledgerError.
+    Read-only commands do not call this.
+    """
+    try:
+        from releaseledger.services.branch import check_branch_guard
+        from releaseledger.storage.config import load_project_config
+
+        config = load_project_config(workspace_root / ".releaseledger.toml")
+        warning = check_branch_guard(
+            workspace_root,
+            ledger_ref=config.ledger_ref,
+            branch_guard=config.ledger_branch_guard,
+            mutating=True,
+        )
+        if warning:
+            # In warn mode, print to stderr (typer.echo with err=True).
+            typer.echo(f"warning: {warning}", err=True)
+    except ReleaseledgerError:
+        raise
+    except Exception:
+        # Config not found or not in git: guard is a no-op.
+        pass

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 import ledgercore
 
+from releaseledger.domain.source_ref import normalize_source_ref
 from releaseledger.domain.states import (
     ENTRY_KIND_ALIASES,
     ENTRY_KINDS,
@@ -223,14 +224,20 @@ def normalize_scopes(values: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def validate_source_refs(values: tuple[str, ...]) -> tuple[str, ...]:
-    """Validate global refs and return their canonical spelling."""
+    """Validate source refs and return their canonical spelling.
+
+    Accepts ledgercore global refs (``tl:task-0006``, ``github:pr-42``) and
+    git commit refs (``git:<7..40 hex>``). Routes through
+    :func:`normalize_source_ref` so git symbolic/range markers are rejected
+    with an actionable error.
+    """
     validated: list[str] = []
     for raw in values:
         try:
-            canonical = ledgercore.parse_global_ref(raw).global_ref
-        except ledgercore.IdFormatError as exc:
+            canonical = normalize_source_ref(raw)
+        except LaunchError as exc:
             raise LaunchError(
-                f"Invalid source ref {raw!r}: {exc}",
+                f"Invalid source ref {raw!r}: {exc.message}",
                 code=CODE_VALIDATION_ERROR,
                 exit_code=2,
             ) from exc

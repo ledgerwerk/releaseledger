@@ -27,7 +27,12 @@ from releaseledger.cli_common import (
     store_cli_state,
     write_text_output,
 )
-from releaseledger.errors import ReleaseledgerError
+from releaseledger.errors import CODE_USAGE_ERROR, LaunchError, ReleaseledgerError
+from releaseledger.services.branch import (
+    branch_merge,
+    branch_start,
+    branch_status,
+)
 from releaseledger.services.changelog import build_changelog_context
 from releaseledger.services.changelog_build import build_changelog_file
 from releaseledger.services.config import (
@@ -46,6 +51,12 @@ from releaseledger.services.entries import (
 )
 from releaseledger.services.entry_lint import lint_release_entries
 from releaseledger.services.entry_prompt import build_entry_prompt
+from releaseledger.services.git_sources import (
+    GIT_DEFAULT_HEAD,
+    GIT_DEFAULT_INCLUDE_MERGES,
+    collect_git_candidates,
+    resolve_git_ref,
+)
 from releaseledger.services.releases import (
     UNSET,
     cancel_release,
@@ -62,11 +73,13 @@ from releaseledger.services.releases import (
     update_release,
 )
 from releaseledger.services.review import build_release_review
+from releaseledger.storage.config import load_project_config
 from releaseledger.storage.paths import (
     ProjectPaths,
     initialize_project,
     require_project,
 )
+from releaseledger.storage.store import load_release
 
 app = typer.Typer(
     add_completion=True,
@@ -243,6 +256,8 @@ def release_create_command(
         result_type="release",
         json_output=state.json_output,
         produce=produce,
+        workspace_root=_paths(ctx).workspace_root,
+        mutating=True,
     )
 
 
@@ -342,6 +357,24 @@ def release_update_command(
         bool,
         typer.Option("--clear-released-at", help="Clear the released_at field."),
     ] = False,
+    git_base_ref: Annotated[
+        str | None,
+        typer.Option(
+            "--git-base",
+            help="Git range base ref (e.g. v0.1.0); resolved to a full SHA.",
+        ),
+    ] = None,
+    git_head_ref: Annotated[
+        str | None,
+        typer.Option(
+            "--git-head",
+            help="Git range head ref (e.g. HEAD); resolved to a full SHA.",
+        ),
+    ] = None,
+    clear_git_range: Annotated[
+        bool,
+        typer.Option("--clear-git-range", help="Clear all stored git range metadata."),
+    ] = False,
     force: Annotated[
         bool,
         typer.Option(
@@ -373,6 +406,9 @@ def release_update_command(
             clear_source_refs=clear_source_refs,
             clear_source_count=clear_source_count,
             clear_released_at=clear_released_at,
+            git_base_ref=git_base_ref if git_base_ref is not None else UNSET,
+            git_head_ref=git_head_ref if git_head_ref is not None else UNSET,
+            clear_git_range=clear_git_range,
             force=force,
         )
         return result, _event_ids(result), f"updated release {version}"
@@ -382,6 +418,8 @@ def release_update_command(
         result_type="release",
         json_output=state.json_output,
         produce=produce,
+        workspace_root=_paths(ctx).workspace_root,
+        mutating=True,
     )
 
 
@@ -808,6 +846,8 @@ def entry_add_command(
         result_type="release_entry",
         json_output=state.json_output,
         produce=produce,
+        workspace_root=_paths(ctx).workspace_root,
+        mutating=True,
     )
 
 
@@ -952,6 +992,8 @@ def entry_add_many_command(
         result_type="release_entry_batch",
         json_output=state.json_output,
         produce=produce,
+        workspace_root=_paths(ctx).workspace_root,
+        mutating=True,
     )
 
 
@@ -1197,6 +1239,27 @@ def review_command(
         bool,
         typer.Option("--strict", help="Exit non-zero when the release is not OK."),
     ] = False,
+    git: Annotated[
+        bool,
+        typer.Option(
+            "--git",
+            help="Enable git-backed coverage review.",
+        ),
+    ] = False,
+    git_base: Annotated[
+        str | None,
+        typer.Option(
+            "--git-base",
+            help="Git range base ref for the review.",
+        ),
+    ] = None,
+    git_head: Annotated[
+        str | None,
+        typer.Option(
+            "--git-head",
+            help="Git range head ref for the review.",
+        ),
+    ] = None,
 ) -> None:
     """Review release coverage, orphans, lint, and a strict changelog dry-run."""
     state = cli_state_from_context(ctx)
@@ -1209,6 +1272,9 @@ def review_command(
             include_statuses=statuses or ("accepted",),
             target_file=target_file,
             strict=strict,
+            git=git,
+            git_base=git_base,
+            git_head=git_head,
         )
     except ReleaseledgerError as exc:
         emit_error(command="review", error=exc, json_output=state.json_output)
@@ -1294,6 +1360,23 @@ def _render_review_human(version: str, result: dict[str, object]) -> str:
         f"({lint_errors} error(s), {lint_warnings} warning(s))"
     )
     lines.append(f"  {changelog_status:<4} changelog dry-run build{reason_text}")
+
+    # Git block (when present).
+    git_block = result.get("git")
+    if isinstance(git_block, dict):
+        git_cov_ok = isinstance(checks, dict) and checks.get("git_coverage_ok", True)
+        lines.append(f"  {'OK' if git_cov_ok else 'FAIL':<4} git commit coverage")
+        lines.append("")
+        lines.append("Git:")
+        base_sha = str(git_block.get("base_sha", ""))[:7]
+        head_sha = str(git_block.get("head_sha", ""))[:7]
+        lines.append(f"  base: {git_block.get('base_ref', '')} -> {base_sha}")
+        lines.append(f"  head: {git_block.get('head_ref', '')} -> {head_sha}")
+        lines.append(f"  range: {str(git_block.get('range', ''))[:21]}")
+        lines.append(f"  commits: {git_block.get('commit_count', 0)}")
+        skipped = int(git_block.get("merge_commits_skipped", 0))
+        if skipped:
+            lines.append(f"  merge commits skipped: {skipped}")
 
     orphans = result.get("orphan_entries", [])
     if isinstance(orphans, list) and orphans:
@@ -1499,6 +1582,443 @@ def changelog_rename_section_command(
     run_command(
         command="changelog-section.rename",
         result_type="changelog_section_rename",
+        json_output=state.json_output,
+        produce=produce,
+    )
+
+
+# -- Git-first release evidence commands (design §7) -------------------
+
+git_app = typer.Typer(
+    help="Git-first release evidence: range scanning and candidate import."
+)
+app.add_typer(git_app, name="git")
+
+
+@git_app.command("range")
+def git_range_command(
+    ctx: typer.Context,
+    version: Annotated[
+        str,
+        typer.Argument(
+            help="Release version (or 'next' for a non-persisting preview)."
+        ),
+    ],
+    base: Annotated[
+        str,
+        typer.Option("--base", help="Base ref (e.g. v0.1.0); resolved to a full SHA."),
+    ] = "",
+    head: Annotated[
+        str,
+        typer.Option("--head", help="Head ref (default HEAD); resolved to a full SHA."),
+    ] = GIT_DEFAULT_HEAD,
+    include_merges: Annotated[
+        str,
+        typer.Option(
+            "--include-merges",
+            help="Merge policy: never, always, nontrivial (default nontrivial).",
+        ),
+    ] = GIT_DEFAULT_INCLUDE_MERGES,
+) -> None:
+    """Inspect the git commit range for a release (or preview with 'next').
+
+    With a real version the stored release's git range is used when --base/--head
+    are not supplied. With the special version 'next' the refs must be provided.
+    No release record is written.
+    """
+    state = cli_state_from_context(ctx)
+    workspace_root = _paths(ctx).workspace_root
+
+    if version == "next":
+        if not base:
+            emit_error(
+                command="git.range",
+                error=LaunchError(
+                    "--base is required for 'git range next'.",
+                    code=CODE_USAGE_ERROR,
+                    exit_code=2,
+                ),
+                json_output=state.json_output,
+            )
+            raise typer.Exit(2)
+        _run_git_range(
+            state,
+            workspace_root,
+            display_version="next",
+            base=base,
+            head=head,
+            include_merges=include_merges,
+        )
+        return
+
+    # Real release: use stored git_* fields when --base/--head not supplied.
+    existing = load_release(workspace_root, version)
+    use_base = base or existing.git_base_ref
+    use_head = head or existing.git_head_ref
+    if not use_base:
+        emit_error(
+            command="git.range",
+            error=LaunchError(
+                f"Release {version} has no stored git base."
+                " Pass --base or use 'release update --git-base'.",
+                code=CODE_USAGE_ERROR,
+                exit_code=2,
+            ),
+            json_output=state.json_output,
+        )
+        raise typer.Exit(2)
+    _run_git_range(
+        state,
+        workspace_root,
+        display_version=version,
+        base=use_base,
+        head=use_head or GIT_DEFAULT_HEAD,
+        include_merges=include_merges,
+    )
+
+
+def _run_git_range(
+    state: CLIState,
+    workspace_root: Path,
+    *,
+    display_version: str,
+    base: str,
+    head: str,
+    include_merges: str,
+) -> None:
+    """Render a git range scan (human + JSON)."""
+    try:
+        candidates = collect_git_candidates(
+            workspace_root,
+            base_ref=base,
+            head_ref=head,
+            include_merges=include_merges,
+        )
+        base_sha = resolve_git_ref(workspace_root, base)
+        head_sha = resolve_git_ref(workspace_root, head)
+    except LaunchError as exc:
+        emit_error(command="git.range", error=exc, json_output=state.json_output)
+        raise typer.Exit(launch_error_exit_code(exc)) from exc
+
+    skipped = sum(
+        1
+        for _ in collect_git_candidates(
+            workspace_root,
+            base_ref=base,
+            head_ref=head,
+            include_merges="always",
+        )
+    ) - len(candidates)
+    if skipped < 0:
+        skipped = 0
+
+    result: dict[str, object] = {
+        "kind": "git_range",
+        "version": display_version,
+        "base_ref": base,
+        "base_sha": base_sha,
+        "head_ref": head,
+        "head_sha": head_sha,
+        "range": f"{base_sha}..{head_sha}",
+        "commit_count": len(candidates) + skipped,
+        "merge_commits_skipped": skipped,
+        "candidate_count": len(candidates),
+        "include_merges": include_merges,
+        "candidates": [
+            {
+                "sha": c.sha,
+                "short_sha": c.short_sha,
+                "source_ref": c.source_ref,
+                "inferred_kind": c.inferred_kind,
+                "subject": c.subject,
+            }
+            for c in candidates
+        ],
+    }
+    if state.json_output:
+        payload: dict[str, object] = {
+            "ok": True,
+            "command": "git.range",
+            "result_type": "git_range",
+            "result": result,
+        }
+        typer.echo(render_json(payload))
+        return
+
+    lines = [f"GIT RANGE {display_version}", ""]
+    lines.append(f"  base: {base} -> {base_sha[:7]}")
+    lines.append(f"  head: {head} -> {head_sha[:7]}")
+    lines.append(f"  commits: {len(candidates) + skipped}")
+    if skipped:
+        lines.append(f"  merge commits skipped: {skipped}")
+    lines.append("")
+    lines.append("Candidates:")
+    for c in candidates:
+        lines.append(f"  {c.source_ref:<52} {c.inferred_kind:<12} {c.subject[:72]}")
+    typer.echo("\n".join(lines))
+
+
+@git_app.command("import")
+def git_import_command(
+    ctx: typer.Context,
+    version: Annotated[
+        str,
+        typer.Argument(
+            help="Release version (or 'next' for a non-persisting preview)."
+        ),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option(
+            "--output",
+            help="Output YAML file path for the entry batch.",
+        ),
+    ],
+    base: Annotated[
+        str,
+        typer.Option("--base", help="Base ref (e.g. v0.1.0)."),
+    ] = "",
+    head: Annotated[
+        str,
+        typer.Option("--head", help="Head ref (default HEAD)."),
+    ] = GIT_DEFAULT_HEAD,
+    include_merges: Annotated[
+        str,
+        typer.Option(
+            "--include-merges",
+            help="Merge policy: never, always, nontrivial (default nontrivial).",
+        ),
+    ] = GIT_DEFAULT_INCLUDE_MERGES,
+    status: Annotated[
+        str,
+        typer.Option(
+            "--status",
+            help="Status for generated entries (default draft).",
+        ),
+    ] = "draft",
+) -> None:
+    """Generate an entry batch YAML from the git commit range.
+
+    With a real version the stored release's git range is used when --base/--head
+    are not supplied. With 'next' the refs must be provided and no release is
+    read or written.
+
+    The output YAML is intended for review and manual curation before running
+    ``releaseledger entry add-many VERSION --file FILE``.
+    """
+    state = cli_state_from_context(ctx)
+    workspace_root = _paths(ctx).workspace_root
+
+    if version == "next":
+        if not base:
+            emit_error(
+                command="git.import",
+                error=LaunchError(
+                    "--base is required for 'git import next'.",
+                    code=CODE_USAGE_ERROR,
+                    exit_code=2,
+                ),
+                json_output=state.json_output,
+            )
+            raise typer.Exit(2)
+    else:
+        existing = load_release(workspace_root, version)
+        if not base:
+            base = existing.git_base_ref or ""
+        if not base:
+            emit_error(
+                command="git.import",
+                error=LaunchError(
+                    f"Release {version} has no stored git base."
+                    " Pass --base or 'release update --git-base'.",
+                    code=CODE_USAGE_ERROR,
+                    exit_code=2,
+                ),
+                json_output=state.json_output,
+            )
+            raise typer.Exit(2)
+
+    try:
+        candidates = collect_git_candidates(
+            workspace_root,
+            base_ref=base,
+            head_ref=head,
+            include_merges=include_merges,
+        )
+    except LaunchError as exc:
+        emit_error(command="git.import", error=exc, json_output=state.json_output)
+        raise typer.Exit(launch_error_exit_code(exc)) from exc
+
+    yaml_entries: list[dict[str, object]] = []
+    for c in candidates:
+        entry: dict[str, object] = {
+            "kind": c.inferred_kind,
+            "summary": c.inferred_summary,
+            "status": status,
+            "source_refs": [c.source_ref],
+            "paths": list(c.paths),
+            "sources": [c.source_ref],
+        }
+        yaml_entries.append(entry)
+    batch: dict[str, object] = {"entries": yaml_entries}
+
+    # Write the YAML file.
+    try:
+        import yaml as _yaml
+
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open("w", encoding="utf-8") as f:
+            _yaml.dump(batch, f, default_flow_style=False, sort_keys=False)
+    except Exception as exc:
+        emit_error(
+            command="git.import",
+            error=LaunchError(
+                f"Failed to write output file {output}: {exc}",
+                code=CODE_USAGE_ERROR,
+                exit_code=2,
+            ),
+            json_output=state.json_output,
+        )
+        raise typer.Exit(2) from exc
+
+    result: dict[str, object] = {
+        "kind": "git_import",
+        "version": version,
+        "output": str(output),
+        "entry_count": len(yaml_entries),
+        "status": status,
+        "entries": yaml_entries,
+    }
+    if state.json_output:
+        payload: dict[str, object] = {
+            "ok": True,
+            "command": "git.import",
+            "result_type": "git_import",
+            "result": result,
+        }
+        typer.echo(render_json(payload))
+        return
+
+    lines = [f"GIT IMPORT {version}", ""]
+    lines.append(f"  output: {output}")
+    lines.append(f"  entries: {len(yaml_entries)} (status={status})")
+    lines.append("")
+    lines.append("Next steps:")
+    lines.append(f"  releaseledger entry add-many {version} --file {output} --dry-run")
+    lines.append(f"  releaseledger entry add-many {version} --file {output}")
+    typer.echo("\n".join(lines))
+
+
+# --- end git_app ---
+
+# -- Branch ledger commands (Phase 5, design §9) -------------------------
+
+branch_app = typer.Typer(
+    help="Branch-scoped release ledger operations (optional, advanced)."
+)
+app.add_typer(branch_app, name="branch")
+
+
+@branch_app.command("status")
+def branch_status_command(ctx: typer.Context) -> None:
+    """Show the current git branch vs the configured ledger_ref."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        workspace_root = _paths(ctx).workspace_root
+        config = load_project_config(workspace_root / ".releaseledger.toml")
+        result = branch_status(
+            workspace_root,
+            ledger_ref=config.ledger_ref,
+            branch_guard=config.ledger_branch_guard,
+        )
+        lines = ["BRANCH STATUS", ""]
+        lines.append(
+            f"  current git branch: {result['current_git_branch'] or '(none)'}"
+        )
+        lines.append(f"  ledger_ref: {result['ledger_ref']}")
+        lines.append(f"  branch_guard: {result['branch_guard']}")
+        match = result["match"]
+        if match is None:
+            lines.append("  match: (not in git)")
+        else:
+            lines.append(f"  match: {'yes' if match else 'no'}")
+        human = "\n".join(lines)
+        return result, [], human
+
+    run_command(
+        command="branch.status",
+        result_type="branch_status",
+        json_output=state.json_output,
+        produce=produce,
+    )
+
+
+@branch_app.command("start")
+def branch_start_command(
+    ctx: typer.Context,
+    branch: Annotated[str, typer.Argument(help="New branch ledger ref.")],
+    parent: Annotated[
+        str,
+        typer.Option("--parent", help="Parent ledger ref to fork from."),
+    ],
+) -> None:
+    """Start a new branch ledger forked from a parent."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        workspace_root = _paths(ctx).workspace_root
+        config = load_project_config(workspace_root / ".releaseledger.toml")
+        result = branch_start(
+            workspace_root,
+            branch_ref=branch,
+            parent_ref=parent,
+            current_ledger_ref=config.ledger_ref,
+        )
+        return result, [], f"started branch ledger {branch} from {parent}"
+
+    run_command(
+        command="branch.start",
+        result_type="branch_start",
+        json_output=state.json_output,
+        produce=produce,
+    )
+
+
+@branch_app.command("merge")
+def branch_merge_command(
+    ctx: typer.Context,
+    branch: Annotated[str, typer.Argument(help="Branch ledger ref to merge from.")],
+    into: Annotated[
+        str,
+        typer.Option("--into", help="Target ledger ref to merge into."),
+    ],
+    release: Annotated[
+        str,
+        typer.Option("--release", help="Release version to merge entries for."),
+    ],
+) -> None:
+    """Merge branch entries into a target ledger by source_refs."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        workspace_root = _paths(ctx).workspace_root
+        result = branch_merge(
+            workspace_root,
+            branch_ref=branch,
+            into_ref=into,
+            release_version=release,
+        )
+        added = result.get("merged_count", 0)
+        human = f"merged {added} entry/entries from {branch} into {into}"
+        warnings = result.get("warnings", [])
+        if isinstance(warnings, list) and warnings:
+            human += "\n" + "\n".join(f"  warning: {w}" for w in warnings)
+        return result, [], human
+
+    run_command(
+        command="branch.merge",
+        result_type="branch_merge",
         json_output=state.json_output,
         produce=produce,
     )

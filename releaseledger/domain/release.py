@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 import ledgercore
 
+from releaseledger.domain.source_ref import normalize_source_ref
 from releaseledger.domain.states import (
     RELEASE_STATUSES,
     RELEASELEDGER_FILE_VERSION,
@@ -47,6 +48,12 @@ RELEASE_FRONT_MATTER_KEY_ORDER = (
     "source_count",
     "entry_count",
     "artifact_count",
+    "git_base_ref",
+    "git_base_sha",
+    "git_head_ref",
+    "git_head_sha",
+    "git_range",
+    "git_commit_count",
 )
 
 
@@ -70,6 +77,12 @@ class ReleaseRecord:
     source_count: int | None = None
     entry_count: int = 0
     artifact_count: int = 0
+    git_base_ref: str | None = None
+    git_base_sha: str | None = None
+    git_head_ref: str | None = None
+    git_head_sha: str | None = None
+    git_range: str | None = None
+    git_commit_count: int | None = None
     file_version: str = RELEASELEDGER_FILE_VERSION
     schema_version: int = RELEASELEDGER_SCHEMA_VERSION
     object_type: str = "release"
@@ -96,6 +109,12 @@ class ReleaseRecord:
             "source_count": self.source_count,
             "entry_count": self.entry_count,
             "artifact_count": self.artifact_count,
+            "git_base_ref": self.git_base_ref,
+            "git_base_sha": self.git_base_sha,
+            "git_head_ref": self.git_head_ref,
+            "git_head_sha": self.git_head_sha,
+            "git_range": self.git_range,
+            "git_commit_count": self.git_commit_count,
         }
 
     def to_front_matter(self) -> dict[str, object]:
@@ -153,10 +172,10 @@ def _require_str_tuple(value: object, field_name: str) -> tuple[str, ...]:
                 exit_code=2,
             )
         try:
-            canonical = ledgercore.parse_global_ref(item).global_ref
-        except ledgercore.IdFormatError as exc:
+            canonical = normalize_source_ref(item)
+        except LaunchError as exc:
             raise LaunchError(
-                f"Invalid release source ref {item!r}: {exc}",
+                f"Invalid release source ref {item!r}: {exc.message}",
                 code=CODE_VALIDATION_ERROR,
                 exit_code=2,
             ) from exc
@@ -170,10 +189,10 @@ def _require_optional_global_ref(value: object, field_name: str) -> str | None:
         return None
     raw = _require_str(value, field_name)
     try:
-        return ledgercore.parse_global_ref(raw).global_ref
-    except ledgercore.IdFormatError as exc:
+        return normalize_source_ref(raw)
+    except LaunchError as exc:
         raise LaunchError(
-            f"Invalid release {field_name} {raw!r}: {exc}",
+            f"Invalid release {field_name} {raw!r}: {exc.message}",
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
         ) from exc
@@ -291,6 +310,14 @@ def release_from_dict(data: dict[str, object]) -> ReleaseRecord:
         source_count=_require_optional_int(data.get("source_count"), "source_count"),
         entry_count=_require_int(data.get("entry_count", 0), "entry_count"),
         artifact_count=_require_int(data.get("artifact_count", 0), "artifact_count"),
+        git_base_ref=_require_optional_str(data.get("git_base_ref"), "git_base_ref"),
+        git_base_sha=_require_optional_str(data.get("git_base_sha"), "git_base_sha"),
+        git_head_ref=_require_optional_str(data.get("git_head_ref"), "git_head_ref"),
+        git_head_sha=_require_optional_str(data.get("git_head_sha"), "git_head_sha"),
+        git_range=_require_optional_str(data.get("git_range"), "git_range"),
+        git_commit_count=_require_optional_int(
+            data.get("git_commit_count"), "git_commit_count"
+        ),
         file_version=_require_str(
             data.get("file_version", RELEASELEDGER_FILE_VERSION), "file_version"
         ),

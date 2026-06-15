@@ -12,6 +12,8 @@ metadata:
 
 Use releaseledger when a project needs durable, project-local release state: release records, release notes, changelog entries, generated changelog source, or updates to `CHANGELOG.md`.
 
+Releaseledger is git-first. Git commit ranges are the canonical evidence of shipped changes. Taskledger, issue trackers, and PR descriptions are optional provenance.
+
 Releaseledger is separate from taskledger. Do not treat `.releaseledger/` as task state and do not require taskledger to be installed.
 
 ## Never do these things
@@ -54,7 +56,10 @@ releaseledger entry lint VERSION --strict
 releaseledger entry prompt VERSION --source-ref REF --context-file FILE
 releaseledger changelog VERSION --format markdown|json
 releaseledger build VERSION --dry-run
-releaseledger review VERSION [--strict]
+releaseledger review VERSION [--strict] [--git] [--git-base REF] [--git-head REF]
+releaseledger git range VERSION [--base REF] [--head REF]
+releaseledger git import VERSION --base REF [--head REF] --output PATH
+releaseledger branch status
 releaseledger build VERSION --target-file CHANGELOG.md
 releaseledger storage where
 releaseledger config show
@@ -240,6 +245,8 @@ releaseledger review VERSION
 releaseledger --json review VERSION
 releaseledger review VERSION --include-status accepted --include-status draft
 releaseledger review VERSION --strict --target-file CHANGELOG.md
+releaseledger review VERSION --git --strict
+releaseledger review VERSION --git --git-base v1.1.0 --git-head HEAD --strict
 ```
 
 Rules:
@@ -248,18 +255,53 @@ Rules:
    covered by an accepted entry, update the existing entry instead of adding a
    duplicate. Search by `source_refs`, then `prs`/`issues`, then `sources`,
    then a kind+summary+paths fingerprint as a last resort.
-2. Each expected ref (`release.source_refs` plus `boundary_ref`) is classified
-   as `covered`, `draft_only`, `rejected_only`, `internal_only`, or `missing`.
+2. Each expected ref (`release.source_refs` plus coverable `boundary_ref`) is
+   classified as `covered`, `draft_only`, `rejected_only`, `internal_only`, or
+   `missing`. Non-coverable boundary refs (`git-range:*`, `git-tag:*`, etc.)
+   produce no coverage row.
+3. With `--git`, expected refs also include `git:<sha>` for every
+   include_by_default commit in the range. Strict mode fails when any such
+   commit has no accepted entry coverage.
    Treat `draft_only` as pending review and `rejected_only` as possibly
    intentional; confirm before re-adding.
-3. Orphan accepted entries (no `source_refs`, `issues`, `prs`, or `sources`)
+4. Orphan accepted entries (no `source_refs`, `issues`, `prs`, or `sources`)
    should get provenance or be removed.
-4. `--strict` exits non-zero when the release is not OK. It mirrors `build --strict`, so it can fail on uncovered refs, lint errors, a missing release
+5. `--strict` exits non-zero when the release is not OK. It mirrors `build --strict`, so it can fail on uncovered refs, lint errors, a missing release
    date in Keep a Changelog mode, or other build blockers. Review alone never
    writes the changelog.
-5. Do not infer "already added" from a changed file path or a Git hash alone.
-   Treat Git hashes as optional evidence in entry `sources`, never in
-   `source_refs`.
+6. `git:<sha>` source refs are first-class coverage identities (not just evidence). A commit in the release range should have an accepted entry covering its `git:<sha>` in `source_refs`.
+
+## Git-first workflow
+
+The recommended workflow uses git commit ranges as the canonical evidence:
+
+```bash
+# 1. Create release and attach git range.
+releaseledger release create VERSION --previous PREV_VERSION --released-at YYYY-MM-DD
+releaseledger release update VERSION --git-base PREV_TAG --git-head HEAD
+
+# 2. Generate candidate entries from commits.
+releaseledger git import VERSION --base PREV_TAG --head HEAD --status draft --output entries.yaml
+
+# 3. Edit entries.yaml: curate summaries, mark internal-only work, combine small commits.
+
+# 4. Add entries.
+releaseledger entry add-many VERSION --file entries.yaml --dry-run
+releaseledger entry add-many VERSION --file entries.yaml
+
+# 5. Review git coverage.
+releaseledger review VERSION --git --strict
+
+# 6. Build changelog.
+releaseledger build VERSION --release-date YYYY-MM-DD --strict --target-file CHANGELOG.md
+```
+
+Key rules:
+
+- One entry may cover multiple commits (combine tiny commits into one user-facing entry).
+- Preserve all `git:<sha>` source_refs on the combined entry.
+- Mark internal-only work as internal or rejected.
+- If a commit exists but no task exists, include it or mark it internal/rejected.
 
 ## Templating protocol
 

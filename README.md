@@ -13,10 +13,21 @@ events, and JSON indexes in a deterministic file layout. It can also render
 reviewable changelog context and write final `CHANGELOG.md` sections from
 releaseledger entries.
 
-Releaseledger reuses [`ledgercore`](https://github.com/holgern/ledgercore) for
 typed file-storage primitives. It does not import `taskledger`, inspect
 `.taskledger/`, or validate task state. Cross-ledger provenance is represented
 only as explicit refs such as `tl:task-0103`.
+
+**Git-first.** Releaseledger uses git commit ranges as the canonical evidence
+of shipped changes. Git tags and commit ranges define the shipped change set.
+Taskledger, issue trackers, and PR descriptions are optional provenance context.
+Release notes are generated from the commits reachable from the release target
+and absent from the previous release target:
+
+```bash
+releaseledger git range 1.2.0 --base v1.1.0 --head HEAD
+releaseledger git import 1.2.0 --base v1.1.0 --head HEAD --output entries.yaml
+releaseledger review 1.2.0 --git --strict
+```
 
 ## What releaseledger stores
 
@@ -60,35 +71,41 @@ The package exposes the console command `releaseledger` and supports
 ## Quickstart
 
 ```bash
+# 1. Initialize.
 releaseledger init
 
+# 2. Create the release and attach the git range.
 releaseledger release create 1.2.0 \
-  --title "Release 1.2.0" \
-  --boundary-ref tl:task-0105 \
-  --source-ref tl:task-0103
+  --previous 1.1.0 \
+  --released-at 2026-06-14
 
-releaseledger entry add 1.2.0 \
-  --kind added \
-  --summary "Added release bundle storage" \
-  --status accepted \
-  --source-ref tl:task-0103
+releaseledger release update 1.2.0 \
+  --git-base v1.1.0 \
+  --git-head HEAD
 
-releaseledger entry lint 1.2.0 --strict
+# 3. Generate git candidate entries from the commit range.
+releaseledger git import 1.2.0 \
+  --base v1.1.0 \
+  --head HEAD \
+  --status draft \
+  --output /tmp/1.2.0-git-entries.yaml
 
-releaseledger changelog 1.2.0 \
-  --target-changelog CHANGELOG.md \
-  --release-date 2026-06-13
+# Edit the YAML summaries, then:
+releaseledger entry add-many 1.2.0 --file /tmp/1.2.0-git-entries.yaml --dry-run
+releaseledger entry add-many 1.2.0 --file /tmp/1.2.0-git-entries.yaml
 
+# 4. Review git coverage.
+releaseledger review 1.2.0 --git --strict
+
+# 5. Build the changelog.
 releaseledger build 1.2.0 \
-  --dry-run \
-  --strict \
-  --target-file CHANGELOG.md
-
-releaseledger build 1.2.0 \
-  --release-date 2026-06-13 \
+  --release-date 2026-06-14 \
   --strict \
   --target-file CHANGELOG.md
 ```
+
+Taskledger refs (`tl:task-0103`) and PR refs (`github:pr-42`) are optional
+provenance — use them to enrich entries, but git commits are the coverage source.
 
 `changelog` produces agent-facing context for review or drafting. `build`
 renders and inserts the final changelog section.
@@ -196,6 +213,18 @@ releaseledger build VERSION [--target-file PATH]
 releaseledger review VERSION [--include-internal]
                        [--include-status STATUS]...
                        [--target-file PATH] [--strict]
+                       [--git] [--git-base REF] [--git-head REF]
+
+releaseledger git range VERSION [--base REF] [--head REF]
+                      [--include-merges never|always|nontrivial]
+releaseledger git range next --base REF [--head REF]
+releaseledger git import VERSION --base REF [--head REF]
+                      [--status draft] --output PATH
+releaseledger git import next --base REF [--head REF] --output PATH
+
+releaseledger branch status
+releaseledger branch start BRANCH --parent PARENT
+releaseledger branch merge BRANCH --into TARGET --release VERSION
 
 releaseledger changelog-section remove-section VERSION --target-file PATH
                                               [--ignore-missing] [--dry-run]

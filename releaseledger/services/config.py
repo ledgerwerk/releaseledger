@@ -124,6 +124,17 @@ def config_show(workspace_root: Path) -> dict[str, object]:
                 "header": config.changelog_header,
                 "footer": config.changelog_footer,
             },
+            "git": {
+                "enabled": config.git_enabled,
+                "default_base": config.git_default_base,
+                "default_head": config.git_default_head,
+                "previous_tag_patterns": list(config.git_previous_tag_patterns),
+                "include_merges": config.git_include_merges,
+                "require_clean_worktree": config.git_require_clean_worktree,
+                "max_commits": config.git_max_commits,
+                "max_diff_chars_per_commit": config.git_max_diff_chars_per_commit,
+                "candidate_status": config.git_candidate_status,
+            },
         }
     return {
         "kind": "config_show",

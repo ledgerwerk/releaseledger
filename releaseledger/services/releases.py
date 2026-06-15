@@ -28,6 +28,7 @@ from releaseledger.domain.release import (
     ReleaseRecord,
     parse_release_version_tuple,
 )
+from releaseledger.domain.source_ref import normalize_source_ref
 from releaseledger.domain.states import RELEASE_STATUSES
 from releaseledger.errors import (
     CODE_CONFLICT,
@@ -41,6 +42,11 @@ from releaseledger.services.changelog_build import (
     rename_release_section,
 )
 from releaseledger.services.events import append_event
+from releaseledger.services.git_sources import (
+    GIT_DEFAULT_HEAD,
+    build_git_range_summary,
+    resolve_git_ref,
+)
 from releaseledger.storage.paths import resolve_project_paths
 from releaseledger.storage.store import (
     list_releases,
@@ -192,30 +198,95 @@ def _validate_source_metadata(
     source_refs: tuple[str, ...],
     source_count: int | None,
 ) -> tuple[str | None, tuple[str, ...], int | None]:
-    try:
-        boundary = (
-            ledgercore.parse_global_ref(boundary_ref).global_ref
-            if boundary_ref is not None
-            else None
-        )
-        refs = tuple(
-            dict.fromkeys(
-                ledgercore.parse_global_ref(ref).global_ref for ref in source_refs
-            )
-        )
-    except ledgercore.IdFormatError as exc:
-        raise LaunchError(
-            f"Invalid release source reference: {exc}",
-            code=CODE_VALIDATION_ERROR,
-            exit_code=2,
-        ) from exc
+    boundary: str | None = None
+    if boundary_ref is not None:
+        try:
+            boundary = normalize_source_ref(boundary_ref)
+        except LaunchError as exc:
+            raise LaunchError(
+                f"Invalid release boundary ref {boundary_ref!r}: {exc.message}",
+                code=CODE_VALIDATION_ERROR,
+                exit_code=2,
+            ) from exc
+    refs: list[str] = []
+    for ref in source_refs:
+        try:
+            canonical = normalize_source_ref(ref)
+        except LaunchError as exc:
+            raise LaunchError(
+                f"Invalid release source ref {ref!r}: {exc.message}",
+                code=CODE_VALIDATION_ERROR,
+                exit_code=2,
+            ) from exc
+        if canonical not in refs:
+            refs.append(canonical)
+    refs_tuple = tuple(refs)
     if source_count is not None and source_count < 0:
         raise LaunchError(
             "--source-count must be zero or greater.",
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
         )
-    return boundary, refs, source_count
+    return boundary, refs_tuple, source_count
+
+
+def _resolve_git_range(
+    workspace_root: Path,
+    *,
+    existing: ReleaseRecord,
+    git_base_ref: str | None,
+    git_head_ref: str | None,
+    clear_git_range: bool,
+) -> dict[str, object]:
+    """Resolve --git-base/--git-head into stored git metadata.
+
+    Returns the six git_* fields (refs/SHAs/range/count). When neither ref is
+    supplied and clear_git_range is False, returns the existing values unchanged
+    (so absence does not wipe stored git metadata). Per design §7.2, resolving
+    the range does NOT auto-add source refs.
+
+    Raises LaunchError when the workspace is not a git worktree or a ref cannot
+    be resolved (git is optional overall, but --git-base/--git-head are an
+    explicit git operation).
+    """
+    keys = (
+        "git_base_ref",
+        "git_base_sha",
+        "git_head_ref",
+        "git_head_sha",
+        "git_range",
+        "git_commit_count",
+    )
+    if clear_git_range:
+        return {key: None for key in keys}
+    base_supplied = git_base_ref is not None and git_base_ref is not UNSET
+    head_supplied = git_head_ref is not None and git_head_ref is not UNSET
+    if not base_supplied and not head_supplied:
+        return {key: getattr(existing, key) for key in keys}
+    base = git_base_ref if base_supplied else existing.git_base_ref
+    head = git_head_ref if head_supplied else existing.git_head_ref
+    if base is None:
+        raise LaunchError(
+            "--git-head requires --git-base (or a previously stored git base).",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+            remediation=["Pass --git-base to set the release range base."],
+        )
+    if head is None:
+        head = GIT_DEFAULT_HEAD
+    base_sha = resolve_git_ref(workspace_root, str(base))
+    head_sha = resolve_git_ref(workspace_root, str(head))
+    summary = build_git_range_summary(
+        workspace_root, base_ref=str(base), head_ref=str(head)
+    )
+    return {
+        "git_base_ref": str(base),
+        "git_base_sha": base_sha,
+        "git_head_ref": str(head),
+        "git_head_sha": head_sha,
+        "git_range": summary["range"],
+        "git_commit_count": summary["commit_count"],
+    }
 
 
 def _release_payload(
@@ -452,6 +523,9 @@ def update_release(
     clear_source_refs: bool = False,
     clear_source_count: bool = False,
     clear_released_at: bool = False,
+    git_base_ref: str | None = UNSET,
+    git_head_ref: str | None = UNSET,
+    clear_git_range: bool = False,
     force: bool = False,
 ) -> dict[str, object]:
     """Update explicitly supplied release metadata.
@@ -528,6 +602,16 @@ def update_release(
     )
     if clear_source_refs:
         refs = ()
+    # Git range resolution: when --git-base/--git-head are supplied, resolve
+    # them to full SHAs, store the range metadata, and count commits. Does NOT
+    # auto-add source refs (the user/agent curates entries from `git import`).
+    resolved_git = _resolve_git_range(
+        workspace_root,
+        existing=existing,
+        git_base_ref=git_base_ref,
+        git_head_ref=git_head_ref,
+        clear_git_range=clear_git_range,
+    )
     values: dict[str, object] = {
         "title": title if title is not None else existing.title,
         "status": status if status is not None else existing.status,
@@ -538,6 +622,7 @@ def update_release(
         "boundary_ref": boundary,
         "source_refs": refs,
         "source_count": count,
+        **resolved_git,
     }
     if all(getattr(existing, key) == value for key, value in values.items()):
         raise LaunchError(
@@ -556,6 +641,12 @@ def update_release(
         boundary_ref=boundary,
         source_refs=refs,
         source_count=count,
+        git_base_ref=resolved_git["git_base_ref"],
+        git_base_sha=resolved_git["git_base_sha"],
+        git_head_ref=resolved_git["git_head_ref"],
+        git_head_sha=resolved_git["git_head_sha"],
+        git_range=resolved_git["git_range"],
+        git_commit_count=resolved_git["git_commit_count"],
     )
     save_release(workspace_root, updated, overwrite=True)
     event = append_event(
