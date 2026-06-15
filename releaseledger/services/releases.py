@@ -326,9 +326,7 @@ def _persist_new_release(
         workspace_root,
         event=event_name,
         release_version=record.version,
-        record_revisions={
-            f"release:{record.version}": record.versioning.revision
-        },
+        record_revisions={f"release:{record.version}": record.versioning.revision},
         data={"status": record.status},
     )
     rebuild_indexes(workspace_root)
@@ -990,9 +988,9 @@ def rename_release(
         f"release:{new_version}": new_record.versioning.revision,
     }
     for entry in load_entries(workspace_root, new_version):
-        record_revisions[
-            f"entry:{new_version}/{entry.entry_id}"
-        ] = entry.versioning.revision
+        record_revisions[f"entry:{new_version}/{entry.entry_id}"] = (
+            entry.versioning.revision
+        )
     if successors:
         for successor in successors:
             updated_successor = replace(
@@ -1001,9 +999,9 @@ def rename_release(
                 versioning=bump_versioning(successor.versioning),
             )
             save_release(workspace_root, updated_successor, overwrite=True)
-            record_revisions[
-                f"release:{successor.version}"
-            ] = updated_successor.versioning.revision
+            record_revisions[f"release:{successor.version}"] = (
+                updated_successor.versioning.revision
+            )
         rewrote_successors = True
     event = append_event(
         workspace_root,
@@ -1164,9 +1162,7 @@ def repair_release_chain(
             versioning=bump_versioning(record.versioning),
         )
         save_release(workspace_root, updated, overwrite=True)
-        record_revisions[
-            f"release:{record.version}"
-        ] = updated.versioning.revision
+        record_revisions[f"release:{record.version}"] = updated.versioning.revision
     event = append_event(
         workspace_root,
         event=EVENT_RELEASE_CHAIN_REPAIRED,

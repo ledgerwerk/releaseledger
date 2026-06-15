@@ -527,9 +527,9 @@ def import_release_entry_file(
         f"entry:{release_version}/{entry_id}": record.versioning.revision
     }
     if existing is None:
-        record_revisions[
-            f"release:{release_version}"
-        ] = updated_release.versioning.revision
+        record_revisions[f"release:{release_version}"] = (
+            updated_release.versioning.revision
+        )
     event = append_event(
         workspace_root,
         event=EVENT_ENTRY_IMPORTED,

@@ -279,9 +279,7 @@ def save_entry(workspace_root: Path, entry: ReleaseEntryRecord) -> ReleaseEntryR
     return entry
 
 
-def delete_entry(
-    workspace_root: Path, release_version: str, entry_id: str
-) -> None:
+def delete_entry(workspace_root: Path, release_version: str, entry_id: str) -> None:
     """Delete an entry file if it exists; used to roll back partial writes.
 
     Safe to call when no file is present. Does not touch the release record or
@@ -293,6 +291,7 @@ def delete_entry(
     target = _entries_dir(paths, safe_version) / f"{entry_id}.md"
     if target.is_file():
         target.unlink()
+
 
 def load_entries(
     workspace_root: Path, release_version: str

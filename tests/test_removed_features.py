@@ -86,7 +86,7 @@ def test_entry_accepts_quality_and_canonicalizes_source_refs() -> None:
 def test_entry_rejects_invalid_new_metadata(field: str, value: object) -> None:
     data: dict[str, object] = {
         "schema_version": 2,
-            "versioning": {"schema_version": 1, "revision": 1},
+        "versioning": {"schema_version": 1, "revision": 1},
         "object_type": "release_entry",
         "entry_id": "entry-0001",
         "release_version": "1.0.0",
@@ -296,7 +296,7 @@ def test_entry_batch_returns_all_structured_issues(tmp_path: Path) -> None:
         release_from_dict(
             {
                 "schema_version": 2,
-            "versioning": {"schema_version": 1, "revision": 1},
+                "versioning": {"schema_version": 1, "revision": 1},
                 "object_type": "release",
                 "version": "1.0.0",
                 "status": "planned",

@@ -118,8 +118,8 @@ renders and inserts the final changelog section.
 | ----------------- | --------------------------------------------------------------------------------------------------------- |
 | Release           | A versioned release record with status, optional previous version, source boundary, and changelog target. |
 | Entry             | One release-note item attached to a release. Entries are grouped by kind for changelog output.            |
-| Event             | Append-only operation marker with affected record revisions.                                             |
-| Versioning        | Per-record metadata whose revision increases exactly once when a release or entry file changes.          |
+| Event             | Append-only operation marker with affected record revisions.                                              |
+| Versioning        | Per-record metadata whose revision increases exactly once when a release or entry file changes.           |
 | Index             | Deterministic JSON summary rebuilt after mutations for fast inspection.                                   |
 | Ledger ref        | Branch-scoped namespace, defaulting to `main`.                                                            |
 | Global source ref | External provenance token such as `tl:task-0103`; releaseledger records it but does not resolve it.       |

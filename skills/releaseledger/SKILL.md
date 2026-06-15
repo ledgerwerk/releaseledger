@@ -167,9 +167,9 @@ Use this when the user asks to add release-note material.
 9. Verify with:
    `releaseledger entry list VERSION`.
 10. Use `--status accepted` for final notes, `draft` for incomplete notes, and
-   `rejected` for retained-but-excluded proposals.
+    `rejected` for retained-but-excluded proposals.
 11. Link external evidence with `--source-ref tl:task-0103`; never make
-   releaseledger inspect the external ledger.
+    releaseledger inspect the external ledger.
 
 Example:
 
@@ -333,9 +333,9 @@ done < /tmp/releaseledger-shas.txt
 Create an audit worksheet before writing entries:
 
 ```markdown
-| sha | paths inspected | public/API/docs behavior | decision | target entry |
-| --- | --- | --- | --- | --- |
-| <sha> | <paths> | <real effect from patch/tests/docs> | accept/internal/reject/group | <summary or entry id> |
+| sha   | paths inspected | public/API/docs behavior            | decision                     | target entry          |
+| ----- | --------------- | ----------------------------------- | ---------------------------- | --------------------- |
+| <sha> | <paths>         | <real effect from patch/tests/docs> | accept/internal/reject/group | <summary or entry id> |
 ```
 
 Rules for the worksheet:

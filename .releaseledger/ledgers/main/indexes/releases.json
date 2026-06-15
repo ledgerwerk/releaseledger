@@ -1,0 +1,44 @@
+[
+  {
+    "artifact_count": 0,
+    "boundary_ref": null,
+    "changelog_file": null,
+    "entry_count": 10,
+    "previous_version": "0.2.0",
+    "record_revision": 3,
+    "released_at": null,
+    "source_count": null,
+    "source_refs": [],
+    "status": "planned",
+    "title": "Release 0.3.0",
+    "version": "0.3.0"
+  },
+  {
+    "artifact_count": 0,
+    "boundary_ref": null,
+    "changelog_file": null,
+    "entry_count": 23,
+    "previous_version": null,
+    "record_revision": 5,
+    "released_at": "2026-06-14",
+    "source_count": null,
+    "source_refs": [],
+    "status": "released",
+    "title": "Release 0.1.0",
+    "version": "0.1.0"
+  },
+  {
+    "artifact_count": 0,
+    "boundary_ref": null,
+    "changelog_file": null,
+    "entry_count": 16,
+    "previous_version": "0.1.0",
+    "record_revision": 7,
+    "released_at": "2026-06-14",
+    "source_count": null,
+    "source_refs": [],
+    "status": "released",
+    "title": "Release 0.2.0",
+    "version": "0.2.0"
+  }
+]

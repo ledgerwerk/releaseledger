@@ -1750,9 +1750,7 @@ def _run_git_range(
         "merge_commits_skipped": skipped,
         "candidate_count": len(candidates),
         "include_merges": include_merges,
-        "candidates": [
-            _candidate_payload(c, evidence=evidence) for c in candidates
-        ],
+        "candidates": [_candidate_payload(c, evidence=evidence) for c in candidates],
     }
     if state.json_output:
         payload: dict[str, object] = {
@@ -1773,9 +1771,7 @@ def _run_git_range(
     lines.append("")
     lines.append("Candidates:")
     for c in candidates:
-        lines.append(
-            f"  {c.source_ref:<52} {c.inferred_kind:<12} {c.subject[:72]}"
-        )
+        lines.append(f"  {c.source_ref:<52} {c.inferred_kind:<12} {c.subject[:72]}")
         if evidence:
             paths_line = ", ".join(c.paths[:6]) + ("  ..." if len(c.paths) > 6 else "")
             lines.append(f"    paths: {len(c.paths)}  {paths_line}")
@@ -1945,7 +1941,9 @@ def git_import_command(
     lines.append(f"  entries: {len(yaml_entries)} (status={status})")
     lines.append("")
     lines.append("Next steps:")
-    lines.append("  edit the YAML and write user-facing summaries from diffs/docs/tests")
+    lines.append(
+        "  edit the YAML and write user-facing summaries from diffs/docs/tests"
+    )
     lines.append("  do not copy or paraphrase git commit messages into summaries")
     lines.append(f"  releaseledger entry add-many {version} --file {output} --dry-run")
     lines.append(f"  releaseledger entry add-many {version} --file {output}")

@@ -582,8 +582,6 @@ def _infer_kind(subject: str) -> str:
     return "changed"
 
 
-
-
 def build_git_range_summary(
     workspace_root: Path,
     *,
