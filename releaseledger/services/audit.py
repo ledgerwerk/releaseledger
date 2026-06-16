@@ -56,6 +56,7 @@ __all__ = [
     "subject_matches_evidence_subject",
 ]
 
+
 def _as_int(value: object) -> int:
     """Coerce a report dict value to int for typed callers."""
     if isinstance(value, bool) or not isinstance(value, int):
@@ -331,9 +332,7 @@ def _render_markdown(sheet: CommitAuditSheetRecord) -> str:
     lines: list[str] = [
         f"# Commit audit sheet: {sheet.release_version}",
         "",
-        f"- range: `{sheet.git_range}`"
-        if sheet.git_range
-        else "- range: (unknown)",
+        f"- range: `{sheet.git_range}`" if sheet.git_range else "- range: (unknown)",
     ]
     if sheet.git_base_sha and sheet.git_head_sha:
         lines.append(
@@ -417,9 +416,7 @@ def _analyze_coverage(
 ) -> dict[str, list[str]]:
     """Compute per-row coverage gaps and subject-summary violations."""
     public_refs = _accepted_source_refs(entries, visible_internal=False)
-    internal_refs = (
-        _accepted_source_refs(entries, visible_internal=True) - public_refs
-    )
+    internal_refs = _accepted_source_refs(entries, visible_internal=True) - public_refs
     missing: list[str] = []
     internal_only: list[str] = []
     for row in sheet.rows:
@@ -431,9 +428,7 @@ def _analyze_coverage(
             if include_internal and ref not in internal_refs:
                 missing.append(ref)
             elif (
-                not include_internal
-                and ref in internal_refs
-                and ref not in public_refs
+                not include_internal and ref in internal_refs and ref not in public_refs
             ):
                 internal_only.append(ref)
     internal_missing = [
@@ -444,9 +439,7 @@ def _analyze_coverage(
         and r.source_ref not in internal_refs
     ]
     subjects = {
-        r.source_ref: r.evidence_subject
-        for r in sheet.rows
-        if r.evidence_subject
+        r.source_ref: r.evidence_subject for r in sheet.rows if r.evidence_subject
     }
     violations: list[str] = []
     for entry in entries:
@@ -535,9 +528,7 @@ def validate_commit_audit_sheet(
                 workspace_root,
                 event="audit.validated",
                 release_version=version,
-                record_revisions={
-                    "commit_audit_sheet": sheet.versioning.revision
-                },
+                record_revisions={"commit_audit_sheet": sheet.versioning.revision},
                 data={"ok": False, "blockers": blockers},
             )
             raise LaunchError(
@@ -650,11 +641,7 @@ def collect_commit_subjects(
     """
     sheet = load_commit_audit_sheet(workspace_root, version)
     if sheet is not None:
-        return [
-            r.evidence_subject
-            for r in sheet.rows
-            if r.evidence_subject
-        ]
+        return [r.evidence_subject for r in sheet.rows if r.evidence_subject]
     # Fall back to the stored release git range.
     release = load_release(workspace_root, version)
     base = release.git_base_ref

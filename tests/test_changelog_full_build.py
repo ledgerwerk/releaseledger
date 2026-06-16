@@ -232,7 +232,16 @@ class TestFullBuild:
         # A planned (not released) release should be excluded by default.
         result = _run(tmp_path, "release", "create", "0.2.0")
         assert result.exit_code == 0, _human_error(result)
-        _run(tmp_path, "entry", "add", "0.2.0", "--kind", "added", "--summary", "Planned two")  # noqa: E501
+        _run(
+            tmp_path,
+            "entry",
+            "add",
+            "0.2.0",
+            "--kind",
+            "added",
+            "--summary",
+            "Planned two",
+        )  # noqa: E501
         # A canceled release should be excluded by default.
         result = _run(
             tmp_path,
@@ -270,7 +279,16 @@ class TestFullBuild:
         # Create a candidate/planned release with an entry.
         result = _run(tmp_path, "release", "create", "0.2.0")
         assert result.exit_code == 0, _human_error(result)
-        _run(tmp_path, "entry", "add", "0.2.0", "--kind", "added", "--summary", "Planned two")  # noqa: E501
+        _run(
+            tmp_path,
+            "entry",
+            "add",
+            "0.2.0",
+            "--kind",
+            "added",
+            "--summary",
+            "Planned two",
+        )  # noqa: E501
 
         # Default excludes the planned release.
         default = _run(tmp_path, "build", "--dry-run")
@@ -323,7 +341,9 @@ class TestFullBuild:
         assert result.exit_code == 0, _human_error(result)
         result = _run(tmp_path, "release", "update", "0.1.0", "--status", "released")
         assert result.exit_code == 0, _human_error(result)
-        _run(tmp_path, "entry", "add", "0.1.0", "--kind", "added", "--summary", "Feature")  # noqa: E501
+        _run(
+            tmp_path, "entry", "add", "0.1.0", "--kind", "added", "--summary", "Feature"
+        )  # noqa: E501
         strict = _run(tmp_path, "build", "--strict")
         assert strict.exit_code != 0
         assert "date" in _human_error(strict).lower()
@@ -342,9 +362,7 @@ class TestFullBuild:
         ok = _run(tmp_path, "build", "--strict", "--allow-empty")
         assert ok.exit_code == 0, _human_error(ok)
 
-    def test_full_build_writes_exactly_one_final_newline(
-        self, tmp_path: Path
-    ) -> None:
+    def test_full_build_writes_exactly_one_final_newline(self, tmp_path: Path) -> None:
         self._seed_two_releases(tmp_path)
         result = _run(tmp_path, "build")
         assert result.exit_code == 0, _human_error(result)
@@ -383,9 +401,7 @@ class TestFullBuild:
         _write_keepachangelog_config(
             tmp_path, repository_url="https://example.com/owner/repo"
         )
-        _seed_release(
-            tmp_path, "0.1.0", released_at="2026-01-10", summary="First"
-        )
+        _seed_release(tmp_path, "0.1.0", released_at="2026-01-10", summary="First")
         _seed_release(
             tmp_path,
             "0.2.0",
@@ -396,7 +412,9 @@ class TestFullBuild:
         result = _run(tmp_path, "build")
         assert result.exit_code == 0, _human_error(result)
         text = (tmp_path / "CHANGELOG.md").read_text()
-        assert "[Unreleased]: https://example.com/owner/repo/compare/v0.2.0...HEAD" in text  # noqa: E501
+        assert (
+            "[Unreleased]: https://example.com/owner/repo/compare/v0.2.0...HEAD" in text
+        )  # noqa: E501
         assert "[0.2.0]: https://example.com/owner/repo/compare/v0.1.0...v0.2.0" in text
         assert "[0.1.0]: https://example.com/owner/repo/releases/tag/v0.1.0" in text
 

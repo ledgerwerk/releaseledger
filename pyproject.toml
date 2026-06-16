@@ -57,10 +57,10 @@ license-files = ["LICENSE"]
 releaseledger = "releaseledger.launcher:main"
 
 [project.urls]
-Homepage = "https://github.com/holgern/releaseledger"
-Repository = "https://github.com/holgern/releaseledger"
-Issues = "https://github.com/holgern/releaseledger/issues"
-Changelog = "https://github.com/holgern/releaseledger/releases"
+Homepage = "https://github.com/ledgerwerk/releaseledger"
+Repository = "https://github.com/ledgerwerk/releaseledger"
+Issues = "https://github.com/ledgerwerk/releaseledger/issues"
+Changelog = "https://github.com/ledgerwerk/releaseledger/releases"
 
 [project.optional-dependencies]
 dev = [

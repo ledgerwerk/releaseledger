@@ -129,9 +129,7 @@ class TestAuditInit:
         assert payload["result_type"] == "commit_audit_sheet_created"
         assert int(payload["result"]["row_count"]) == 2
 
-    def test_init_uses_stored_release_range_when_omitted(
-        self, tmp_path: Path
-    ) -> None:
+    def test_init_uses_stored_release_range_when_omitted(self, tmp_path: Path) -> None:
         repo, _sha_a, _sha_b = _seed_range(tmp_path)
         payload = _jrun(repo, "audit", "init", "0.2.0")
         assert payload["result"]["git_range"]
@@ -187,9 +185,7 @@ class TestAuditUpdate:
         data = export["result"]["sheet"]
         data["rows"][0]["decision"] = "bogus"
         sheet_path.write_text(yaml.safe_dump(data))
-        result = _run(
-            repo, "audit", "update", "0.2.0", "--file", str(sheet_path)
-        )
+        result = _run(repo, "audit", "update", "0.2.0", "--file", str(sheet_path))
         assert result.exit_code != 0
         assert "decision" in _human_error(result).lower()
 
@@ -203,9 +199,7 @@ class TestAuditUpdate:
         data["rows"] = [r for r in data["rows"] if r["sha"] == sha_a]
         data["commit_count"] = 1
         sheet_path.write_text(yaml.safe_dump(data))
-        result = _run(
-            repo, "audit", "update", "0.2.0", "--file", str(sheet_path)
-        )
+        result = _run(repo, "audit", "update", "0.2.0", "--file", str(sheet_path))
         assert result.exit_code != 0
         assert "missing" in _human_error(result).lower()
 
@@ -231,20 +225,24 @@ class TestAuditValidate:
             if not row.get("evidence_subject"):
                 row["evidence_subject"] = "internal: scaffold"
         sheet_path.write_text(yaml.safe_dump(data))
-        assert _run(
-            repo, "audit", "update", "0.2.0", "--file", str(sheet_path)
-        ).exit_code == 0
+        assert (
+            _run(repo, "audit", "update", "0.2.0", "--file", str(sheet_path)).exit_code
+            == 0
+        )
         if entries:
             batch = {"entries": entries}
             (repo / "entries.yaml").write_text(yaml.safe_dump(batch))
-            assert _run(
-                repo,
-                "entry",
-                "add-many",
-                "0.2.0",
-                "--file",
-                str(repo / "entries.yaml"),
-            ).exit_code == 0
+            assert (
+                _run(
+                    repo,
+                    "entry",
+                    "add-many",
+                    "0.2.0",
+                    "--file",
+                    str(repo / "entries.yaml"),
+                ).exit_code
+                == 0
+            )
 
     def test_strict_fails_uninspected(self, tmp_path: Path) -> None:
         repo, sha_a, sha_b = _seed_range(tmp_path)
@@ -263,15 +261,14 @@ class TestAuditValidate:
         for row in data["rows"]:
             row["inspected"] = True
         sheet_path.write_text(yaml.safe_dump(data))
-        assert _run(
-            repo, "audit", "update", "0.2.0", "--file", str(sheet_path)
-        ).exit_code == 0
+        assert (
+            _run(repo, "audit", "update", "0.2.0", "--file", str(sheet_path)).exit_code
+            == 0
+        )
         result = _run(repo, "audit", "validate", "0.2.0", "--strict")
         assert result.exit_code != 0
 
-    def test_strict_fails_when_accepted_lacks_coverage(
-        self, tmp_path: Path
-    ) -> None:
+    def test_strict_fails_when_accepted_lacks_coverage(self, tmp_path: Path) -> None:
         repo, sha_a, sha_b = _seed_range(tmp_path)
         self._seed_sheet(repo, sha_a, sha_b, entries=[])
         result = _run(repo, "audit", "validate", "0.2.0", "--strict")
@@ -312,16 +309,17 @@ class TestAuditSync:
             ]
         }
         (repo / "entries.yaml").write_text(yaml.safe_dump(batch))
-        assert _run(
-            repo, "entry", "add-many", "0.2.0", "--file", str(repo / "entries.yaml")
-        ).exit_code == 0
+        assert (
+            _run(
+                repo, "entry", "add-many", "0.2.0", "--file", str(repo / "entries.yaml")
+            ).exit_code
+            == 0
+        )
         payload = _jrun(repo, "audit", "sync", "0.2.0")
         assert payload["result_type"] == "commit_audit_sync"
         assert int(payload["result"]["updated_rows"]) == 2
         show = _jrun(repo, "audit", "show", "0.2.0", "--format", "json")
-        targets = {
-            r.get("target_entry_id") for r in show["result"]["sheet"]["rows"]
-        }
+        targets = {r.get("target_entry_id") for r in show["result"]["sheet"]["rows"]}
         assert targets == {"entry-0001"}
 
 

@@ -224,9 +224,7 @@ def _row_from_dict(value: object) -> CommitAuditRow:
         )
     sha = validate_sha(_require_str(value.get("sha"), "sha"))
     source_ref = f"git:{sha}"
-    raw_source_ref = _require_str(
-        value.get("source_ref", source_ref), "source_ref"
-    )
+    raw_source_ref = _require_str(value.get("source_ref", source_ref), "source_ref")
     if raw_source_ref != source_ref:
         raise LaunchError(
             f"Audit row source_ref {raw_source_ref!r} must equal git:{sha} "
@@ -302,9 +300,7 @@ def audit_sheet_from_dict(data: dict[str, object]) -> CommitAuditSheetRecord:
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
         )
-    release_version = _require_str(
-        data.get("release_version"), "release_version"
-    )
+    release_version = _require_str(data.get("release_version"), "release_version")
     if not release_version.strip():
         raise LaunchError(
             "Audit sheet release_version must be a non-empty string.",
@@ -317,9 +313,7 @@ def audit_sheet_from_dict(data: dict[str, object]) -> CommitAuditSheetRecord:
     git_head_ref = _require_optional_str(data.get("git_head_ref"), "git_head_ref")
     git_head_sha = _require_optional_str(data.get("git_head_sha"), "git_head_sha")
     git_range = _require_optional_str(data.get("git_range"), "git_range")
-    commit_count = _require_int(
-        data.get("commit_count", 0), "commit_count"
-    )
+    commit_count = _require_int(data.get("commit_count", 0), "commit_count")
     raw_rows = data.get("rows", [])
     if not isinstance(raw_rows, (list, tuple)):
         raise LaunchError(

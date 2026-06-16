@@ -72,7 +72,7 @@ def _sheet(rows: tuple[CommitAuditRow, ...] = ()) -> CommitAuditSheetRecord:
         git_base_sha="1" * 40,
         git_head_ref="v0.2.0",
         git_head_sha="2" * 40,
-        git_range=f"{'1'*40}..{'2'*40}",
+        git_range=f"{'1' * 40}..{'2' * 40}",
         commit_count=len(rows),
         rows=rows,
     )
@@ -197,9 +197,7 @@ class TestAuditStorage:
             rows=(_row(SHA_B),),
         )
         save_commit_audit_sheet(tmp_path, bumped, overwrite=True)
-        assert commit_audit_path(
-            resolve_project_paths(tmp_path), "0.2.0"
-        ).is_file()
+        assert commit_audit_path(resolve_project_paths(tmp_path), "0.2.0").is_file()
 
     def test_delete(self, tmp_path: Path) -> None:
         self._init_project(tmp_path)
@@ -260,13 +258,9 @@ def _add_entries(tmp_path: Path, entries: list[dict[str, object]]) -> None:
 class TestValidateAndSync:
     def test_strict_fails_needs_review(self, tmp_path: Path) -> None:
         _add_entries(tmp_path, [])
-        save_commit_audit_sheet(
-            tmp_path, _sheet((_row(SHA_A),)), overwrite=True
-        )
+        save_commit_audit_sheet(tmp_path, _sheet((_row(SHA_A),)), overwrite=True)
         with pytest.raises(LaunchError):
-            validate_commit_audit_sheet(
-                tmp_path, version="0.2.0", strict=True
-            )
+            validate_commit_audit_sheet(tmp_path, version="0.2.0", strict=True)
 
     def test_strict_fails_uninspected(self, tmp_path: Path) -> None:
         _add_entries(
@@ -280,27 +274,17 @@ class TestValidateAndSync:
                 }
             ],
         )
-        sheet = _sheet(
-            (_row(SHA_A, decision="accepted", inspected=False),)
-        )
+        sheet = _sheet((_row(SHA_A, decision="accepted", inspected=False),))
         save_commit_audit_sheet(tmp_path, sheet, overwrite=True)
         with pytest.raises(LaunchError):
-            validate_commit_audit_sheet(
-                tmp_path, version="0.2.0", strict=True
-            )
+            validate_commit_audit_sheet(tmp_path, version="0.2.0", strict=True)
 
-    def test_strict_fails_missing_coverage_for_accepted(
-        self, tmp_path: Path
-    ) -> None:
+    def test_strict_fails_missing_coverage_for_accepted(self, tmp_path: Path) -> None:
         _add_entries(tmp_path, [])
-        sheet = _sheet(
-            (_row(SHA_A, decision="accepted", inspected=True),)
-        )
+        sheet = _sheet((_row(SHA_A, decision="accepted", inspected=True),))
         save_commit_audit_sheet(tmp_path, sheet, overwrite=True)
         with pytest.raises(LaunchError):
-            validate_commit_audit_sheet(
-                tmp_path, version="0.2.0", strict=True
-            )
+            validate_commit_audit_sheet(tmp_path, version="0.2.0", strict=True)
 
     def test_strict_passes_when_accepted_covered(self, tmp_path: Path) -> None:
         _add_entries(
@@ -314,13 +298,9 @@ class TestValidateAndSync:
                 }
             ],
         )
-        sheet = _sheet(
-            (_row(SHA_A, decision="accepted", inspected=True),)
-        )
+        sheet = _sheet((_row(SHA_A, decision="accepted", inspected=True),))
         save_commit_audit_sheet(tmp_path, sheet, overwrite=True)
-        report = validate_commit_audit_sheet(
-            tmp_path, version="0.2.0", strict=True
-        )
+        report = validate_commit_audit_sheet(tmp_path, version="0.2.0", strict=True)
         assert report["ok"] is True
 
     def test_strict_include_internal_passes_internal_covered(
@@ -338,9 +318,7 @@ class TestValidateAndSync:
                 }
             ],
         )
-        sheet = _sheet(
-            (_row(SHA_A, decision="internal", inspected=True),)
-        )
+        sheet = _sheet((_row(SHA_A, decision="internal", inspected=True),))
         save_commit_audit_sheet(tmp_path, sheet, overwrite=True)
         report = validate_commit_audit_sheet(
             tmp_path,
@@ -350,9 +328,7 @@ class TestValidateAndSync:
         )
         assert report["ok"] is True
 
-    def test_subject_guard_flags_matching_summary(
-        self, tmp_path: Path
-    ) -> None:
+    def test_subject_guard_flags_matching_summary(self, tmp_path: Path) -> None:
         _add_entries(
             tmp_path,
             [
@@ -375,9 +351,7 @@ class TestValidateAndSync:
             )
         )
         save_commit_audit_sheet(tmp_path, sheet, overwrite=True)
-        report = validate_commit_audit_sheet(
-            tmp_path, version="0.2.0", strict=False
-        )
+        report = validate_commit_audit_sheet(tmp_path, version="0.2.0", strict=False)
         violations = report["subject_summary_violations"]
         assert isinstance(violations, list)
         assert f"git:{SHA_A}" in violations
