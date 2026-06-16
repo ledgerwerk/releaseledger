@@ -44,6 +44,20 @@
   {
     "audience": null,
     "breaking": false,
+    "entry_id": "entry-0001",
+    "internal": false,
+    "kind": "added",
+    "order": 1,
+    "record_revision": 1,
+    "release_version": "0.3.1",
+    "scopes": [],
+    "source_refs": ["git:ffe9d5578a84fb171f22b2ad385e502f178a176d"],
+    "status": "accepted",
+    "summary": "Added commit audit sheet system for per-release git-range review evidence with init, show, update, validate, and sync commands"
+  },
+  {
+    "audience": null,
+    "breaking": false,
     "entry_id": "entry-0002",
     "internal": false,
     "kind": "added",
@@ -86,6 +100,20 @@
   {
     "audience": null,
     "breaking": false,
+    "entry_id": "entry-0002",
+    "internal": false,
+    "kind": "added",
+    "order": 2,
+    "record_revision": 1,
+    "release_version": "0.3.1",
+    "scopes": [],
+    "source_refs": ["git:ffe9d5578a84fb171f22b2ad385e502f178a176d"],
+    "status": "accepted",
+    "summary": "Added full changelog rebuild via build with no version argument or --all flag, with Unreleased section preservation and release status filtering"
+  },
+  {
+    "audience": null,
+    "breaking": false,
     "entry_id": "entry-0003",
     "internal": false,
     "kind": "added",
@@ -124,6 +152,20 @@
     "source_refs": ["git:e01373b3b140f0c79f0f5beb76c3204f988de2da"],
     "status": "accepted",
     "summary": "Added branch status command for local vs remote tracking and ahead/behind diagnostics"
+  },
+  {
+    "audience": null,
+    "breaking": false,
+    "entry_id": "entry-0003",
+    "internal": false,
+    "kind": "added",
+    "order": 3,
+    "record_revision": 1,
+    "release_version": "0.3.1",
+    "scopes": [],
+    "source_refs": ["git:ffe9d5578a84fb171f22b2ad385e502f178a176d"],
+    "status": "accepted",
+    "summary": "Added entry add-many --guard-commit-subjects to reject batches whose summaries copy or trivially transform commit subjects"
   },
   {
     "audience": null,
@@ -173,6 +215,20 @@
   {
     "audience": null,
     "breaking": false,
+    "entry_id": "entry-0004",
+    "internal": false,
+    "kind": "added",
+    "order": 4,
+    "record_revision": 1,
+    "release_version": "0.3.1",
+    "scopes": [],
+    "source_refs": ["git:ffe9d5578a84fb171f22b2ad385e502f178a176d"],
+    "status": "accepted",
+    "summary": "Added review --require-audit-sheet flag and audit sheet statistics display in review output"
+  },
+  {
+    "audience": null,
+    "breaking": false,
     "entry_id": "entry-0005",
     "internal": false,
     "kind": "added",
@@ -211,6 +267,20 @@
     "source_refs": ["git:74983fdf2ffab92aa7a2f15ec8edd16fccc687be"],
     "status": "accepted",
     "summary": "Added per-record versioning with validated revision tracking and schema_version metadata on releases and entries"
+  },
+  {
+    "audience": null,
+    "breaking": false,
+    "entry_id": "entry-0005",
+    "internal": false,
+    "kind": "changed",
+    "order": 5,
+    "record_revision": 1,
+    "release_version": "0.3.1",
+    "scopes": [],
+    "source_refs": ["git:200ede51c55086126ae7ea33d9e2004da6ded1c0"],
+    "status": "accepted",
+    "summary": "Changed project URLs from holgern to ledgerwerk GitHub organization"
   },
   {
     "audience": null,
@@ -257,6 +327,20 @@
   {
     "audience": null,
     "breaking": false,
+    "entry_id": "entry-0006",
+    "internal": true,
+    "kind": "internal",
+    "order": 6,
+    "record_revision": 1,
+    "release_version": "0.3.1",
+    "scopes": [],
+    "source_refs": ["git:efa0d2401d66242e20ede1ec5bfef43e8e601798"],
+    "status": "accepted",
+    "summary": "Updated changelog and architecture documentation for v0.3.0 release"
+  },
+  {
+    "audience": null,
+    "breaking": false,
     "entry_id": "entry-0007",
     "internal": false,
     "kind": "added",
@@ -295,6 +379,20 @@
     "source_refs": ["git:e01373b3b140f0c79f0f5beb76c3204f988de2da"],
     "status": "accepted",
     "summary": "Added entry prompt --git-range integration to derive audit context from commit range evidence"
+  },
+  {
+    "audience": null,
+    "breaking": false,
+    "entry_id": "entry-0007",
+    "internal": true,
+    "kind": "internal",
+    "order": 7,
+    "record_revision": 1,
+    "release_version": "0.3.1",
+    "scopes": [],
+    "source_refs": ["git:200ede51c55086126ae7ea33d9e2004da6ded1c0"],
+    "status": "accepted",
+    "summary": "Applied pre-commit formatting and lint fixes to audit domain, services, and test modules"
   },
   {
     "audience": null,
