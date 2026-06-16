@@ -415,3 +415,133 @@ def test_review_service_git_auto_enables(tmp_path: Path) -> None:
     )
     assert result["git"] is not None
     assert result["git"]["candidate_count"] >= 1
+
+
+# --------------------------------------------------------------------------
+# Audit sheet integration: --require-audit-sheet gate
+# --------------------------------------------------------------------------
+
+
+def _seed_covered_repo(tmp_path: Path) -> tuple[Path, str, str]:
+    repo = _init_repo(tmp_path)
+    _commit(repo, "root", "README.md")
+    _git(repo, "tag", "v0.1.0")
+    sha_a = _commit(repo, "feat: add a", "a.txt")
+    sha_b = _commit(repo, "fix: handle b", "b.txt")
+    runner.invoke(app, ["--cwd", str(repo), "init"])
+    runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(repo),
+            "release",
+            "create",
+            "0.2.0",
+            "--previous",
+            "0.1.0",
+            "--released-at",
+            "2026-06-14",
+        ],
+    )
+    runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(repo),
+            "release",
+            "update",
+            "0.2.0",
+            "--git-base",
+            "v0.1.0",
+            "--git-head",
+            "HEAD",
+        ],
+    )
+    return repo, sha_a, sha_b
+
+
+def test_review_require_audit_sheet_fails_when_absent(
+    tmp_path: Path,
+) -> None:
+    repo, _sha_a, _sha_b = _seed_covered_repo(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(repo),
+            "review",
+            "0.2.0",
+            "--git",
+            "--require-audit-sheet",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "audit" in result.output.lower()
+
+
+def test_review_require_audit_sheet_passes_when_complete(
+    tmp_path: Path,
+) -> None:
+    import yaml
+
+    repo, sha_a, sha_b = _seed_covered_repo(tmp_path)
+    # Initialize + complete the audit sheet.
+    assert (
+        runner.invoke(app, ["--cwd", str(repo), "audit", "init", "0.2.0"]).exit_code
+        == 0
+    )
+    sheet_path = repo / "sheet.yaml"
+    show = runner.invoke(
+        app,
+        ["--cwd", str(repo), "--json", "audit", "show", "0.2.0", "--format", "json"],
+    )
+    data = json.loads(show.output)["result"]["sheet"]
+    for row in data["rows"]:
+        row["inspected"] = True
+        row["decision"] = "accepted"
+        row["observed_behavior"] = "Reviewed behavior written by the reviewer."
+        if not row.get("evidence_subject"):
+            row["evidence_subject"] = "internal: scaffold"
+    sheet_path.write_text(yaml.safe_dump(data))
+    assert (
+        runner.invoke(
+            app,
+            ["--cwd", str(repo), "audit", "update", "0.2.0", "--file", str(sheet_path)],
+        ).exit_code
+        == 0
+    )
+    # Add entries covering both commits.
+    (repo / "entry.yaml").write_text(
+        f"entries:\n- kind: added\n  summary: Added a and fixed b "
+        f"from reviewed behavior\n  source_refs:\n  - 'git:{sha_a}'\n"
+        f"  - 'git:{sha_b}'\n  status: accepted\n"
+    )
+    runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(repo),
+            "entry",
+            "add-many",
+            "0.2.0",
+            "--file",
+            str(repo / "entry.yaml"),
+        ],
+    )
+    result = runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(repo),
+            "--json",
+            "review",
+            "0.2.0",
+            "--git",
+            "--require-audit-sheet",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is True
+    assert payload["result"]["audit"]["ok"] is True
+    assert payload["result"]["audit"]["row_count"] == 2

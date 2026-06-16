@@ -140,6 +140,12 @@ Changelog commands
                                [--include-status STATUS]...
                                [--strict]
                                [--allow-empty]
+   releaseledger build [VERSION] [--all] [--target-file PATH]
+                               [--include-release-status STATUS]...
+                               [--preserve-unreleased|--no-preserve-unreleased]
+                               [--include-internal]
+                               [--include-status STATUS]... [--strict]
+                               [--dry-run] [--allow-empty]
 
 Review commands
 ----------------
@@ -149,7 +155,8 @@ Review commands
    releaseledger review VERSION [--include-internal]
                            [--include-status STATUS]...
                            [--target-file PATH] [--strict]
-
+                           [--git] [--git-base REF] [--git-head REF]
+                           [--require-audit-sheet]
 Read-only coverage report. It combines release state, entry coverage, orphan
 detection, entry lint, and a strict changelog dry-run into one deterministic
 report so agents and humans do not need to run ``release show``,
@@ -179,8 +186,28 @@ shipped changes.
 
 ``git range`` inspects the commit range and prints candidate entries. ``git
 import`` generates an ``entry add-many`` YAML batch from the range for review
-and curation. The ``next`` forms are non-persisting previews that do not
-require a release record.
+and curation. It is an entry scaffold, not changelog prose: it warns you to
+run ``releaseledger audit init`` for a durable review worksheet. The ``next``
+forms are non-persisting previews that do not require a release record.
+
+Commit audit sheet commands
+---------------------------
+
+.. code-block:: text
+
+   releaseledger audit init VERSION [--base REF] [--head REF] [--overwrite]
+   releaseledger audit show VERSION [--format markdown|json] [--output PATH]
+   releaseledger audit update VERSION --file PATH
+   releaseledger audit validate VERSION [--strict] [--include-internal]
+   releaseledger audit sync VERSION
+
+The commit audit sheet is a per-release review artifact that maps every commit
+in the git range to a reviewer decision (``needs_review``, ``accepted``,
+``grouped``, ``internal``, ``rejected``) and to a release entry. Commit
+subjects are evidence-only and must never become changelog prose; ``audit
+validate --strict`` fails when an entry summary matches a commit subject.
+When a sheet exists, ``review`` emits an ``audit`` block; pass
+``--require-audit-sheet`` to gate on a complete sheet.
 
 Branch commands
 ---------------

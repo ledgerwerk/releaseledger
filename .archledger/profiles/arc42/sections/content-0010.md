@@ -78,3 +78,12 @@ Quality
 | Scenario  | `releaseledger review 1.2.0 --git --strict` correctly identifies uncovered commits |
 | Metric    | All commits in `base..head` range are checked against entry source_refs            |
 | Target    | Zero false negatives (no uncovered commit reported as covered)                     |
+
+### Q6: Commit Audit Sheet Completeness (Q-rel-01)
+
+| Attribute | Correctness/Auditability                                                                                                  |
+| --------- | ------------------------------------------------------------------------------------------------------------------------- |
+| ID        | Q-rel-01                                                                                                                  |
+| Scenario  | A release is built from a git range containing public and internal commits                                                |
+| Response  | The audit sheet contains one inspected row per commit, public rows map to accepted entries, internal rows map to internal |
+|           | entries, and public changelog output excludes internal entries by default                                                 |

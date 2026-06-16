@@ -14,6 +14,23 @@ the target file. Use ``--dry-run`` before writing and ``--replace-existing`` whe
 re-rendering an existing release section. Pass ``--template NAME`` to select a
 named changelog template profile.
 
+Full changelog rebuild
+----------------------
+
+``releaseledger build`` with no ``VERSION`` (or ``releaseledger build --all``)
+rebuilds the **complete** target file from ledger state:
+
+- ``releaseledger build VERSION`` updates one release section.
+- ``releaseledger build`` or ``releaseledger build --all`` rebuilds the whole
+  target file from ledger state.
+- Full rebuild excludes internal entries and non-released releases by default.
+- Use ``--include-internal`` only for internal release notes.
+- Use ``--include-release-status`` to include candidate/planned sections
+  explicitly.
+- Full rebuild preserves the ``## [Unreleased]`` body by default
+  (``--no-preserve-unreleased`` clears it) and is a whole-file rewrite (no
+  ``--replace-existing``).
+
 Default template
 ----------------
 

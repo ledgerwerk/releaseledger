@@ -8,6 +8,7 @@ subcommands. Subcommand groups are registered progressively (``init``,
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Annotated
 
@@ -28,13 +29,25 @@ from releaseledger.cli_common import (
     write_text_output,
 )
 from releaseledger.errors import CODE_USAGE_ERROR, LaunchError, ReleaseledgerError
+from releaseledger.services.audit import (
+    collect_commit_subjects,
+    create_commit_audit_sheet,
+    guard_entry_summaries,
+    render_commit_audit_sheet,
+    sync_audit_targets_from_entries,
+    update_commit_audit_sheet,
+    validate_commit_audit_sheet,
+)
 from releaseledger.services.branch import (
     branch_merge,
     branch_start,
     branch_status,
 )
 from releaseledger.services.changelog import build_changelog_context
-from releaseledger.services.changelog_build import build_changelog_file
+from releaseledger.services.changelog_build import (
+    build_changelog_file,
+    build_full_changelog_file,
+)
 from releaseledger.services.config import (
     config_set_releaseledger_dir,
     config_show,
@@ -748,6 +761,13 @@ def _event_ids(result: dict[str, object]) -> list[str]:
     return []
 
 
+def _as_int(value: object) -> int:
+    """Coerce a result-dict value to int for human/JSON rendering."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return int(str(value))
+    return value
+
+
 entry_app = typer.Typer(help="Manage release entries.")
 app.add_typer(entry_app, name="entry")
 
@@ -957,12 +977,36 @@ def entry_add_many_command(
     version: Annotated[str, typer.Argument()],
     source_path: Annotated[Path, typer.Option("--file")],
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    guard_commit_subjects: Annotated[
+        bool,
+        typer.Option(
+            "--guard-commit-subjects",
+            help=(", ").join(
+                [
+                    "Reject the batch when an entry summary copies or trivially "
+                    "transforms a commit subject from the audit sheet / git range.",
+                ]
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Add a validated YAML batch atomically."""
     state = cli_state_from_context(ctx)
 
     def produce() -> CommandResult:
         entries = load_entry_batch_file(source_path)
+        if guard_commit_subjects:
+            workspace_root = _paths(ctx).workspace_root
+            subjects = collect_commit_subjects(workspace_root, version=version)
+            summaries = [str(entry.get("summary", "")) for entry in entries]
+            violations = guard_entry_summaries(summaries, subjects)
+            if violations:
+                raise ReleaseledgerError(
+                    "Entry summaries must not copy commit subjects: "
+                    + "; ".join(violations),
+                    code="VALIDATION_ERROR",
+                    exit_code=2,
+                )
         result = add_many_release_entries(
             _paths(ctx).workspace_root,
             release_version=version,
@@ -1256,6 +1300,13 @@ def review_command(
             help="Git range head ref for the review.",
         ),
     ] = None,
+    require_audit_sheet: Annotated[
+        bool,
+        typer.Option(
+            "--require-audit-sheet",
+            help="Require a commit audit sheet; gate when absent or incomplete.",
+        ),
+    ] = False,
 ) -> None:
     """Review release coverage, orphans, lint, and a strict changelog dry-run."""
     state = cli_state_from_context(ctx)
@@ -1271,6 +1322,7 @@ def review_command(
             git=git,
             git_base=git_base,
             git_head=git_head,
+            require_audit_sheet=require_audit_sheet,
         )
     except ReleaseledgerError as exc:
         emit_error(command="review", error=exc, json_output=state.json_output)
@@ -1374,6 +1426,15 @@ def _render_review_human(version: str, result: dict[str, object]) -> str:
         if skipped:
             lines.append(f"  merge commits skipped: {skipped}")
 
+    audit_block = result.get("audit")
+    if isinstance(audit_block, dict):
+        lines.append("")
+        lines.append("Audit:")
+        lines.append(f"  rows: {audit_block.get('row_count', 0)}")
+        lines.append(f"  needs review: {audit_block.get('needs_review_count', 0)}")
+        lines.append(f"  uninspected: {audit_block.get('uninspected_count', 0)}")
+        lines.append(f"  ok: {audit_block.get('ok')}")
+
     orphans = result.get("orphan_entries", [])
     if isinstance(orphans, list) and orphans:
         lines.append("")
@@ -1397,7 +1458,10 @@ def _render_review_human(version: str, result: dict[str, object]) -> str:
 @app.command("build")
 def build_command(
     ctx: typer.Context,
-    version: Annotated[str, typer.Argument(help="Release version string.")],
+    version: Annotated[
+        str | None,
+        typer.Argument(help="Release version string (omit for full rebuild)."),
+    ] = None,
     target_file: Annotated[
         Path | None,
         typer.Option("--target-file", help="CHANGELOG target file."),
@@ -1420,15 +1484,33 @@ def build_command(
     ] = "default",
     dry_run: Annotated[
         bool,
-        typer.Option("--dry-run", help="Print rendered section; do not write."),
+        typer.Option("--dry-run", help="Print rendered output; do not write."),
     ] = False,
     replace_existing: Annotated[
         bool,
         typer.Option(
             "--replace-existing",
-            help="Replace an existing section for VERSION.",
+            help="Replace an existing section for VERSION (single-section only).",
         ),
     ] = False,
+    all_releases: Annotated[
+        bool,
+        typer.Option("--all", help="Rebuild the full changelog file."),
+    ] = False,
+    include_release_statuses: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--include-release-status",
+            help="Release status to include (full build).",
+        ),
+    ] = None,
+    preserve_unreleased: Annotated[
+        bool,
+        typer.Option(
+            "--preserve-unreleased/--no-preserve-unreleased",
+            help="Preserve the existing Unreleased body (full build).",
+        ),
+    ] = True,
     format_name: Annotated[
         str,
         typer.Option("--format", help="Output format: markdown or json."),
@@ -1439,7 +1521,11 @@ def build_command(
     strict: Annotated[bool, typer.Option("--strict")] = False,
     allow_empty: Annotated[bool, typer.Option("--allow-empty")] = False,
 ) -> None:
-    """Build or update CHANGELOG.md for a release."""
+    """Build or rebuild CHANGELOG.md.
+
+    With VERSION (and no --all), update one release section. With no VERSION or
+    --all, rebuild the complete target file from ledger state.
+    """
     state = cli_state_from_context(ctx)
     if format_name not in {"markdown", "json"}:
         err = ReleaseledgerError(
@@ -1449,33 +1535,72 @@ def build_command(
         )
         emit_error(command="build", error=err, json_output=state.json_output)
         raise typer.Exit(launch_error_exit_code(err)) from err
+    full_build = all_releases or version is None
+    if all_releases and version is not None:
+        err = ReleaseledgerError(
+            "--all cannot be combined with a VERSION argument.",
+            code="USAGE_ERROR",
+            exit_code=2,
+            remediation=[
+                "Use `releaseledger build --all` for a full rebuild, or"
+                "`releaseledger build VERSION` for one section.",
+            ],
+        )
+        emit_error(command="build", error=err, json_output=state.json_output)
+        raise typer.Exit(launch_error_exit_code(err)) from err
     try:
         workspace_root = _paths(ctx).workspace_root
-        result = build_changelog_file(
-            workspace_root,
-            version=version,
-            target_file=target_file,
-            include_internal=include_internal,
-            release_date=release_date,
-            unreleased=unreleased,
-            template_name=template,
-            dry_run=dry_run,
-            replace_existing=replace_existing,
-            include_statuses=tuple(include_statuses or ("accepted",)),
-            strict=strict,
-            allow_empty=allow_empty,
-        )
+        if full_build:
+            result = build_full_changelog_file(
+                workspace_root,
+                target_file=target_file,
+                include_internal=include_internal,
+                template_name=template,
+                dry_run=dry_run,
+                include_statuses=tuple(include_statuses or ("accepted",)),
+                include_release_statuses=tuple(
+                    include_release_statuses or ("released",)
+                ),
+                strict=strict,
+                allow_empty=allow_empty,
+                preserve_unreleased=preserve_unreleased,
+            )
+        else:
+            assert version is not None
+            result = build_changelog_file(
+                workspace_root,
+                version=version,
+                target_file=target_file,
+                include_internal=include_internal,
+                release_date=release_date,
+                unreleased=unreleased,
+                template_name=template,
+                dry_run=dry_run,
+                replace_existing=replace_existing,
+                include_statuses=tuple(include_statuses or ("accepted",)),
+                strict=strict,
+                allow_empty=allow_empty,
+            )
     except ReleaseledgerError as exc:
         emit_error(command="build", error=exc, json_output=state.json_output)
         raise typer.Exit(launch_error_exit_code(exc)) from exc
     target = str(result.get("target_file", ""))
-    if dry_run:
-        human = str(result.get("section", ""))
+    if full_build:
+        if dry_run:
+            human = str(result.get("document", ""))
+        else:
+            release_count = _as_int(result.get("release_count", 0))
+            human = f"wrote {target} ({release_count} release sections)"
+        result_type = "changelog_full_build"
     else:
-        human = f"wrote {target}"
+        if dry_run:
+            human = str(result.get("section", ""))
+        else:
+            human = f"wrote {target}"
+        result_type = "changelog_build"
     emit_payload(
         command="build",
-        result_type="changelog_build",
+        result_type=result_type,
         result=result,
         human=human,
         json_output=state.json_output,
@@ -1942,6 +2067,11 @@ def git_import_command(
     lines.append("")
     lines.append("Next steps:")
     lines.append(
+        "  This is an entry scaffold, not changelog prose. For a durable "
+        "review worksheet run:"
+    )
+    lines.append(f"  releaseledger audit init {version} --base {base} --head {head}")
+    lines.append(
         "  edit the YAML and write user-facing summaries from diffs/docs/tests"
     )
     lines.append("  do not copy or paraphrase git commit messages into summaries")
@@ -2170,4 +2300,237 @@ def config_set_command(
         result_type="config_set",
         json_output=state.json_output,
         produce=produce,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Commit audit sheet commands
+# ---------------------------------------------------------------------------
+
+
+audit_app = typer.Typer(
+    help="Per-release commit audit sheets (git-range review evidence)."
+)
+app.add_typer(audit_app, name="audit")
+
+
+@audit_app.command("init")
+def audit_init_command(
+    ctx: typer.Context,
+    version: Annotated[str, typer.Argument(help="Release version string.")],
+    base: Annotated[
+        str,
+        typer.Option("--base", help="Git base ref (e.g. v0.2.0)."),
+    ] = "",
+    head: Annotated[
+        str,
+        typer.Option("--head", help="Git head ref (default HEAD)."),
+    ] = "",
+    overwrite: Annotated[
+        bool,
+        typer.Option("--overwrite", help="Replace an existing sheet."),
+    ] = False,
+    format_name: Annotated[
+        str,
+        typer.Option("--format", help="Output format: markdown or json."),
+    ] = "markdown",
+) -> None:
+    """Create the canonical commit audit sheet from the git range."""
+    state = cli_state_from_context(ctx)
+    if format_name not in {"markdown", "json"}:
+        err = ReleaseledgerError(
+            f"Unsupported --format: {format_name!r}",
+            code="USAGE_ERROR",
+            exit_code=2,
+        )
+        emit_error(command="audit.init", error=err, json_output=state.json_output)
+        raise typer.Exit(launch_error_exit_code(err)) from err
+    try:
+        workspace_root = _paths(ctx).workspace_root
+        result = create_commit_audit_sheet(
+            workspace_root,
+            version=version,
+            git_base=base or None,
+            git_head=head or None,
+            overwrite=overwrite,
+        )
+    except ReleaseledgerError as exc:
+        emit_error(command="audit.init", error=exc, json_output=state.json_output)
+        raise typer.Exit(launch_error_exit_code(exc)) from exc
+    if format_name == "json":
+        human = ""
+    else:
+        human = (
+            f"created audit sheet for {version} ({_as_int(result['row_count'])} rows)"
+        )
+    emit_payload(
+        command="audit.init",
+        result_type="commit_audit_sheet_created",
+        result=result,
+        human=human,
+        json_output=state.json_output,
+    )
+
+
+@audit_app.command("show")
+def audit_show_command(
+    ctx: typer.Context,
+    version: Annotated[str, typer.Argument(help="Release version string.")],
+    format_name: Annotated[
+        str,
+        typer.Option("--format", help="Output format: markdown or json."),
+    ] = "markdown",
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", help="Write rendered output to a file."),
+    ] = None,
+) -> None:
+    """Render the commit audit sheet for display or export."""
+    state = cli_state_from_context(ctx)
+    if format_name not in {"markdown", "json"}:
+        err = ReleaseledgerError(
+            f"Unsupported --format: {format_name!r}",
+            code="USAGE_ERROR",
+            exit_code=2,
+        )
+        emit_error(command="audit.show", error=err, json_output=state.json_output)
+        raise typer.Exit(launch_error_exit_code(err)) from err
+    try:
+        workspace_root = _paths(ctx).workspace_root
+        rendered = render_commit_audit_sheet(
+            workspace_root, version=version, format_name=format_name
+        )
+    except ReleaseledgerError as exc:
+        emit_error(command="audit.show", error=exc, json_output=state.json_output)
+        raise typer.Exit(launch_error_exit_code(exc)) from exc
+    if output is not None:
+        text = (
+            json.dumps(rendered, indent=2, sort_keys=True)
+            if isinstance(rendered, dict)
+            else str(rendered)
+        )
+        try:
+            output.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            err = ReleaseledgerError(
+                f"Failed to write {output}: {exc}",
+                code="USAGE_ERROR",
+                exit_code=2,
+            )
+            emit_error(command="audit.show", error=err, json_output=state.json_output)
+            raise typer.Exit(launch_error_exit_code(err)) from err
+        human = f"wrote {output}"
+    elif format_name == "json":
+        human = ""
+    else:
+        human = str(rendered)
+    payload: dict[str, object] = {"version": version, "format": format_name}
+    if isinstance(rendered, dict):
+        payload["sheet"] = rendered
+    else:
+        payload["document"] = rendered
+    emit_payload(
+        command="audit.show",
+        result_type="commit_audit_sheet",
+        result=payload,
+        human=human,
+        json_output=state.json_output,
+    )
+
+
+@audit_app.command("update")
+def audit_update_command(
+    ctx: typer.Context,
+    version: Annotated[str, typer.Argument(help="Release version string.")],
+    file: Annotated[Path, typer.Option("--file", help="Edited YAML sheet file.")],
+) -> None:
+    """Import an edited YAML sheet, validating enums and row completeness."""
+    state = cli_state_from_context(ctx)
+    try:
+        workspace_root = _paths(ctx).workspace_root
+        result = update_commit_audit_sheet(workspace_root, version=version, file=file)
+    except ReleaseledgerError as exc:
+        emit_error(command="audit.update", error=exc, json_output=state.json_output)
+        raise typer.Exit(launch_error_exit_code(exc)) from exc
+    human = (
+        f"updated audit sheet for {version} "
+        f"(revision {_as_int(result['revision'])}, {_as_int(result['row_count'])} rows)"
+    )
+    emit_payload(
+        command="audit.update",
+        result_type="commit_audit_sheet_updated",
+        result=result,
+        human=human,
+        json_output=state.json_output,
+    )
+
+
+@audit_app.command("validate")
+def audit_validate_command(
+    ctx: typer.Context,
+    version: Annotated[str, typer.Argument(help="Release version string.")],
+    strict: Annotated[bool, typer.Option("--strict")] = False,
+    include_internal: Annotated[
+        bool,
+        typer.Option("--include-internal", help="Check internal row coverage."),
+    ] = False,
+) -> None:
+    """Validate the audit sheet against release entries and git coverage."""
+    state = cli_state_from_context(ctx)
+    try:
+        workspace_root = _paths(ctx).workspace_root
+        result = validate_commit_audit_sheet(
+            workspace_root,
+            version=version,
+            strict=strict,
+            include_internal=include_internal,
+        )
+    except ReleaseledgerError as exc:
+        emit_error(command="audit.validate", error=exc, json_output=state.json_output)
+        raise typer.Exit(launch_error_exit_code(exc)) from exc
+    ok = bool(result.get("ok"))
+    if ok:
+        human = f"audit validation passed for {version}"
+    else:
+        needs = _as_int(result.get("needs_review_count", 0))
+        uninsp = _as_int(result.get("uninspected_count", 0))
+        missing = len(result.get("missing_entry_coverage", []))  # type: ignore[arg-type]
+        human = (
+            f"audit validation for {version}: ok=false "
+            f"(needs_review={needs}, uninspected={uninsp}, "
+            f"missing_coverage={missing})"
+        )
+    emit_payload(
+        command="audit.validate",
+        result_type="commit_audit_validation",
+        result=result,
+        human=human,
+        json_output=state.json_output,
+    )
+
+
+@audit_app.command("sync")
+def audit_sync_command(
+    ctx: typer.Context,
+    version: Annotated[str, typer.Argument(help="Release version string.")],
+) -> None:
+    """Fill target_entry_id on rows from matching entry source refs."""
+    state = cli_state_from_context(ctx)
+    try:
+        workspace_root = _paths(ctx).workspace_root
+        result = sync_audit_targets_from_entries(workspace_root, version=version)
+    except ReleaseledgerError as exc:
+        emit_error(command="audit.sync", error=exc, json_output=state.json_output)
+        raise typer.Exit(launch_error_exit_code(exc)) from exc
+    human = (
+        f"synced audit sheet for {version}: "
+        f"{_as_int(result['updated_rows'])} row(s) updated "
+        f"(revision {_as_int(result['revision'])})"
+    )
+    emit_payload(
+        command="audit.sync",
+        result_type="commit_audit_sync",
+        result=result,
+        human=human,
+        json_output=state.json_output,
     )

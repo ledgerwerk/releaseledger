@@ -63,11 +63,17 @@ releaseledger entry lint VERSION --strict
 releaseledger entry prompt VERSION --source-ref REF --context-file FILE
 releaseledger changelog VERSION --format markdown|json
 releaseledger build VERSION --dry-run
-releaseledger review VERSION [--strict] [--git] [--git-base REF] [--git-head REF]
+releaseledger review VERSION [--strict] [--git] [--git-base REF] [--git-head REF] [--require-audit-sheet]
 releaseledger git range VERSION [--base REF] [--head REF]
 releaseledger git import VERSION --base REF [--head REF] --output PATH
+releaseledger audit init VERSION [--base REF] [--head REF] [--overwrite]
+releaseledger audit show VERSION [--format markdown|json] [--output PATH]
+releaseledger audit update VERSION --file PATH
+releaseledger audit validate VERSION [--strict] [--include-internal]
+releaseledger audit sync VERSION
 releaseledger branch status
-releaseledger build VERSION --target-file CHANGELOG.md
+releaseledger build [VERSION] [--all] [--target-file CHANGELOG.md]
+
 releaseledger storage where
 releaseledger config show
 releaseledger config set releaseledger_dir PATH [--external-dir]
@@ -219,6 +225,32 @@ Rules:
 3. Preserve warnings, release metadata, and entry grouping when handing source to a human or another tool.
 4. If no date is provided and the release has no persisted `released_at`, keep the output unreleased or explicitly say no date was available.
 
+## Commit audit sheet protocol
+
+Use this for any git-backed changelog or release-note backfill.
+
+1. Attach or resolve the git range.
+2. Run `releaseledger audit init VERSION --base BASE --head HEAD`.
+3. Inspect every commit patch. Fill `inspected`, `inspected_paths`,
+   `observed_behavior`, `decision`, and `target_entry_key`.
+4. Never copy, paraphrase, title-case, or mechanically convert
+   `evidence_subject` into `summary`.
+5. Group commits only when the grouped entry still covers every `git:<sha>`
+   source ref.
+6. Mark housekeeping as `internal` and cover it with an internal accepted
+   entry; do not invent public changelog prose.
+7. Run `releaseledger audit validate VERSION --strict --include-internal`
+   before `entry add-many` and again after `audit sync`.
+8. Run
+   `releaseledger review VERSION --git --strict --include-internal --require-audit-sheet`
+   before building.
+
+   `audit init` writes one `needs_review` row per git candidate commit.
+   Decisions are `needs_review`, `accepted`, `grouped`, `internal`, and
+   `rejected` (prefer `internal` for housekeeping). The sheet is evidence
+   state, not changelog prose; the YAML file under
+   `.releaseledger/.../audit/commit-audit.yaml` is canonical.
+
 ## CHANGELOG.md build protocol
 
 Use this when the user asks to build, generate, or update `CHANGELOG.md`.
@@ -245,6 +277,15 @@ Use this when the user asks to build, generate, or update `CHANGELOG.md`.
 6. Accepted entries are included by default. Include draft entries only for
    explicitly draft output and preserve the draft-quality warning.
 7. Do not use `--allow-empty` unless an empty release section is intentional.
+8. To rebuild the **whole** target file from ledger state, use the
+   conventional full-build command:
+   - `releaseledger build --dry-run --target-file CHANGELOG.md`
+   - `releaseledger build --target-file CHANGELOG.md`
+     `build` with no VERSION (or `build --all`) regenerates every selected
+     release section newest-first, preserves the `## [Unreleased]` body by
+     default, excludes internal entries and non-released releases by default,
+     and is a whole-file rewrite (no `--replace-existing`). `build VERSION`
+     keeps the single-section insert/replace behavior.
 
 ## Release review protocol
 

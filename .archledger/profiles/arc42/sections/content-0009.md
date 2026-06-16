@@ -115,3 +115,29 @@ are shared across ledgers. Options included inlining or a shared library.
 - ✅ Single place to fix shared bugs
 - ❌ Version coupling between packages
 - ❌ Extra dependency (acceptable for consistency)
+
+## ADR-7: Persist Commit Audit Sheets per Release
+
+**Status:** Accepted
+
+| Decision                                | Status   | Consequence                                                                                                         |
+| --------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------- |
+| Persist commit audit sheets per release | Accepted | Release review can prove every git commit was inspected without exposing internal housekeeping in public changelogs |
+
+**Context:** Reviewers (humans or agents) backfill release notes from git
+ranges. Without a durable artifact, the per-commit reasoning disappears after
+the entries are imported, and a reviewer can satisfy coarse coverage by writing
+low-quality entries copied from commit subjects.
+
+**Decision:** Store one canonical commit audit sheet per release under
+`releases/<version>/audit/commit-audit.yaml`. Each row records the commit SHA,
+inspected paths, reviewer-observed behavior, public/internal impact, decision,
+and target release entry. Commit subjects are evidence-only and must never
+become changelog prose.
+
+**Consequences:**
+
+- ✅ Review work is durable and auditable per release
+- ✅ Strict review can prove every commit was inspected
+- ✅ Internal housekeeping stays out of public changelogs by default
+- ❌ One more artifact to maintain (opt-in strict enforcement keeps it optional)

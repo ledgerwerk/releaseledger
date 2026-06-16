@@ -657,6 +657,31 @@ The pipeline supports:
 - Keep a Changelog 1.1.0 standard mode
 - Link references and URL templates
 - Preamble text for file headers
+- Preamble text for file headers
+
+## 8. Commit Audit Sheet
+
+A commit audit sheet is a per-release review artifact that maps every commit
+in the selected git range to a reviewer decision and, when applicable, to a
+release entry. It is evidence state, not changelog prose.
+
+The sheet exists to prevent release notes from being generated from commit
+subjects. Each row records the commit SHA, inspected paths,
+reviewer-observed behavior, public/internal impact, decision, and target
+release entry. Public changelog entries are written from reviewed behavior,
+API/docs impact, changed paths, tests, and diff evidence. Commit subjects are
+evidence-only and must not be copied or mechanically transformed into
+release summaries.
+
+Decisions are `needs_review`, `accepted`, `grouped`, `internal`, and
+`rejected`. Strict release review fails when rows remain uninspected, when
+public rows lack accepted entry coverage, or when an entry summary matches a
+commit subject.
+
+This concept keeps Git as the canonical source of shipped changes while making
+the human or agent review work durable and auditable. The canonical storage is
+the YAML sheet under `releases/<version>/audit/commit-audit.yaml`; a markdown
+view is rendered on demand rather than persisted.
 
 <!-- archledger: no accepted records for this section yet -->
 
@@ -767,6 +792,32 @@ are shared across ledgers. Options included inlining or a shared library.
 - ❌ Version coupling between packages
 - ❌ Extra dependency (acceptable for consistency)
 
+## ADR-7: Persist Commit Audit Sheets per Release
+
+**Status:** Accepted
+
+| Decision                                | Status   | Consequence                                                                                                         |
+| --------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------- |
+| Persist commit audit sheets per release | Accepted | Release review can prove every git commit was inspected without exposing internal housekeeping in public changelogs |
+
+**Context:** Reviewers (humans or agents) backfill release notes from git
+ranges. Without a durable artifact, the per-commit reasoning disappears after
+the entries are imported, and a reviewer can satisfy coarse coverage by writing
+low-quality entries copied from commit subjects.
+
+**Decision:** Store one canonical commit audit sheet per release under
+`releases/<version>/audit/commit-audit.yaml`. Each row records the commit SHA,
+inspected paths, reviewer-observed behavior, public/internal impact, decision,
+and target release entry. Commit subjects are evidence-only and must never
+become changelog prose.
+
+**Consequences:**
+
+- ✅ Review work is durable and auditable per release
+- ✅ Strict review can prove every commit was inspected
+- ✅ Internal housekeeping stays out of public changelogs by default
+- ❌ One more artifact to maintain (opt-in strict enforcement keeps it optional)
+
 <!-- archledger: no accepted records for this section yet -->
 
 # Quality Requirements
@@ -838,6 +889,15 @@ Quality
 | Scenario  | `releaseledger review 1.2.0 --git --strict` correctly identifies uncovered commits |
 | Metric    | All commits in `base..head` range are checked against entry source_refs            |
 | Target    | Zero false negatives (no uncovered commit reported as covered)                     |
+
+### Q6: Commit Audit Sheet Completeness (Q-rel-01)
+
+| Attribute | Correctness/Auditability                                                                                                  |
+| --------- | ------------------------------------------------------------------------------------------------------------------------- |
+| ID        | Q-rel-01                                                                                                                  |
+| Scenario  | A release is built from a git range containing public and internal commits                                                |
+| Response  | The audit sheet contains one inspected row per commit, public rows map to accepted entries, internal rows map to internal |
+|           | entries, and public changelog output excludes internal entries by default                                                 |
 
 ## Quality Requirements Overview
 

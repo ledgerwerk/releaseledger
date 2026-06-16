@@ -96,14 +96,26 @@ releaseledger git import 1.2.0 \
 releaseledger entry add-many 1.2.0 --file /tmp/1.2.0-git-entries.yaml --dry-run
 releaseledger entry add-many 1.2.0 --file /tmp/1.2.0-git-entries.yaml
 
-# 4. Review git coverage.
-releaseledger review 1.2.0 --git --strict
+# 4. Generate a durable per-commit review worksheet, inspect every patch,
+#    and validate it covers the git range.
+releaseledger audit init 1.2.0
+releaseledger audit show 1.2.0 --output /tmp/1.2.0-commit-audit.md
+releaseledger audit sync 1.2.0
+releaseledger audit validate 1.2.0 --strict --include-internal
 
-# 5. Build the changelog.
+# 5. Review git coverage and the audit sheet.
+releaseledger review 1.2.0 --git --strict --include-internal --require-audit-sheet
+
+
+# 6. Build the changelog section for this release.
 releaseledger build 1.2.0 \
   --release-date 2026-06-14 \
   --strict \
   --target-file CHANGELOG.md
+
+# Or rebuild the COMPLETE changelog from ledger state:
+releaseledger build --dry-run --strict --target-file CHANGELOG.md
+releaseledger build --target-file CHANGELOG.md
 ```
 
 Taskledger refs (`tl:task-0103`) and PR refs (`github:pr-42`) are optional
@@ -211,11 +223,22 @@ releaseledger build VERSION [--target-file PATH]
                             [--include-status STATUS]...
                             [--strict]
                             [--allow-empty]
-
+releaseledger build [VERSION] [--all] [--target-file PATH]
+                            [--include-release-status STATUS]...
+                            [--preserve-unreleased|--no-preserve-unreleased]
+                            [--include-internal]
+                            [--include-status STATUS]... [--strict]
+                            [--dry-run] [--allow-empty]
 releaseledger review VERSION [--include-internal]
                        [--include-status STATUS]...
                        [--target-file PATH] [--strict]
                        [--git] [--git-base REF] [--git-head REF]
+                       [--require-audit-sheet]
+releaseledger audit init VERSION [--base REF] [--head REF] [--overwrite]
+releaseledger audit show VERSION [--format markdown|json] [--output PATH]
+releaseledger audit update VERSION --file PATH
+releaseledger audit validate VERSION [--strict] [--include-internal]
+releaseledger audit sync VERSION
 
 releaseledger git range VERSION [--base REF] [--head REF]
                       [--include-merges never|always|nontrivial]
@@ -291,6 +314,13 @@ inserts it into the target file. It can run in `--dry-run` mode, replace an
 existing release section with `--replace-existing`, or render an unreleased date
 with `--unreleased`. Use `--template NAME` to select a named changelog template
 profile.
+
+Use the conventional **full rebuild** to regenerate the whole target file from
+ledger state: `releaseledger build` with no `VERSION` (or `releaseledger build --all`) rewrites the entire document newest-first, preserves the
+`## [Unreleased]` body by default, excludes internal entries and non-released
+releases by default, and regenerates the link-reference block. `releaseledger build VERSION` keeps the single-section insert/replace behavior. Use
+`--include-release-status` to include candidate/planned sections explicitly,
+and `--include-internal` only for internal release notes.
 
 Default `.releaseledger.toml` changelog template:
 

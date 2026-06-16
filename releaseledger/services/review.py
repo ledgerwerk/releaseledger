@@ -322,6 +322,7 @@ def build_release_review(
     git_base: str | None = None,
     git_head: str | None = None,
     include_merges: str = "nontrivial",
+    require_audit_sheet: bool = False,
 ) -> dict[str, object]:
     """Build a deterministic, read-only release review for ``version``.
 
@@ -503,7 +504,62 @@ def build_release_review(
     }
     if git_block is not None:
         result["git"] = git_block
+
+    # Commit audit sheet integration (opt-in via --require-audit-sheet).
+    audit_block = _build_audit_block(
+        workspace_root,
+        version=version,
+        include_internal=include_internal,
+    )
+    if audit_block is not None:
+        result["audit"] = audit_block
+        if not audit_block["ok"]:
+            ok = False
+            result["ok"] = False
+    elif require_audit_sheet:
+        raise LaunchError(
+            f"--require-audit-sheet set but no commit audit sheet exists "
+            f"for {version}.",
+            code="VALIDATION_ERROR",
+            exit_code=2,
+            remediation=[f"Run `releaseledger audit init {version}` first."],
+        )
     return result
+
+
+def _build_audit_block(
+    workspace_root: Path,
+    *,
+    version: str,
+    include_internal: bool,
+) -> dict[str, object] | None:
+    """Return a JSON-friendly audit summary block, or None if no sheet exists."""
+    from releaseledger.services.audit import validate_commit_audit_sheet
+    from releaseledger.storage.store import load_commit_audit_sheet
+
+    sheet = load_commit_audit_sheet(workspace_root, version)
+    if sheet is None:
+        return None
+    report = validate_commit_audit_sheet(
+        workspace_root,
+        version=version,
+        strict=False,
+        include_internal=include_internal,
+    )
+    row_count_raw = report["row_count"]
+    needs_raw = report["needs_review_count"]
+    uninsp_raw = report["uninspected_count"]
+    violations_raw = report["subject_summary_violations"]
+    return {
+        "exists": True,
+        "row_count": row_count_raw if isinstance(row_count_raw, int) else 0,
+        "needs_review_count": (needs_raw if isinstance(needs_raw, int) else 0),
+        "uninspected_count": (uninsp_raw if isinstance(uninsp_raw, int) else 0),
+        "subject_summary_violations": [
+            str(v) for v in (violations_raw if isinstance(violations_raw, list) else [])
+        ],
+        "ok": bool(report["ok"]),
+    }
 
 
 def _run_changelog_dry_run(

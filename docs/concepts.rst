@@ -76,6 +76,29 @@ Events are append-only operation rows. They do not store wall-clock timestamps
 or before/after deltas. Releaseledger relies on git history for chronological
 review and on per-record revisions for validation.
 
+Commit audit sheet
+------------------
+
+A commit audit sheet is a per-release review artifact that maps every commit
+in the selected git range to a reviewer decision and, when applicable, to a
+release entry. It is evidence state, not changelog prose.
+
+The sheet exists to prevent release notes from being generated from commit
+subjects. Each row records the commit SHA, inspected paths,
+reviewer-observed behavior, public/internal impact, decision, and target
+release entry. Public changelog entries are written from reviewed behavior,
+API/docs impact, changed paths, tests, and diff evidence. Commit subjects are
+evidence-only and must not be copied or mechanically transformed into
+release summaries.
+
+Decisions are ``needs_review``, ``accepted``, ``grouped``, ``internal``, and
+``rejected``. Strict release review fails when rows remain uninspected, when
+public rows lack accepted entry coverage, or when an entry summary matches a
+commit subject.
+
+This concept keeps Git as the canonical source of shipped changes while making
+the human or agent review work durable and auditable.
+
 Versioning
 ----------
 

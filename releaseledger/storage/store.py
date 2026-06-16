@@ -21,7 +21,13 @@ from dataclasses import replace
 from pathlib import Path
 
 import ledgercore
+import yaml
 
+from releaseledger.domain.audit import (
+    CommitAuditSheetRecord,
+    audit_sheet_from_dict,
+    audit_sheet_to_dict,
+)
 from releaseledger.domain.entry import (
     ENTRY_FRONT_MATTER_KEY_ORDER,
     ReleaseEntryRecord,
@@ -44,14 +50,19 @@ from releaseledger.errors import (
 from releaseledger.storage.paths import ProjectPaths, resolve_project_paths
 
 __all__ = [
+    "commit_audit_path",
+    "delete_commit_audit_sheet",
+    "load_commit_audit_sheet",
     "load_entries",
     "load_release",
     "list_releases",
     "next_entry_id",
     "rebuild_indexes",
+    "release_audit_dir",
     "release_dir",
     "release_markdown_path",
     "rename_release_bundle",
+    "save_commit_audit_sheet",
     "save_entries_for_release",
     "delete_entry",
     "save_entry",
@@ -490,3 +501,120 @@ def _validate_revision_transition(
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
         )
+
+
+# ---------------------------------------------------------------------------
+# Commit audit sheet persistence
+# ---------------------------------------------------------------------------
+
+
+def release_audit_dir(paths: ProjectPaths, version: str) -> Path:
+    """Return the per-release ``audit/`` directory."""
+    return release_dir(paths, version) / "audit"
+
+
+def commit_audit_path(paths: ProjectPaths, version: str) -> Path:
+    """Return the canonical ``commit-audit.yaml`` path for ``version``."""
+    return release_audit_dir(paths, version) / "commit-audit.yaml"
+
+
+def _audit_label(version: str) -> str:
+    return f"Commit audit sheet {version}"
+
+
+def load_commit_audit_sheet(
+    workspace_root: Path, version: str
+) -> CommitAuditSheetRecord | None:
+    """Load the commit audit sheet for ``version``; return None if absent."""
+    paths = _resolve(workspace_root)
+    safe_version = validate_release_version(version)
+    target = commit_audit_path(paths, safe_version)
+    if not target.is_file():
+        return None
+    try:
+        data = ledgercore.load_yaml_object(target, label=_audit_label(version))
+    except ledgercore.YamlStoreError as exc:
+        raise LaunchError(
+            f"Failed to read commit audit sheet for {version}: {exc}",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        ) from exc
+    if not isinstance(data, dict):
+        raise LaunchError(
+            f"Commit audit sheet for {version} must be a mapping.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
+    return audit_sheet_from_dict(dict(data))
+
+
+def save_commit_audit_sheet(
+    workspace_root: Path,
+    sheet: CommitAuditSheetRecord,
+    *,
+    overwrite: bool = True,
+) -> CommitAuditSheetRecord:
+    """Persist ``sheet`` as ``commit-audit.yaml`` under its release audit dir.
+
+    Validates the revision transition like release/entry records: the first
+    write must start at revision 1, and subsequent writes must advance by
+    exactly one when content changed (or stay equal when unchanged).
+    """
+    paths = _resolve(workspace_root)
+    version = validate_release_version(sheet.release_version)
+    if version != sheet.release_version:
+        raise LaunchError(
+            f"Audit sheet release_version {sheet.release_version!r} must match "
+            "a valid release version.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
+    target = commit_audit_path(paths, version)
+    old_data: dict[str, object] | None = None
+    if target.is_file():
+        if not overwrite:
+            raise LaunchError(
+                f"Commit audit sheet already exists for {version}.",
+                code=CODE_CONFLICT,
+                exit_code=2,
+                remediation=["Pass --overwrite to replace the sheet."],
+            )
+        loaded = ledgercore.load_yaml_object(target, label=_audit_label(version))
+        if isinstance(loaded, dict):
+            old_data = dict(loaded)
+    new_data = audit_sheet_to_dict(sheet)
+    _validate_revision_transition(
+        old_data=old_data,
+        new_data=new_data,
+        old_body=None,
+        new_body=None,
+        label=_audit_label(version),
+    )
+    audit_dir = release_audit_dir(paths, version)
+    ledgercore.ensure_dir(audit_dir)
+    text = yaml.safe_dump(
+        new_data,
+        sort_keys=False,
+        default_flow_style=False,
+        allow_unicode=True,
+    )
+    try:
+        ledgercore.atomic_write_text(target, text)
+    except (ledgercore.AtomicWriteError, OSError) as exc:
+        raise LaunchError(
+            f"Failed to write commit audit sheet for {version}: {exc}",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+        ) from exc
+    return sheet
+
+
+def delete_commit_audit_sheet(workspace_root: Path, version: str) -> bool:
+    """Delete the commit audit sheet for ``version``. Return True if removed."""
+    paths = _resolve(workspace_root)
+    safe_version = validate_release_version(version)
+    target = commit_audit_path(paths, safe_version)
+    if target.is_file():
+        target.unlink()
+        return True
+    return False

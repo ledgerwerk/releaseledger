@@ -26,7 +26,7 @@ from jinja2.exceptions import SecurityError, TemplateError
 from jinja2.sandbox import SandboxedEnvironment
 
 from releaseledger.domain.entry import ReleaseEntryRecord, normalize_entry_status
-from releaseledger.domain.release import ReleaseRecord
+from releaseledger.domain.release import ReleaseRecord, parse_release_version_tuple
 from releaseledger.domain.states import (
     DEFAULT_KEEPACHANGELOG_KIND_MAP,
     ENTRY_KIND_TITLES,
@@ -53,11 +53,14 @@ from releaseledger.storage.store import list_releases, load_entries, load_releas
 __all__ = [
     "build_changelog_file",
     "build_changelog_render_context",
+    "build_full_changelog_file",
+    "extract_unreleased_section_body",
     "find_release_section",
     "insert_release_section",
+    "render_changelog_section",
+    "render_full_changelog_document",
     "remove_release_section",
     "rename_release_section",
-    "render_changelog_section",
     "replace_release_section",
 ]
 
@@ -1097,6 +1100,295 @@ def build_changelog_file(
         "status_counts": rendered["status_counts"],
         "warnings": warnings,
     }
+
+
+# ---------------------------------------------------------------------------
+# Full-document changelog rebuild (``releaseledger build`` / ``build --all``)
+# ---------------------------------------------------------------------------
+
+
+_UNRELEASED_HEADING_RE = re.compile(r"^##\s+\[?\s*Unreleased\s*\]?\s*$", re.IGNORECASE)
+
+
+def extract_unreleased_section_body(text: str) -> str:
+    """Return the body text under a ``## [Unreleased]`` heading.
+
+    The body excludes the heading line itself and any following ``## `` section.
+    Returns an empty string when the file has no Unreleased section. Trailing
+    blank lines are stripped; the result has no leading or trailing newline.
+    """
+    lines = text.splitlines(keepends=True)
+    start: int | None = None
+    for index, line in enumerate(lines):
+        if _UNRELEASED_HEADING_RE.match(line):
+            start = index + 1
+            break
+    if start is None:
+        return ""
+    end = len(lines)
+    for index in range(start, len(lines)):
+        if _LEVEL2_RE.match(lines[index]) or _LINK_REF_RE.match(lines[index].strip()):
+            end = index
+            break
+    body = "".join(lines[start:end])
+    return body.strip("\n")
+
+
+def _full_changelog_release_key(record: ReleaseRecord) -> tuple[object, ...]:
+    """Sort selected releases newest-first for full-document rendering.
+
+    Mirrors :func:`storage.store._release_sort_key` but reversed for newest-first
+    document ordering. Uses released_at then semantic version then raw version.
+    """
+    released_at = record.released_at or ""
+    semver = parse_release_version_tuple(record.version)
+    if semver is not None:
+        semver_component: tuple[object, ...] = (0, *semver)
+    else:
+        semver_component = (1, record.version)
+    return (released_at, semver_component, record.version)
+
+
+def _render_full_link_refs(
+    config: ProjectConfig,
+    releases: list[ReleaseRecord],
+) -> dict[str, str]:
+    """Build the deterministic link-reference map for the selected release chain.
+
+    Includes ``[Unreleased]`` comparing from the newest selected release to HEAD
+    when a repository URL is configured. Returns an empty dict when link refs are
+    disabled or no repository URL is set.
+    """
+    refs: dict[str, str] = {}
+    if not (config.changelog_link_references and config.changelog_repository_url):
+        return refs
+    for release in releases:
+        line = render_release_link(config, release.version, release.previous_version)
+        if line:
+            match = _LINK_REF_RE.match(line)
+            if match:
+                refs[match.group(1)] = match.group(2)
+    newest = releases[0].version if releases else None
+    unreleased_line = render_unreleased_link(config, newest)
+    if unreleased_line:
+        match = _LINK_REF_RE.match(unreleased_line)
+        if match:
+            refs[match.group(1)] = match.group(2)
+    return refs
+
+
+def render_full_changelog_document(
+    *,
+    config: ProjectConfig,
+    sections: list[str],
+    unreleased_body: str = "",
+    link_refs: dict[str, str] | None = None,
+) -> str:
+    """Assemble the full changelog document from rendered release sections.
+
+    Layout: ``# Changelog`` title, optional preamble (Keep a Changelog mode), an
+    optional ``## [Unreleased]`` section preserving ``unreleased_body``, the
+    release sections newest-first, and finally the generated-by marker plus the
+    link-reference block. The result ends with exactly one newline.
+    """
+    parts: list[str] = ["# Changelog"]
+    is_kac = config.changelog_standard == "keepachangelog-1.1.0"
+    preamble = config.changelog_preamble
+    if is_kac and not preamble.strip():
+        preamble = KEEPACHANGELOG_PREAMBLE
+    if preamble.strip():
+        parts.append("")
+        parts.append(preamble.strip())
+    if is_kac or config.changelog_unreleased or unreleased_body.strip():
+        parts.append("")
+        parts.append("## [Unreleased]")
+        body = unreleased_body.strip("\n")
+        if body:
+            parts.append("")
+            parts.append(body)
+    for section in sections:
+        section = section.strip("\n")
+        if not section:
+            continue
+        parts.append("")
+        parts.append(section)
+    if config.changelog_footer.strip():
+        parts.append("")
+        parts.append(config.changelog_footer.strip())
+    refs = link_refs or {}
+    for name, url in refs.items():
+        parts.append(f"[{name}]: {url}")
+    document = "\n".join(parts)
+    document = ledgercore.normalize_newlines(document)
+    document = re.sub(r"\n{3,}", "\n\n", document)
+    return _ensure_final_newline(document)
+
+
+def build_full_changelog_file(
+    workspace_root: Path,
+    *,
+    target_file: Path | None = None,
+    include_internal: bool = False,
+    template_name: str = "default",
+    dry_run: bool = False,
+    include_statuses: tuple[str, ...] = ("accepted",),
+    include_release_statuses: tuple[str, ...] = ("released",),
+    strict: bool = False,
+    allow_empty: bool = False,
+    preserve_unreleased: bool = True,
+) -> dict[str, object]:
+    """Rebuild the full changelog target from releaseledger state.
+
+    Selects releases whose status is in ``include_release_statuses`` (default
+    ``released``) and never includes ``canceled``. Renders each release section
+    newest-first using the existing single-release renderer, preserves the
+    existing ``## [Unreleased]`` body when ``preserve_unreleased`` is true, and
+    regenerates the link-reference block deterministically. A whole-file rewrite:
+    ``--replace-existing`` does not apply.
+
+    Returns a deterministic ``changelog_full_build`` payload.
+    """
+    workspace_root = workspace_root.expanduser().resolve()
+    paths = resolve_project_paths(workspace_root)
+    config = _load_config(paths)
+    target = _resolve_target_file(
+        workspace_root=workspace_root, config=config, target_file=target_file
+    )
+    statuses = tuple(normalize_entry_status(value) for value in include_statuses)
+    release_statuses = set(include_release_statuses)
+    is_kac = config.changelog_standard == "keepachangelog-1.1.0"
+
+    existing = _read_target(target)
+    unreleased_body = (
+        extract_unreleased_section_body(existing) if preserve_unreleased else ""
+    )
+
+    all_releases = list_releases(workspace_root)
+    selected = [
+        record
+        for record in all_releases
+        if record.status in release_statuses and record.status != "canceled"
+    ]
+    selected.sort(key=_full_changelog_release_key, reverse=True)
+
+    sections: list[str] = []
+    results: list[dict[str, object]] = []
+    warnings: list[str] = []
+    for release in selected:
+        version = release.version
+        version_entries = [
+            entry
+            for entry in load_entries(workspace_root, version)
+            if entry.status in statuses and (include_internal or not entry.internal)
+        ]
+        if strict:
+            lint = lint_release_entries(
+                workspace_root,
+                release_version=version,
+                strict=False,
+                include_statuses=statuses,
+            )
+            lint_summary = lint["summary"]
+            assert isinstance(lint_summary, dict)
+            if int(lint_summary["errors"]) > 0:
+                raise LaunchError(
+                    f"Strict full build blocked by entry lint errors for {version}.",
+                    code=CODE_VALIDATION_ERROR,
+                    exit_code=2,
+                )
+            if not version_entries and not allow_empty:
+                raise LaunchError(
+                    f"Strict full build requires at least one included entry "
+                    f"for {version}; pass --allow-empty to override.",
+                    code=CODE_VALIDATION_ERROR,
+                    exit_code=2,
+                )
+            if is_kac and not release.released_at:
+                raise LaunchError(
+                    f"Strict full build requires a release date for {version} in "
+                    "Keep a Changelog mode.",
+                    code=CODE_VALIDATION_ERROR,
+                    exit_code=2,
+                )
+            release_refs = set(release.source_refs)
+            if release.boundary_ref:
+                release_refs.add(release.boundary_ref)
+            entry_refs = {ref for entry in version_entries for ref in entry.source_refs}
+            uncovered = sorted(release_refs - entry_refs)
+            if uncovered and not allow_empty:
+                raise LaunchError(
+                    f"Strict full build for {version} has release source refs not "
+                    "referenced by entries: " + ", ".join(uncovered),
+                    code=CODE_VALIDATION_ERROR,
+                    exit_code=2,
+                )
+            if int(lint_summary["warnings"]) > 0:
+                warnings.append(
+                    f"{version}: entry lint reported "
+                    f"{lint_summary['warnings']} warning(s)."
+                )
+        rendered = render_changelog_section(
+            workspace_root,
+            version=version,
+            include_internal=include_internal,
+            template_name=template_name,
+            include_statuses=statuses,
+        )
+        sections.append(str(rendered["section"]).strip())
+        raw_render_warnings = rendered.get("warnings", [])
+        if isinstance(raw_render_warnings, list):
+            warnings.extend(f"{version}: {item}" for item in raw_render_warnings)
+        entry_count_raw = rendered["entry_count"]
+        results.append(
+            {
+                "version": version,
+                "entry_count": (
+                    entry_count_raw if isinstance(entry_count_raw, int) else 0
+                ),
+                "section_heading": rendered["section_heading"],
+            }
+        )
+
+    link_refs = _render_full_link_refs(config, selected)
+    document = render_full_changelog_document(
+        config=config,
+        sections=sections,
+        unreleased_body=unreleased_body,
+        link_refs=link_refs,
+    )
+    document = _ensure_final_newline(document)
+
+    versions = [str(item["version"]) for item in results]
+    payload: dict[str, object] = {
+        "kind": "changelog_full_build",
+        "target_file": _relative_target(workspace_root, target),
+        "updated": False,
+        "dry_run": bool(dry_run),
+        "release_count": len(results),
+        "versions": versions,
+        "releases": results,
+        "included_internal": bool(include_internal),
+        "included_statuses": list(statuses),
+        "included_release_statuses": sorted(release_statuses),
+        "unreleased_preserved": bool(preserve_unreleased) and bool(unreleased_body),
+        "document": document,
+        "warnings": warnings,
+    }
+
+    if dry_run:
+        return payload
+
+    try:
+        ledgercore.ensure_dir(target.parent)
+        ledgercore.atomic_write_text(target, document)
+    except (ledgercore.AtomicWriteError, OSError) as exc:
+        raise LaunchError(
+            f"Failed to write changelog target {target}: {exc}",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+        ) from exc
+    payload["updated"] = True
+    return payload
 
 
 # Silence unused-import analyzers for re-exported Any used only in annotations.
