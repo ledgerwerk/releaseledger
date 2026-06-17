@@ -55,8 +55,8 @@ status: released
 released_at: 2026-06-14
 ```
 
-``released_at`` is the public changelog date. Mutation dates are not stored.
-Indexes are derived and expose ``record_revision`` for inspection. Events are
+`released_at` is the public changelog date. Mutation dates are not stored.
+Indexes are derived and expose `record_revision` for inspection. Events are
 append-only operation rows with affected record revisions; git history provides
 chronology and exact before/after content.
 

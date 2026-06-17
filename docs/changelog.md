@@ -2,58 +2,58 @@
 
 ## Two-step model
 
-``releaseledger changelog`` renders review context. Use it when a human or
+`releaseledger changelog` renders review context. Use it when a human or
 coding agent needs release metadata, entries, target-file guidance, and optional
-lint findings. Pass ``--include-sources`` to include provenance refs in Markdown
+lint findings. Pass `--include-sources` to include provenance refs in Markdown
 output.
 
-``releaseledger build`` renders the final changelog section and inserts it into
-the target file. Use ``--dry-run`` before writing and ``--replace-existing`` when
-re-rendering an existing release section. Pass ``--template NAME`` to select a
+`releaseledger build` renders the final changelog section and inserts it into
+the target file. Use `--dry-run` before writing and `--replace-existing` when
+re-rendering an existing release section. Pass `--template NAME` to select a
 named changelog template profile.
 
 ## Full changelog rebuild
 
-``releaseledger build`` with no ``VERSION`` (or ``releaseledger build --all``)
+`releaseledger build` with no `VERSION` (or `releaseledger build --all`)
 rebuilds the **complete** target file from ledger state:
 
-- ``releaseledger build VERSION`` updates one release section.
-- ``releaseledger build`` or ``releaseledger build --all`` rebuilds the whole
+- `releaseledger build VERSION` updates one release section.
+- `releaseledger build` or `releaseledger build --all` rebuilds the whole
   target file from ledger state.
 - Full rebuild excludes internal entries and non-released releases by default.
-- Use ``--include-internal`` only for internal release notes.
-- Use ``--include-release-status`` to include candidate/planned sections
+- Use `--include-internal` only for internal release notes.
+- Use `--include-release-status` to include candidate/planned sections
   explicitly.
-- Full rebuild preserves the ``## [Unreleased]`` body by default
-  (``--no-preserve-unreleased`` clears it) and is a whole-file rewrite (no
-  ``--replace-existing``).
-- An **empty** ``## [Unreleased]`` section is omitted: the heading (and its
+- Full rebuild preserves the `## [Unreleased]` body by default
+  (`--no-preserve-unreleased` clears it) and is a whole-file rewrite (no
+  `--replace-existing`).
+- An **empty** `## [Unreleased]` section is omitted: the heading (and its
   link reference) is rendered only when an unreleased body exists.
-- ``--unreleased-version VERSION`` folds a ``planned``/``draft``/``candidate``
-  release's accepted entries into the canonical ``## [Unreleased]`` section
+- `--unreleased-version VERSION` folds a `planned`/`draft`/`candidate`
+  release's accepted entries into the canonical `## [Unreleased]` section
   without a version heading, and excludes that release from the normal release
-  sections. It is rejected for a missing, ``canceled``, ``yanked``, or already
-  ``released`` version, and is valid only for full builds.
+  sections. It is rejected for a missing, `canceled`, `yanked`, or already
+  `released` version, and is valid only for full builds.
 
 ## Group modes
 
 Entry kinds are grouped for rendering. The mode is set by
-``changelog_group_mode`` in ``[changelog]``.
+`changelog_group_mode` in `[changelog]`.
 
-- ``keepachangelog`` (Keep a Changelog 1.1.0) renders exactly six groups in
-  order: ``Added``, ``Changed``, ``Deprecated``, ``Removed``, ``Fixed``,
-  ``Security``. Extended kinds map onto these groups:
+- `keepachangelog` (Keep a Changelog 1.1.0) renders exactly six groups in
+  order: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`,
+  `Security`. Extended kinds map onto these groups:
 
-  - ``docs -> changed``
-  - ``quality -> changed``
-  - ``internal -> changed`` (hidden unless ``--include-internal``)
+  - `docs -> changed`
+  - `quality -> changed`
+  - `internal -> changed` (hidden unless `--include-internal`)
 
-- ``extended`` (the default) renders ``Documentation``, ``Quality``, and
-  ``Internal`` as their own groups alongside the Keep a Changelog groups.
+- `extended` (the default) renders `Documentation`, `Quality`, and
+  `Internal` as their own groups alongside the Keep a Changelog groups.
 
 ## Default template
 
-The default ``.releaseledger.toml`` contains:
+The default `.releaseledger.toml` contains:
 
 ```toml
 [changelog]
@@ -80,20 +80,20 @@ postprocessors = []
 
 Templates run in a sandboxed Jinja2 environment and may access:
 
-``project``
-:   Project or ledger name.
+`project`
+: Project or ledger name.
 
-``release``
-:   The target release payload, including ``version`` and effective ``date``.
+`release`
+: The target release payload, including `version` and effective `date`.
 
-``entries``
-:   Included entry payloads.
+`entries`
+: Included entry payloads.
 
-``groups``
-:   Entries grouped by changelog title.
+`groups`
+: Entries grouped by changelog title.
 
-``releases``
-:   Known release payloads.
+`releases`
+: Known release payloads.
 
 ## Postprocessors
 
@@ -107,25 +107,25 @@ postprocessors = [
 
 ## Strict builds
 
-``releaseledger build --strict`` blocks on entry lint errors, empty included
-entries unless ``--allow-empty`` is supplied, and release source refs that are
+`releaseledger build --strict` blocks on entry lint errors, empty included
+entries unless `--allow-empty` is supplied, and release source refs that are
 not covered by included entries.
 
 ## Release review
 
-``releaseledger review VERSION`` is a read-only coverage report. It combines
+`releaseledger review VERSION` is a read-only coverage report. It combines
 release state, entry coverage, orphan detection, entry lint, and a strict
 changelog dry-run into one deterministic report so agents and humans do not
-need to run ``release show``, ``entry list``, ``entry lint``, ``changelog``,
-and ``build --dry-run`` separately.
+need to run `release show`, `entry list`, `entry lint`, `changelog`,
+and `build --dry-run` separately.
 
-Each expected source ref (``release.source_refs`` plus ``boundary_ref``) is
-classified as ``covered``, ``draft_only``, ``rejected_only``,
-``internal_only``, or ``missing``. Accepted entries with no provenance
-(empty ``source_refs``, ``issues``, ``prs``, and ``sources``) are reported as
-orphans. ``--strict`` exits non-zero when the release is not OK.
+Each expected source ref (`release.source_refs` plus `boundary_ref`) is
+classified as `covered`, `draft_only`, `rejected_only`,
+`internal_only`, or `missing`. Accepted entries with no provenance
+(empty `source_refs`, `issues`, `prs`, and `sources`) are reported as
+orphans. `--strict` exits non-zero when the release is not OK.
 
-Run review before adding a new entry. If the same ``source_ref`` is already
+Run review before adding a new entry. If the same `source_ref` is already
 covered by an accepted entry, update the existing entry instead of adding a
 duplicate.
 
@@ -146,8 +146,8 @@ releaseledger changelog-section rename-section OLD NEW --target-file CHANGELOG.m
 releaseledger changelog-section remove-section VERSION --target-file CHANGELOG.md
 ```
 
-``release rename --rename-changelog-section`` and
-``release cancel --remove-changelog-section`` apply the same corrections as part
+`release rename --rename-changelog-section` and
+`release cancel --remove-changelog-section` apply the same corrections as part
 of a release correction. Both fail when the source section is missing unless
-``--ignore-missing`` is passed, and ``rename-section`` fails when the
-destination section already exists unless ``--replace-existing`` is passed.
+`--ignore-missing` is passed, and `rename-section` fails when the
+destination section already exists unless `--replace-existing` is passed.

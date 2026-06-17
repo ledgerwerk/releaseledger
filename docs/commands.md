@@ -8,7 +8,7 @@ releaseledger --json ...
 releaseledger --version
 ```
 
-``--cwd`` runs as if started from another directory. ``--json`` emits
+`--cwd` runs as if started from another directory. `--json` emits
 deterministic JSON envelopes.
 
 ## Project commands
@@ -61,12 +61,12 @@ releaseledger release list
 releaseledger release show VERSION
 ```
 
-``release tag`` creates a release with status ``released``. ``release finalize``
-transitions an existing release to ``released``. ``release cancel`` marks a
-release as ``canceled`` (never shipped; excluded from previous-version
-inference). ``release rename`` moves a release bundle to a new version and
+`release tag` creates a release with status `released`. `release finalize`
+transitions an existing release to `released`. `release cancel` marks a
+release as `canceled` (never shipped; excluded from previous-version
+inference). `release rename` moves a release bundle to a new version and
 rewrites its front matter, entries, and optionally its changelog section.
-``release chain check``/``repair`` validate and rebuild predecessor links.
+`release chain check`/`repair` validate and rebuild predecessor links.
 
 ## Entry commands
 
@@ -89,13 +89,13 @@ releaseledger entry prompt VERSION [--source-ref REF]...
                                    [--output PATH]
 ```
 
-``entry lint`` checks summary style and record validity. With ``--json`` it
-returns the full per-entry ``issues`` and ``entries`` payload, **including on
-failure**; the command still exits non-zero. ``--strict`` fails on warnings.
+`entry lint` checks summary style and record validity. With `--json` it
+returns the full per-entry `issues` and `entries` payload, **including on
+failure**; the command still exits non-zero. `--strict` fails on warnings.
 
 ## Batch file format
 
-``entry add-many`` expects YAML with a top-level ``entries`` list:
+`entry add-many` expects YAML with a top-level `entries` list:
 
 ```yaml
 entries:
@@ -145,11 +145,10 @@ releaseledger build [VERSION] [--all] [--target-file PATH]
                             [--dry-run] [--allow-empty]
 ```
 
-``build`` with no ``VERSION`` (or ``--all``) is a full rebuild. It omits an
-empty ``## [Unreleased]`` section: the heading and its link reference are
-rendered only when an unreleased body exists. ``--unreleased-version
-VERSION`` folds a ``planned``/``draft``/``candidate`` release into the
-canonical ``## [Unreleased]`` section without a version heading, and excludes
+`build` with no `VERSION` (or `--all`) is a full rebuild. It omits an
+empty `## [Unreleased]` section: the heading and its link reference are
+rendered only when an unreleased body exists. `--unreleased-version VERSION` folds a `planned`/`draft`/`candidate` release into the
+canonical `## [Unreleased]` section without a version heading, and excludes
 that release from the normal release sections.
 
 ## Review commands
@@ -164,13 +163,13 @@ releaseledger review VERSION [--include-internal]
 
 Read-only coverage report. It combines release state, entry coverage, orphan
 detection, entry lint, and a strict changelog dry-run into one deterministic
-report so agents and humans do not need to run ``release show``,
-``entry list``, ``entry lint``, ``changelog``, and ``build --dry-run``
-separately. ``--strict`` exits non-zero when the release is not OK (uncovered
+report so agents and humans do not need to run `release show`,
+`entry list`, `entry lint`, `changelog`, and `build --dry-run`
+separately. `--strict` exits non-zero when the release is not OK (uncovered
 source refs, lint errors, or a changelog build that would fail).
 
-With ``--git``, review also computes coverage from the git commit range
-(``--git-base``/``--git-head`` or the release's stored git metadata). Strict
+With `--git`, review also computes coverage from the git commit range
+(`--git-base`/`--git-head` or the release's stored git metadata). Strict
 mode fails when any include_by_default git commit has no accepted entry
 coverage.
 
@@ -188,15 +187,14 @@ releaseledger git import VERSION --base REF [--head REF]
 releaseledger git import next --base REF [--head REF] --output PATH
 ```
 
-``git range`` inspects the commit range and prints candidate entries. ``git
-import`` generates an ``entry add-many`` YAML batch from the range for review
+`git range` inspects the commit range and prints candidate entries. `git import` generates an `entry add-many` YAML batch from the range for review
 and curation. It is an entry scaffold, not changelog prose: it warns you to
-run ``releaseledger audit init`` for a durable review worksheet. The ``next``
+run `releaseledger audit init` for a durable review worksheet. The `next`
 forms are non-persisting previews that do not require a release record.
 
-For a real version, ``git range`` uses the release's stored git refs unless
-``--base`` or ``--head`` is supplied explicitly. ``--head`` therefore defaults
-to the stored release head (falling back to ``HEAD`` only when nothing is
+For a real version, `git range` uses the release's stored git refs unless
+`--base` or `--head` is supplied explicitly. `--head` therefore defaults
+to the stored release head (falling back to `HEAD` only when nothing is
 stored).
 
 ## Commit audit sheet commands
@@ -210,12 +208,11 @@ releaseledger audit sync VERSION
 ```
 
 The commit audit sheet is a per-release review artifact that maps every commit
-in the git range to a reviewer decision (``needs_review``, ``accepted``,
-``grouped``, ``internal``, ``rejected``) and to a release entry. Commit
-subjects are evidence-only and must never become changelog prose; ``audit
-validate --strict`` fails when an entry summary matches a commit subject.
-When a sheet exists, ``review`` emits an ``audit`` block; pass
-``--require-audit-sheet`` to gate on a complete sheet.
+in the git range to a reviewer decision (`needs_review`, `accepted`,
+`grouped`, `internal`, `rejected`) and to a release entry. Commit
+subjects are evidence-only and must never become changelog prose; `audit validate --strict` fails when an entry summary matches a commit subject.
+When a sheet exists, `review` emits an `audit` block; pass
+`--require-audit-sheet` to gate on a complete sheet.
 
 ## Branch commands
 
@@ -225,9 +222,8 @@ releaseledger branch start BRANCH --parent PARENT
 releaseledger branch merge BRANCH --into TARGET --release VERSION
 ```
 
-Optional branch-scoped ledgers. ``branch status`` compares the current git
-branch to ``ledger_ref``. ``branch start`` forks a new ledger. ``branch
-merge`` merges entries by ``source_refs`` (``git:<sha>`` dedup).
+Optional branch-scoped ledgers. `branch status` compares the current git
+branch to `ledger_ref`. `branch start` forks a new ledger. `branch merge` merges entries by `source_refs` (`git:<sha>` dedup).
 
 ## Changelog section correction commands
 
@@ -241,5 +237,5 @@ releaseledger changelog-section rename-section OLD_VERSION NEW_VERSION
 ```
 
 These rewrite release section headings in an existing changelog file without
-touching release records. ``release rename --rename-changelog-section`` and
-``release cancel --remove-changelog-section`` apply the same corrections inline.
+touching release records. `release rename --rename-changelog-section` and
+`release cancel --remove-changelog-section` apply the same corrections inline.

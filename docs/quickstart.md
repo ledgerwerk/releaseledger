@@ -18,7 +18,7 @@ python -m pip install -e ".[dev]"
 releaseledger init
 ```
 
-This creates ``.releaseledger.toml`` and the default state layout:
+This creates `.releaseledger.toml` and the default state layout:
 
 ```text
 .releaseledger/
@@ -73,7 +73,7 @@ releaseledger build 1.2.0 \
 
 ## Optional: taskledger provenance
 
-Taskledger refs (``tl:task-0103``) and PR refs (``github:pr-42``) are optional
+Taskledger refs (`tl:task-0103`) and PR refs (`github:pr-42`) are optional
 provenance. Add them to entries to enrich coverage, but git commits are the
 primary source of truth:
 
@@ -113,7 +113,7 @@ releaseledger entry lint 1.2.0 --strict
 
 ## Render changelog output
 
-Use ``changelog`` to produce review context:
+Use `changelog` to produce review context:
 
 ```bash
 releaseledger changelog 1.2.0 \
@@ -121,7 +121,7 @@ releaseledger changelog 1.2.0 \
   --release-date 2026-06-13
 ```
 
-Use ``build`` to render and insert a final section:
+Use `build` to render and insert a final section:
 
 ```bash
 releaseledger build 1.2.0 \

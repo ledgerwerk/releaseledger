@@ -1,6 +1,6 @@
 # Python API
 
-Releaseledger exposes a narrow public API through ``releaseledger.api`` modules.
+Releaseledger exposes a narrow public API through `releaseledger.api` modules.
 Integrations should prefer these modules over internal service paths.
 
 ## Release API
