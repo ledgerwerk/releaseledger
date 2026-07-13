@@ -8,12 +8,14 @@ event, and rebuilds the indexes.
 from __future__ import annotations
 
 import datetime
+import json
 import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
 import ledgercore
+import yaml
 
 from releaseledger.domain.event import (
     EVENT_RELEASE_CANCELED,
@@ -42,16 +44,25 @@ from releaseledger.services.changelog_build import (
     remove_release_section,
     rename_release_section,
 )
+from releaseledger.services.audit import (
+    create_commit_audit_sheet,
+    refresh_commit_audit_sheet,
+    render_commit_audit_sheet,
+)
 from releaseledger.services.events import append_event
 from releaseledger.services.git_sources import (
     GIT_DEFAULT_HEAD,
     build_git_range_summary,
+    generate_git_scaffold_batch,
     is_root_base_ref,
+    release_snapshot_drift_report,
+    resolve_release_snapshot,
     resolve_base_sha,
     resolve_git_ref,
 )
 from releaseledger.storage.paths import resolve_project_paths
 from releaseledger.storage.store import (
+    load_commit_audit_sheet,
     list_releases,
     load_entries,
     load_release,
@@ -70,6 +81,7 @@ __all__ = [
     "list_release_records",
     "rename_release",
     "repair_release_chain",
+    "prepare_release",
     "show_release",
     "tag_release",
     "update_release",
@@ -684,7 +696,100 @@ def show_release(workspace_root: Path, version: str) -> dict[str, object]:
     payload = _release_payload(workspace_root, record)
     payload["entries"] = entries
     payload["entry_count"] = len(entries)
+    drift = release_snapshot_drift_report(workspace_root, record)
+    if drift is not None:
+        payload["snapshot_drift"] = drift
     return payload
+
+
+def prepare_release(
+    workspace_root: Path,
+    *,
+    version: str,
+    previous_version: str | None = None,
+    released_at: str | None = None,
+    git_base_ref: str | None = None,
+    git_head_ref: str | None = None,
+    output_dir: Path,
+) -> dict[str, object]:
+    """Create/update a planned release snapshot and export working artifacts."""
+    workspace_root = workspace_root.expanduser().resolve()
+    output_dir = output_dir.expanduser().resolve()
+    try:
+        load_release(workspace_root, version)
+        release_exists = True
+    except LaunchError as exc:
+        if exc.code != "NOT_FOUND":
+            raise
+        release_exists = False
+    if not release_exists:
+        create_release(
+            workspace_root,
+            version=version,
+            status="planned",
+            previous_version=previous_version,
+            released_at=released_at,
+        )
+    else:
+        update_kwargs: dict[str, object] = {"version": version}
+        if previous_version is not None:
+            update_kwargs["previous_version"] = previous_version
+        if released_at is not None:
+            update_kwargs["released_at"] = released_at
+        if len(update_kwargs) > 1:
+            update_release(workspace_root, **update_kwargs)
+    if git_base_ref is not None or git_head_ref is not None:
+        update_release(
+            workspace_root,
+            version=version,
+            git_base_ref=git_base_ref if git_base_ref is not None else UNSET,
+            git_head_ref=git_head_ref if git_head_ref is not None else UNSET,
+        )
+    release = load_release(workspace_root, version)
+    snapshot = resolve_release_snapshot(workspace_root, release)
+    range_summary = build_git_range_summary(
+        workspace_root,
+        base_ref=snapshot.base_spec,
+        head_ref=snapshot.head_spec,
+    )
+    audit_exists = load_commit_audit_sheet(workspace_root, version) is not None
+    audit_result = (
+        refresh_commit_audit_sheet(workspace_root, version=version)
+        if audit_exists
+        else create_commit_audit_sheet(workspace_root, version=version)
+    )
+    audit_yaml = render_commit_audit_sheet(workspace_root, version=version, format_name="yaml")
+    assert isinstance(audit_yaml, str)
+    scaffold = generate_git_scaffold_batch(
+        workspace_root,
+        release_version=version,
+        base_ref=snapshot.base_spec,
+        head_ref=snapshot.head_spec,
+    )
+    ledgercore.ensure_dir(output_dir)
+    range_path = output_dir / "range.json"
+    audit_path = output_dir / "audit.yaml"
+    scaffold_path = output_dir / "entries.yaml"
+    ledgercore.atomic_write_text(
+        range_path,
+        json.dumps(range_summary, indent=2, sort_keys=True) + "\n",
+    )
+    ledgercore.atomic_write_text(audit_path, audit_yaml)
+    ledgercore.atomic_write_text(
+        scaffold_path,
+        yaml.safe_dump(scaffold, sort_keys=False, default_flow_style=False),
+    )
+    return {
+        "kind": "release_prepare",
+        "version": version,
+        "release": load_release(workspace_root, version).to_dict(),
+        "audit": audit_result,
+        "outputs": {
+            "range_json": str(range_path),
+            "audit_yaml": str(audit_path),
+            "entries_yaml": str(scaffold_path),
+        },
+    }
 
 
 def _resolve_changelog_target(workspace_root: Path, target_file: Path) -> Path:

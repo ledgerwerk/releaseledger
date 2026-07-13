@@ -24,9 +24,9 @@ Release notes are generated from the commits reachable from the release target
 and absent from the previous release target:
 
 ```bash
-releaseledger git range 1.2.0 --base v1.1.0 --head HEAD
-releaseledger git import 1.2.0 --base v1.1.0 --head HEAD --output entries.yaml
-releaseledger review 1.2.0 --git --strict
+releaseledger release update 1.2.0 --git-base v1.1.0 --git-head HEAD
+releaseledger git scaffold 1.2.0 --output entries.yaml
+releaseledger release check 1.2.0 --strict --target-file CHANGELOG.md
 ```
 
 ## What releaseledger stores
@@ -76,7 +76,7 @@ The package exposes the console command `releaseledger` and supports
 # 1. Initialize.
 releaseledger init
 
-# 2. Create the release and attach the git range.
+# 2. Create the release and attach the git snapshot once.
 releaseledger release create 1.2.0 \
   --previous 1.1.0 \
   --released-at 2026-06-14
@@ -85,33 +85,37 @@ releaseledger release update 1.2.0 \
   --git-base v1.1.0 \
   --git-head HEAD
 
-# 3. Generate git candidate entries from the commit range.
-releaseledger git import 1.2.0 \
-  --base v1.1.0 \
-  --head HEAD \
-  --status draft \
-  --output /tmp/1.2.0-git-entries.yaml
-
-# Edit the YAML summaries, then:
-releaseledger entry add-many 1.2.0 --file /tmp/1.2.0-git-entries.yaml --dry-run
-releaseledger entry add-many 1.2.0 --file /tmp/1.2.0-git-entries.yaml
-
-# 4. Generate a durable per-commit review worksheet, inspect every patch,
-#    and validate it covers the git range.
+# 3. Export deterministic evidence, initialize the audit, and scaffold entries.
+releaseledger git evidence 1.2.0 --output-dir /tmp/1.2.0-evidence
 releaseledger audit init 1.2.0
-releaseledger audit show 1.2.0 --output /tmp/1.2.0-commit-audit.md
-releaseledger audit sync 1.2.0
-releaseledger audit validate 1.2.0 --strict --include-internal
+releaseledger audit show 1.2.0 --format yaml --output /tmp/1.2.0-audit.yaml
+releaseledger git scaffold 1.2.0 --output /tmp/1.2.0-git-entries.yaml
 
-# 5. Review git coverage and the audit sheet.
-releaseledger review 1.2.0 --git --strict --include-internal --require-audit-sheet
+# 4. Curate audit annotations, then validate the evidence phase.
+releaseledger audit apply 1.2.0 \
+  --file /tmp/1.2.0-audit-decisions.yaml \
+  --dry-run
+releaseledger audit apply 1.2.0 \
+  --file /tmp/1.2.0-audit-decisions.yaml
+releaseledger audit validate 1.2.0 --phase evidence --strict
 
-
-# 6. Build the changelog section for this release.
-releaseledger build 1.2.0 \
-  --release-date 2026-06-14 \
+# 5. Edit the entry scaffold summaries, then validate and write atomically.
+releaseledger entry add-many 1.2.0 \
+  --file /tmp/1.2.0-git-entries.yaml \
+  --dry-run \
   --strict \
-  --target-file CHANGELOG.md
+  --guard-commit-subjects
+releaseledger entry add-many 1.2.0 \
+  --file /tmp/1.2.0-git-entries.yaml \
+  --strict \
+  --guard-commit-subjects \
+  --sync-audit
+releaseledger audit validate 1.2.0 --phase complete --strict --include-internal
+
+# 6. Run the final read-only gate, then finalize and build.
+releaseledger release check 1.2.0 --strict --target-file CHANGELOG.md
+releaseledger release finalize 1.2.0 --released-at 2026-06-14
+releaseledger build 1.2.0 --strict --target-file CHANGELOG.md
 
 # Or rebuild the COMPLETE changelog from ledger state:
 releaseledger build --dry-run --strict --target-file CHANGELOG.md
@@ -169,6 +173,11 @@ releaseledger release update VERSION [same metadata options]
 releaseledger release tag VERSION [release metadata options]
 releaseledger release finalize VERSION [--released-at YYYY-MM-DD]
                                        [--changelog-file PATH]
+releaseledger release prepare VERSION [--previous VERSION]
+                                      [--released-at YYYY-MM-DD]
+                                      [--git-base REF] [--git-head REF]
+                                      [--output-dir PATH]
+releaseledger release check VERSION [--target-file PATH] [--strict]
 releaseledger release cancel VERSION [--reason TEXT]
                                     [--superseded-by VERSION]
                                     [--force-released-unshipped]
@@ -193,7 +202,9 @@ releaseledger entry add VERSION --kind KIND --summary TEXT [--body TEXT]
                                [--scope SCOPE]... [--source-ref REF]...
                                [--path PATH]... [--issue REF]... [--pr REF]...
                                [--breaking] [--internal] [--dry-run]
-releaseledger entry add-many VERSION --file FILE [--dry-run]
+releaseledger entry add-many VERSION --file FILE [--dry-run] [--strict]
+                                    [--guard-commit-subjects]
+                                    [--sync-audit]
 releaseledger entry update VERSION ENTRY_ID [entry metadata options]
 releaseledger entry show VERSION ENTRY_ID
 releaseledger entry import VERSION --file FILE [--replace]
@@ -234,18 +245,26 @@ releaseledger review VERSION [--include-internal]
                        [--target-file PATH] [--strict]
                        [--git] [--git-base REF] [--git-head REF]
                        [--require-audit-sheet]
+releaseledger release check VERSION [--target-file PATH] [--strict]
 releaseledger audit init VERSION [--base REF] [--head REF] [--overwrite]
-releaseledger audit show VERSION [--format markdown|json] [--output PATH]
+releaseledger audit show VERSION [--format markdown|json|yaml] [--output PATH]
+releaseledger audit apply VERSION --file PATH [--dry-run]
+releaseledger audit refresh VERSION [--base REF] [--head REF] [--allow-remove]
 releaseledger audit update VERSION --file PATH
-releaseledger audit validate VERSION [--strict] [--include-internal]
+releaseledger audit validate VERSION [--phase evidence|complete]
+                                  [--strict] [--include-internal]
 releaseledger audit sync VERSION
 
 releaseledger git range VERSION [--base REF] [--head REF]
                       [--include-merges never|always|nontrivial]
 releaseledger git range next --base REF [--head REF]
-releaseledger git import VERSION --base REF [--head REF]
+releaseledger git scaffold VERSION [--base REF] [--head REF]
+                       [--status draft] --output PATH
+releaseledger git import VERSION [--base REF] [--head REF]
                       [--status draft] --output PATH
 releaseledger git import next --base REF [--head REF] --output PATH
+releaseledger git evidence VERSION [--base REF] [--head REF]
+                       [--output-dir PATH]
 
 releaseledger branch status
 releaseledger branch start BRANCH --parent PARENT

@@ -25,4 +25,19 @@ def test_skill_requires_commit_by_commit_git_audit() -> None:
 def test_skill_disallows_parallel_releaseledger_mutations() -> None:
     text = SKILL.read_text(encoding="utf-8")
     assert "Do not run multiple releaseledger mutating commands concurrently" in text
-    assert "Do not replace this with many parallel entry add calls" in text
+    assert "Never run a command and its verification concurrently." in text
+    assert "mutation before issuing `show`, `list`, `review`, `validate`, or file checks" in text
+
+
+def test_skill_uses_phase_aware_audit_validation_and_release_check() -> None:
+    text = SKILL.read_text(encoding="utf-8")
+    assert "audit validate VERSION --phase evidence --strict" in text
+    assert "audit validate VERSION --phase complete --strict --include-internal" in text
+    assert "release check VERSION --strict --target-file CHANGELOG.md" in text
+
+
+def test_skill_uses_builtin_commit_subject_guard_and_snapshot_rule() -> None:
+    text = SKILL.read_text(encoding="utf-8")
+    assert "--guard-commit-subjects" in text
+    assert "Resolve `HEAD` once" in text
+    assert "omit `--head`" in text

@@ -52,10 +52,13 @@ releaseledger release list
 releaseledger release show VERSION
 releaseledger release create VERSION
 releaseledger release update VERSION
+releaseledger release prepare VERSION
 releaseledger release tag VERSION
 releaseledger release finalize VERSION
+releaseledger release check VERSION [--strict] [--target-file PATH]
 releaseledger entry add VERSION --kind KIND --summary TEXT
-releaseledger entry add-many VERSION --file FILE --dry-run
+releaseledger entry add-many VERSION --file FILE --dry-run [--strict] [--guard-commit-subjects]
+releaseledger entry add-many VERSION --file FILE [--strict] [--guard-commit-subjects] [--sync-audit]
 releaseledger entry show VERSION ENTRY_ID
 releaseledger entry update VERSION ENTRY_ID
 releaseledger entry import VERSION --file FILE
@@ -66,11 +69,15 @@ releaseledger changelog VERSION --format markdown|json
 releaseledger build VERSION --dry-run
 releaseledger review VERSION [--strict] [--git] [--git-base REF] [--git-head REF] [--require-audit-sheet]
 releaseledger git range VERSION [--base REF] [--head REF]
-releaseledger git import VERSION --base REF [--head REF] --output PATH
+releaseledger git scaffold VERSION [--base REF] [--head REF] --output PATH
+releaseledger git import VERSION [--base REF] [--head REF] --output PATH
+releaseledger git evidence VERSION [--base REF] [--head REF] --output-dir DIR
 releaseledger audit init VERSION [--base REF] [--head REF] [--overwrite]
-releaseledger audit show VERSION [--format markdown|json] [--output PATH]
+releaseledger audit show VERSION [--format markdown|json|yaml] [--output PATH]
+releaseledger audit apply VERSION --file PATH [--dry-run]
+releaseledger audit refresh VERSION [--base REF] [--head REF] [--allow-remove]
 releaseledger audit update VERSION --file PATH
-releaseledger audit validate VERSION [--strict] [--include-internal]
+releaseledger audit validate VERSION [--phase evidence|complete] [--strict] [--include-internal]
 releaseledger audit sync VERSION
 releaseledger branch status
 releaseledger build --strict --target-file CHANGELOG.md
@@ -199,8 +206,10 @@ opaque context and global refs:
 ```bash
 releaseledger entry prompt VERSION --source-ref tl:task-0103 \
   --context-file /tmp/task-0103.json --output /tmp/prompt.md
-releaseledger entry add-many VERSION --file /tmp/VERSION-entries.yaml --dry-run
-releaseledger entry add-many VERSION --file /tmp/VERSION-entries.yaml
+releaseledger entry add-many VERSION --file /tmp/VERSION-entries.yaml \
+  --dry-run --strict --guard-commit-subjects
+releaseledger entry add-many VERSION --file /tmp/VERSION-entries.yaml \
+  --strict --guard-commit-subjects --sync-audit
 releaseledger entry lint VERSION --strict
 releaseledger entry list VERSION
 ```
@@ -234,35 +243,44 @@ Rules:
 
 Use this for any git-backed changelog or release-note backfill.
 
-1. Attach or resolve the git range.
-2. Run `releaseledger audit init VERSION --base BASE --head HEAD`.
-3. Inspect every commit patch. Fill `inspected`, `inspected_paths`,
-   `observed_behavior`, `decision`, and `target_entry_key`.
-4. Never copy, paraphrase, title-case, or mechanically convert
+1. Attach or resolve the git range once with
+   `releaseledger release update VERSION --git-base PREV_TAG --git-head HEAD`
+   or `releaseledger release prepare ...`.
+2. After the snapshot is pinned, omit `--head` unless intentionally refreshing
+   the stored snapshot.
+3. Create the sheet with `releaseledger audit init VERSION`.
+4. Export the canonical editable YAML with
+   `releaseledger audit show VERSION --format yaml --output audit.yaml`.
+5. Curate row annotations with a minimal decisions file and apply it with
+   `releaseledger audit apply VERSION --file audit-decisions.yaml [--dry-run]`.
+6. Never copy, paraphrase, title-case, or mechanically convert
    `evidence_subject` into `summary`.
-5. Group commits only when the grouped entry still covers every `git:<sha>`
-   source ref.
-6. Mark housekeeping as `internal` and cover it with an internal accepted
-   entry; do not invent public changelog prose.
-7. Run `releaseledger audit validate VERSION --strict --include-internal`
-   before `entry add-many` and again after `audit sync`.
-8. Run
-   `releaseledger review VERSION --git --strict --include-internal --require-audit-sheet`
-   before building.
+7. Validate the evidence phase before creating entries:
+   `releaseledger audit validate VERSION --phase evidence --strict`.
+8. Generate the batch scaffold with `releaseledger git scaffold VERSION --output entries.yaml`
+   (or `git import`, which remains a compatibility alias).
+9. Add entries atomically with
+   `releaseledger entry add-many VERSION --file entries.yaml --dry-run --strict --guard-commit-subjects`
+   followed by
+   `releaseledger entry add-many VERSION --file entries.yaml --strict --guard-commit-subjects --sync-audit`.
+10. Validate the complete phase after entries exist:
+    `releaseledger audit validate VERSION --phase complete --strict --include-internal`.
+11. Run `releaseledger release check VERSION --strict --target-file CHANGELOG.md`
+    before any final build.
 
-   `audit init` writes one `needs_review` row per git candidate commit.
-   Decisions are `needs_review`, `accepted`, `grouped`, `internal`, and
-   `rejected` (prefer `internal` for housekeeping). The sheet is evidence
-   state, not changelog prose; the YAML file under
-   `.releaseledger/.../audit/commit-audit.yaml` is canonical.
+`audit init` writes one `needs_review` row per git candidate commit. Decisions
+are `needs_review`, `accepted`, `grouped`, `internal`, and `rejected`.
+`public_impact` values are `public`, `docs`, `internal`, `none`, and
+`unknown`. The sheet is evidence state, not changelog prose.
 
 ## CHANGELOG.md build protocol
 
 Use this when the user asks to build, generate, or update `CHANGELOG.md`.
 
-0. For a git-backed release, run a strict git coverage review immediately before any build:
-   `releaseledger review VERSION --git --git-base PREV_TAG --git-head HEAD --strict`.
-   If review reports missing `git:<sha>` coverage, uncovered expected refs, lint errors, or build blockers, stop and report the missing audit work. Do not build.
+0. For a git-backed release, run the consolidated read-only gate first:
+   `releaseledger release check VERSION --strict --target-file CHANGELOG.md`.
+   If it reports missing `git:<sha>` coverage, audit failures, lint errors, or
+   release-state blockers, stop and resolve them before building.
 1. Generate a strict dry run first:
    `releaseledger build VERSION --dry-run --strict --target-file CHANGELOG.md`.
 2. Inspect the rendered section:
@@ -282,7 +300,10 @@ Use this when the user asks to build, generate, or update `CHANGELOG.md`.
 6. Accepted entries are included by default. Include draft entries only for
    explicitly draft output and preserve the draft-quality warning.
 7. Do not use `--allow-empty` unless an empty release section is intentional.
-8. To rebuild the **whole** target file from ledger state, use the
+8. If the user explicitly said the release shipped, finalize it before the
+   final public build:
+   `releaseledger release finalize VERSION --released-at YYYY-MM-DD`.
+9. To rebuild the **whole** target file from ledger state, use the
    conventional full-build command:
    - `releaseledger build --dry-run --target-file CHANGELOG.md`
    - `releaseledger build --target-file CHANGELOG.md`
@@ -294,16 +315,19 @@ Use this when the user asks to build, generate, or update `CHANGELOG.md`.
 
 ## Changelog build intent protocol
 
-When the user asks to "fill", "build", "rebuild", or "update" `CHANGELOG.md`
-without explicitly limiting the request to one version section, run the full
-document rebuild:
+An explicit release version means single-section intent:
+
+```bash
+releaseledger build VERSION --strict --target-file CHANGELOG.md
+```
+
+Use a full document rebuild only when the user explicitly asks for all history,
+for example "rebuild the whole changelog" or "regenerate all release
+sections":
 
 ```bash
 releaseledger build --strict --target-file CHANGELOG.md
 ```
-
-Do not substitute `releaseledger build VERSION` unless the user explicitly asks
-for one release section.
 
 If a git range exists, strict build must pass. If it fails because commits are
 not covered by included entries, stop and create/update entries from a git audit
@@ -324,8 +348,7 @@ releaseledger review VERSION
 releaseledger --json review VERSION
 releaseledger review VERSION --include-status accepted --include-status draft
 releaseledger review VERSION --strict --target-file CHANGELOG.md
-releaseledger review VERSION --git --strict
-releaseledger review VERSION --git --git-base v1.1.0 --git-head HEAD --strict
+releaseledger release check VERSION --strict --target-file CHANGELOG.md
 ```
 
 Rules:
@@ -345,9 +368,10 @@ Rules:
    intentional; confirm before re-adding.
 4. Orphan accepted entries (no `source_refs`, `issues`, `prs`, or `sources`)
    should get provenance or be removed.
-5. `--strict` exits non-zero when the release is not OK. It mirrors `build --strict`, so it can fail on uncovered refs, lint errors, a missing release
-   date in Keep a Changelog mode, or other build blockers. Review alone never
-   writes the changelog.
+5. `--strict` exits non-zero when the release is not OK. It mirrors
+   `build --strict`, so it can fail on uncovered refs, lint errors, a missing
+   release date in Keep a Changelog mode, a dated `planned` release, or other
+   build blockers. Review alone never writes the changelog.
 6. `git:<sha>` source refs are first-class coverage identities (not just evidence). A commit in the release range should have an accepted entry covering its `git:<sha>` in `source_refs`.
 
 ## Git-first workflow
@@ -378,93 +402,31 @@ Workflow:
 releaseledger release create VERSION --previous PREV_VERSION --released-at YYYY-MM-DD
 releaseledger release update VERSION --git-base PREV_TAG --git-head HEAD
 
-# 2. Capture the range. JSON mode is preferred because it gives a machine list
-#    of source refs that can be audited.
-releaseledger --json git range VERSION --base PREV_TAG --head HEAD > /tmp/releaseledger-range.json
+# 2. From this point, omit --head unless intentionally refreshing the snapshot.
 
-# 3. Create a per-commit evidence directory and inspect every candidate commit.
-python - <<'PY'
-import json
-from pathlib import Path
-payload = json.loads(Path("/tmp/releaseledger-range.json").read_text())
-candidates = payload["result"]["candidates"]
-Path("/tmp/releaseledger-shas.txt").write_text(
-    "\n".join(c["sha"] for c in candidates) + "\n"
-)
-PY
-while read -r sha; do
-  git show --stat --patch --find-renames --find-copies --format=fuller "$sha"     > "/tmp/releaseledger-commit-${sha}.patch"
-done < /tmp/releaseledger-shas.txt
-```
+# 3. Export deterministic evidence and the canonical audit sheet.
+releaseledger git evidence VERSION --output-dir evidence/
+releaseledger audit init VERSION
+releaseledger audit show VERSION --format yaml --output audit.yaml
 
-Create an audit worksheet before writing entries:
+# 4. Curate row annotations and validate only the evidence phase.
+releaseledger audit apply VERSION --file audit-decisions.yaml --dry-run
+releaseledger audit apply VERSION --file audit-decisions.yaml
+releaseledger audit validate VERSION --phase evidence --strict
 
-```markdown
-| sha   | paths inspected | public/API/docs behavior            | decision                     | target entry          |
-| ----- | --------------- | ----------------------------------- | ---------------------------- | --------------------- |
-| <sha> | <paths>         | <real effect from patch/tests/docs> | accept/internal/reject/group | <summary or entry id> |
-```
+# 5. Create a coverage scaffold and validate entries atomically.
+releaseledger git scaffold VERSION --output entries.yaml
+releaseledger entry add-many VERSION --file entries.yaml \
+  --dry-run --strict --guard-commit-subjects
+releaseledger entry add-many VERSION --file entries.yaml \
+  --strict --guard-commit-subjects --sync-audit
 
-Rules for the worksheet:
+# 6. Run one complete read-only gate.
+releaseledger release check VERSION --strict --target-file CHANGELOG.md
 
-1. There must be one row per candidate commit from the range.
-2. `paths inspected` must come from the patch/path evidence, not only from a
-   commit subject.
-3. `public/API/docs behavior` must describe the shipped behavior, compatibility
-   impact, CLI/config/docs effect, or state that the commit is internal-only.
-4. `decision` must be one of `accept`, `group`, `internal`, or `reject`.
-5. Version-only commits may be grouped or rejected only after checking the
-   actual patch and confirming no independent user-facing behavior changed.
-
-Then create and curate the entry batch:
-
-```bash
-# 4. Create a coverage scaffold. For a non-empty range this is mandatory.
-releaseledger git import VERSION --base PREV_TAG --head HEAD --status draft --output entries.yaml
-
-# 5. Rewrite entries.yaml manually from the worksheet:
-#    - fill every summary from reviewed behavior, API/docs impact, tests, paths,
-#      and patch evidence
-#    - preserve every git:<sha> source_ref
-#    - combine related commits only by moving all relevant git:<sha> source_refs
-#      onto the combined entry
-#    - mark implementation-only work with internal: true or status: rejected
-#    - never use commit subjects as summaries
-
-# 6. Validate atomically. Do not replace this with many parallel entry add calls.
-releaseledger entry add-many VERSION --file entries.yaml --dry-run
-releaseledger entry add-many VERSION --file entries.yaml
-
-# 7. Review git coverage. This is the gate before changelog build.
-releaseledger review VERSION --git --git-base PREV_TAG --git-head HEAD --strict
-
-# 8. Build only after strict review passes.
-releaseledger build --strict --target-file CHANGELOG.md
-```
-
-For a single existing section correction, retain:
-
-```bash
-releaseledger build VERSION --strict --target-file CHANGELOG.md --replace-existing
-```
-
-Commit-message guard before `entry add-many`:
-
-```bash
-# Inspect commit subjects only to detect accidental leakage. Do not use them as prose.
-git log --format=%s PREV_TAG..HEAD > /tmp/releaseledger-commit-subjects.txt
-python - <<'PY'
-from pathlib import Path
-import yaml
-subjects = {line.strip().lower() for line in Path("/tmp/releaseledger-commit-subjects.txt").read_text().splitlines() if line.strip()}
-batch = yaml.safe_load(Path("entries.yaml").read_text())
-for i, entry in enumerate(batch.get("entries", []), 1):
-    summary = str(entry.get("summary", "")).strip().lower()
-    if not summary:
-        raise SystemExit(f"entry {i}: summary is blank")
-    if summary in subjects:
-        raise SystemExit(f"entry {i}: summary matches a commit subject: {summary!r}")
-PY
+# 7. Finalize only when shipped intent is explicit, then build the requested scope.
+releaseledger release finalize VERSION --released-at YYYY-MM-DD
+releaseledger build VERSION --strict --target-file CHANGELOG.md
 ```
 
 No coverage, no build:
@@ -530,6 +492,60 @@ releaseledger --json build 1.2.0 --dry-run
 ```
 
 Do not append `--json` after the subcommand unless releaseledger explicitly adds that local option later.
+
+## Exact enum vocabulary
+
+Audit decisions:
+
+```text
+needs_review
+accepted
+grouped
+internal
+rejected
+```
+
+Audit public impact:
+
+```text
+public
+docs
+internal
+none
+unknown
+```
+
+Entry kinds:
+
+```text
+added
+changed
+fixed
+removed
+deprecated
+security
+docs
+quality
+internal
+```
+
+## Serialization rule
+
+Never run a command and its verification concurrently. Wait for a successful
+mutation before issuing `show`, `list`, `review`, `validate`, or file checks
+that depend on it.
+
+## Snapshot rule
+
+Resolve `HEAD` once when attaching or explicitly refreshing a release range.
+After that, omit `--head` and use the stored SHA snapshot. A new commit on the
+branch belongs to the release only after an explicit refresh.
+
+## Build-scope rule
+
+An explicit version in "update the changelog for VERSION" means single-section
+intent. Full-file rebuild requires explicit all-history wording such as
+"rebuild the whole changelog" or "regenerate all release sections."
 
 ## CLI failure protocol
 

@@ -30,10 +30,13 @@ initial implementation skips merges while keeping their PR metadata for grouping
 from __future__ import annotations
 
 import re
+import json
+import hashlib
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from releaseledger.domain.release import ReleaseRecord
 from releaseledger.errors import CODE_USAGE_ERROR, LaunchError
 
 __all__ = [
@@ -45,10 +48,14 @@ __all__ = [
     "MERGE_POLICIES",
     "build_git_range_summary",
     "collect_git_candidates",
+    "export_git_evidence",
+    "generate_git_scaffold_batch",
     "is_git_worktree",
     "resolve_git_ref",
     "EMPTY_TREE_SHA",
     "is_root_base_ref",
+    "release_snapshot_drift_report",
+    "resolve_release_snapshot",
     "resolve_base_sha",
 ]
 
@@ -75,6 +82,118 @@ def resolve_base_sha(workspace_root: Path, base_ref: str) -> str:
     if is_root_base_ref(base_ref):
         return EMPTY_TREE_SHA
     return resolve_git_ref(workspace_root, base_ref)
+
+
+def resolve_release_snapshot(
+    workspace_root: Path,
+    release: ReleaseRecord,
+    *,
+    explicit_base: str | None = None,
+    explicit_head: str | None = None,
+    default_head: str = GIT_DEFAULT_HEAD,
+) -> ReleaseSnapshot:
+    """Resolve the immutable git snapshot for a stored release.
+
+    Explicit refs intentionally trigger a live range resolution. Without explicit
+    refs, stored SHAs win over symbolic refs so a moving branch does not silently
+    expand an in-progress release.
+    """
+
+    def _missing_range_error() -> LaunchError:
+        return LaunchError(
+            f"No git range for {release.version}. Pass --base/--head, or store the "
+            "release range first.",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+            remediation=[
+                f"Run `releaseledger release update {release.version} --git-base PREV "
+                "--git-head HEAD` first, or pass --base/--head."
+            ],
+        )
+
+    if explicit_base is not None or explicit_head is not None:
+        base_ref = explicit_base or release.git_base_ref or release.git_base_sha
+        if base_ref is None:
+            raise _missing_range_error()
+        head_ref = explicit_head or default_head
+        base_spec = base_ref
+        head_spec = head_ref
+        source = "explicit"
+    elif release.git_base_sha and release.git_head_sha:
+        base_ref = release.git_base_ref or release.git_base_sha
+        head_ref = release.git_head_ref or release.git_head_sha
+        base_spec = release.git_base_sha
+        head_spec = release.git_head_sha
+        source = "stored_sha"
+    elif release.git_base_ref and release.git_head_ref:
+        base_ref = release.git_base_ref
+        head_ref = release.git_head_ref
+        base_spec = base_ref
+        head_spec = head_ref
+        source = "stored_ref"
+    else:
+        raise _missing_range_error()
+
+    base_sha = resolve_base_sha(workspace_root, base_spec)
+    head_sha = resolve_git_ref(workspace_root, head_spec)
+    return ReleaseSnapshot(
+        base_ref=base_ref,
+        head_ref=head_ref,
+        base_spec=base_spec,
+        head_spec=head_spec,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        source=source,
+    )
+
+
+def release_snapshot_drift_report(
+    workspace_root: Path,
+    release: ReleaseRecord,
+) -> dict[str, object] | None:
+    """Return current-vs-stored drift information for stored symbolic refs."""
+
+    checks: list[dict[str, object]] = []
+    targets = (
+        ("base", release.git_base_ref, release.git_base_sha),
+        ("head", release.git_head_ref, release.git_head_sha),
+    )
+    for label, ref, stored_sha in targets:
+        if ref is None or stored_sha is None:
+            continue
+        try:
+            current_sha = (
+                resolve_base_sha(workspace_root, ref)
+                if label == "base"
+                else resolve_git_ref(workspace_root, ref)
+            )
+            status = "drifted" if current_sha != stored_sha else "current"
+            check: dict[str, object] = {
+                "label": label,
+                "ref": ref,
+                "stored_sha": stored_sha,
+                "current_sha": current_sha,
+                "status": status,
+            }
+        except LaunchError as exc:
+            check = {
+                "label": label,
+                "ref": ref,
+                "stored_sha": stored_sha,
+                "current_sha": None,
+                "status": "unknown",
+                "message": exc.message,
+            }
+        checks.append(check)
+    if not checks:
+        return None
+    if any(check["status"] == "drifted" for check in checks):
+        status = "drifted"
+    elif any(check["status"] == "unknown" for check in checks):
+        status = "unknown"
+    else:
+        status = "current"
+    return {"status": status, "checks": checks}
 
 
 # Conventional-commit prefix -> releaseledger entry kind inference.
@@ -153,6 +272,24 @@ class GitSourceCandidate:
     inferred_kind: str
     inferred_summary: str
     diff_excerpt: str | None
+
+
+@dataclass(frozen=True)
+class ReleaseSnapshot:
+    """Resolved release snapshot used by git-backed release commands.
+
+    ``base_ref`` / ``head_ref`` are display-oriented values that preserve stored
+    symbolic refs where possible. ``base_spec`` / ``head_spec`` are the actual
+    immutable refs resolved for git commands.
+    """
+
+    base_ref: str
+    head_ref: str
+    base_spec: str
+    head_spec: str
+    base_sha: str
+    head_sha: str
+    source: str
 
 
 # --------------------------------------------------------------------------
@@ -679,6 +816,124 @@ def build_git_range_summary(
         ),
         "candidate_count": len(candidates),
         "include_merges": include_merges,
+    }
+
+
+def generate_git_scaffold_batch(
+    workspace_root: Path,
+    *,
+    release_version: str,
+    base_ref: str,
+    head_ref: str = GIT_DEFAULT_HEAD,
+    include_merges: str = GIT_DEFAULT_INCLUDE_MERGES,
+    status: str = "draft",
+) -> dict[str, object]:
+    """Return a metadata-rich entry scaffold batch for a git snapshot."""
+    base_sha = resolve_base_sha(workspace_root, base_ref)
+    head_sha = resolve_git_ref(workspace_root, head_ref)
+    candidates = collect_git_candidates(
+        workspace_root,
+        base_ref=base_ref,
+        head_ref=head_ref,
+        include_merges=include_merges,
+    )
+    entries: list[dict[str, object]] = []
+    for candidate in candidates:
+        entries.append(
+            {
+                "kind": candidate.inferred_kind,
+                "summary": "",
+                "status": status,
+                "source_refs": [candidate.source_ref],
+                "paths": list(candidate.paths),
+                "sources": [candidate.source_ref],
+            }
+        )
+    return {
+        "schema_version": 1,
+        "object_type": "release_entry_batch",
+        "release_version": release_version,
+        "git_base_ref": base_ref,
+        "git_base_sha": base_sha,
+        "git_head_ref": head_ref,
+        "git_head_sha": head_sha,
+        "include_merges": include_merges,
+        "entries": entries,
+    }
+
+
+def export_git_evidence(
+    workspace_root: Path,
+    *,
+    release_version: str,
+    base_ref: str,
+    head_ref: str = GIT_DEFAULT_HEAD,
+    include_merges: str = GIT_DEFAULT_INCLUDE_MERGES,
+    output_dir: Path,
+) -> dict[str, object]:
+    """Write deterministic per-commit patch evidence plus a manifest."""
+    base_sha = resolve_base_sha(workspace_root, base_ref)
+    head_sha = resolve_git_ref(workspace_root, head_ref)
+    candidates = collect_git_candidates(
+        workspace_root,
+        base_ref=base_ref,
+        head_ref=head_ref,
+        include_merges=include_merges,
+    )
+    output_dir = output_dir.expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_candidates: list[dict[str, object]] = []
+    for candidate in candidates:
+        result = _run_git(
+            workspace_root,
+            [
+                "show",
+                "--format=",
+                "--find-renames",
+                "--find-copies",
+                "--patch",
+                "--stat",
+                candidate.sha,
+            ],
+        )
+        _require_git_available(result, what=f"git show {candidate.sha}")
+        patch_text = result.stdout
+        patch_name = f"{candidate.short_sha}.patch"
+        patch_path = output_dir / patch_name
+        patch_path.write_text(patch_text, encoding="utf-8")
+        patch_hash = hashlib.sha256(patch_text.encode("utf-8")).hexdigest()
+        manifest_candidates.append(
+            {
+                "sha": candidate.sha,
+                "short_sha": candidate.short_sha,
+                "source_ref": candidate.source_ref,
+                "paths": list(candidate.paths),
+                "additions": candidate.additions,
+                "deletions": candidate.deletions,
+                "patch_file": patch_name,
+                "patch_sha256": patch_hash,
+            }
+        )
+    manifest = {
+        "schema_version": 1,
+        "object_type": "git_evidence_manifest",
+        "release_version": release_version,
+        "git_base_ref": base_ref,
+        "git_base_sha": base_sha,
+        "git_head_ref": head_ref,
+        "git_head_sha": head_sha,
+        "include_merges": include_merges,
+        "candidate_count": len(manifest_candidates),
+        "candidates": manifest_candidates,
+    }
+    manifest_path = output_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return {
+        "kind": "git_evidence",
+        "release_version": release_version,
+        "output_dir": str(output_dir),
+        "manifest": str(manifest_path),
+        "candidate_count": len(manifest_candidates),
     }
 
 

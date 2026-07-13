@@ -14,6 +14,7 @@ from releaseledger.storage.store import load_entries, load_release, release_dir
 
 __all__ = [
     "assert_entry_summary_valid",
+    "lint_entry_records",
     "lint_release_entries",
     "validate_entry_summary",
 ]
@@ -32,17 +33,19 @@ _RAW_TASK_RE = re.compile(r"(?<!:)\btask-\d+\b", re.IGNORECASE)
 
 
 def _issue(
-    severity: str, message: str, *, code: str, field: str = "summary"
-) -> dict[str, str]:
-    return {
+    severity: str, message: str, *, code: str, field: str = "summary", **extra: object
+) -> dict[str, object]:
+    issue: dict[str, object] = {
         "severity": severity,
         "code": code,
         "field": field,
         "message": message,
     }
+    issue.update(extra)
+    return issue
 
 
-def validate_entry_summary(summary: str) -> list[dict[str, str]]:
+def validate_entry_summary(summary: str) -> list[dict[str, object]]:
     """Return deterministic style and validity findings for a summary."""
     issues: list[dict[str, str]] = []
     if not isinstance(summary, str) or not summary.strip():
@@ -57,6 +60,7 @@ def validate_entry_summary(summary: str) -> list[dict[str, str]]:
                 "error",
                 "Summary must not exceed 180 characters.",
                 code="too_long",
+                length=len(summary),
             )
         )
     elif len(summary) > 120:
@@ -65,6 +69,7 @@ def validate_entry_summary(summary: str) -> list[dict[str, str]]:
                 "warning",
                 "Summary exceeds the recommended 120 characters.",
                 code="long",
+                length=len(summary),
             )
         )
     if summary.lstrip().startswith("#"):
@@ -109,6 +114,51 @@ def validate_entry_summary(summary: str) -> list[dict[str, str]]:
             )
         )
     return issues
+
+
+def lint_entry_records(
+    entries: list[ReleaseEntryRecord],
+    *,
+    strict: bool = False,
+) -> dict[str, object]:
+    """Lint a prepared in-memory entry list without reading from disk."""
+    issues: list[dict[str, object]] = []
+    entry_results: list[dict[str, object]] = []
+    for entry in entries:
+        entry_issues: list[dict[str, object]] = []
+        for issue in validate_entry_summary(entry.summary):
+            enriched: dict[str, object] = {
+                **issue,
+                "entry_id": entry.entry_id,
+                "summary_length": len(entry.summary),
+            }
+            issues.append(enriched)
+            entry_issues.append(enriched)
+        entry_results.append(
+            {
+                "entry_id": entry.entry_id,
+                "status": entry.status,
+                "issues": entry_issues,
+            }
+        )
+    if not any(entry.status == "accepted" for entry in entries):
+        issues.append(
+            {
+                "severity": "warning",
+                "code": "no_accepted_entries",
+                "field": "status",
+                "message": "Release has no accepted entries.",
+            }
+        )
+    errors = sum(issue["severity"] == "error" for issue in issues)
+    warnings = sum(issue["severity"] == "warning" for issue in issues)
+    return {
+        "issues": issues,
+        "entries": entry_results,
+        "summary": {"errors": errors, "warnings": warnings},
+        "passed": errors == 0 and (not strict or warnings == 0),
+        "strict": strict,
+    }
 
 
 def assert_entry_summary_valid(summary: str, *, fail_on_warning: bool = True) -> None:
@@ -189,34 +239,13 @@ def lint_release_entries(
             )
             valid_ids.discard(path.stem)
     entries = [entry for entry in entries if entry.entry_id in valid_ids]
-    entry_results: list[dict[str, object]] = []
-    for entry in entries:
-        entry_issues: list[dict[str, object]] = []
-        for issue in validate_entry_summary(entry.summary):
-            enriched: dict[str, object] = {
-                **issue,
-                "entry_id": entry.entry_id,
-            }
-            issues.append(enriched)
-            entry_issues.append(enriched)
-        entry_results.append(
-            {
-                "entry_id": entry.entry_id,
-                "status": entry.status,
-                "issues": entry_issues,
-            }
-        )
-    if not any(entry.status == "accepted" for entry in entries):
-        issues.append(
-            {
-                "severity": "warning",
-                "code": "no_accepted_entries",
-                "field": "status",
-                "message": "Release has no accepted entries.",
-            }
-        )
-    errors = sum(issue["severity"] == "error" for issue in issues)
-    warnings = sum(issue["severity"] == "warning" for issue in issues)
+    lint_result = lint_entry_records(entries, strict=strict)
+    issues.extend(lint_result["issues"])  # type: ignore[arg-type]
+    entry_results = lint_result["entries"]  # type: ignore[assignment]
+    summary = lint_result["summary"]
+    assert isinstance(summary, dict)
+    errors = int(summary["errors"])
+    warnings = int(summary["warnings"])
     return {
         "kind": "entry_lint",
         "release_version": release_version,
@@ -225,6 +254,6 @@ def lint_release_entries(
         "summary": {"errors": errors, "warnings": warnings},
         "issues": issues,
         "entries": entry_results,
-        "passed": errors == 0 and (not strict or warnings == 0),
+        "passed": bool(lint_result["passed"]),
         "strict": strict,
     }

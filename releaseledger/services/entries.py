@@ -27,13 +27,21 @@ from releaseledger.errors import (
     CODE_VALIDATION_ERROR,
     LaunchError,
 )
+from releaseledger.services.audit import (
+    project_audit_entry_coverage,
+    sync_audit_sheet_targets,
+)
 from releaseledger.services.events import append_event
+from releaseledger.services.entry_lint import lint_entry_records
 from releaseledger.storage.paths import resolve_project_paths
 from releaseledger.storage.store import (
     delete_entry,
+    load_commit_audit_sheet,
     load_entries,
     load_release,
+    next_commit_audit_versioning,
     rebuild_indexes,
+    save_commit_audit_sheet,
     save_entry,
     save_release,
 )
@@ -187,6 +195,92 @@ def _payload(
 
 def next_entry_id_from(entries: list[ReleaseEntryRecord]) -> str:
     return ledgercore.next_prefixed_id("entry", [entry.entry_id for entry in entries])
+
+
+def _entry_fingerprint(entry: ReleaseEntryRecord) -> str:
+    parts = [
+        entry.kind.strip().lower(),
+        " ".join(entry.summary.strip().split()),
+        "\n".join(sorted(entry.source_refs)),
+        "\n".join(sorted(entry.paths)),
+    ]
+    return "\n".join(parts)
+
+
+def _batch_result(
+    workspace_root: Path,
+    *,
+    release_version: str,
+    proposed: list[ReleaseEntryRecord],
+    issues: list[dict[str, object]],
+    lint: dict[str, object],
+    coverage_projection: dict[str, object] | None,
+    written: bool,
+    events: list[str],
+    audit_sync: dict[str, object] | None = None,
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "kind": "release_entry_batch" if written else "release_entry_batch_preview",
+        "ledger_ref": resolve_project_paths(workspace_root).ledger_ref,
+        "release_version": release_version,
+        "entries": [record.to_dict() for record in proposed],
+        "entry_ids": [record.entry_id for record in proposed],
+        "issues": issues,
+        "lint": lint,
+        "written": written,
+        "events": events,
+    }
+    if coverage_projection is not None:
+        result["coverage_projection"] = coverage_projection
+    if audit_sync is not None:
+        result["audit_sync"] = audit_sync
+    return result
+
+
+def _duplicate_batch_issues(
+    *,
+    existing: list[ReleaseEntryRecord],
+    proposed: list[ReleaseEntryRecord],
+) -> list[dict[str, object]]:
+    issues: list[dict[str, object]] = []
+    source_ref_owner: dict[str, str] = {}
+    fingerprint_owner: dict[str, str] = {}
+    for entry in existing:
+        for ref in entry.source_refs:
+            source_ref_owner.setdefault(ref, entry.entry_id)
+        fingerprint_owner.setdefault(_entry_fingerprint(entry), entry.entry_id)
+    for entry in proposed:
+        for ref in entry.source_refs:
+            owner = source_ref_owner.get(ref)
+            if owner is not None:
+                issues.append(
+                    {
+                        "entry_id": entry.entry_id,
+                        "severity": "error",
+                        "field": "source_refs",
+                        "code": "duplicate_source_ref",
+                        "message": f"Source ref {ref} is already covered by {owner}.",
+                    }
+                )
+            else:
+                source_ref_owner[ref] = entry.entry_id
+        fingerprint = _entry_fingerprint(entry)
+        owner = fingerprint_owner.get(fingerprint)
+        if owner is not None:
+            issues.append(
+                {
+                    "entry_id": entry.entry_id,
+                    "severity": "error",
+                    "field": "summary",
+                    "code": "duplicate_fingerprint",
+                    "message": (
+                        f"Entry content duplicates {owner} by kind/summary/source refs/paths."
+                    ),
+                }
+            )
+        else:
+            fingerprint_owner[fingerprint] = entry.entry_id
+    return issues
 
 
 def add_release_entry(
@@ -569,9 +663,9 @@ def add_many_release_entries(
     release_version: str,
     entries: list[dict[str, object]],
     dry_run: bool = False,
-    fail_on_warning: bool = True,
+    fail_on_warning: bool = False,
+    sync_audit: bool = False,
 ) -> dict[str, object]:
-    del fail_on_warning  # Applied by the lint-aware CLI in the next layer.
     release = load_release(workspace_root, release_version)
     existing = load_entries(workspace_root, release_version)
     proposed: list[ReleaseEntryRecord] = []
@@ -631,66 +725,116 @@ def add_many_release_entries(
             )
             continue
         proposed.append(record)
-    if issues:
-        return {
-            "kind": "release_entry_batch_preview",
-            "ledger_ref": resolve_project_paths(workspace_root).ledger_ref,
-            "release_version": release_version,
-            "entries": [record.to_dict() for record in proposed],
-            "entry_ids": [record.entry_id for record in proposed],
-            "issues": issues,
-            "written": False,
-            "events": [],
-        }
-    if not dry_run:
-        for record in proposed:
-            save_entry(workspace_root, record)
-        updated_release = replace(
-            release,
-            entry_count=len(existing) + len(proposed),
-            versioning=bump_versioning(release.versioning),
+    lint = lint_entry_records(proposed, strict=fail_on_warning)
+    lint_issues = lint.get("issues", [])
+    if isinstance(lint_issues, list):
+        issues.extend(lint_issues)
+    issues.extend(_duplicate_batch_issues(existing=existing, proposed=proposed))
+    combined_entries = [*existing, *proposed]
+    audit_sheet = load_commit_audit_sheet(workspace_root, release_version)
+    coverage_projection = (
+        project_audit_entry_coverage(audit_sheet, combined_entries, include_internal=True)
+        if audit_sheet is not None
+        else None
+    )
+    if sync_audit and audit_sheet is None:
+        issues.append(
+            {
+                "severity": "error",
+                "field": "audit",
+                "code": "missing_audit_sheet",
+                "message": "Cannot sync audit targets because the release has no audit sheet.",
+            }
         )
-        try:
-            save_release(
+    blocking_issues = [
+        issue
+        for issue in issues
+        if str(issue.get("severity", "error")) == "error"
+        or (
+            fail_on_warning
+            and str(issue.get("severity", "error")) == "warning"
+        )
+    ]
+    if blocking_issues or dry_run:
+        return _batch_result(
+            workspace_root,
+            release_version=release_version,
+            proposed=proposed,
+            issues=issues,
+            lint=lint,
+            coverage_projection=coverage_projection,
+            written=False,
+            events=[],
+        )
+    synced_audit = None
+    synced_rows = 0
+    if sync_audit and audit_sheet is not None:
+        synced_audit, synced_rows = sync_audit_sheet_targets(audit_sheet, combined_entries)
+    for record in proposed:
+        save_entry(workspace_root, record)
+    updated_release = replace(
+        release,
+        entry_count=len(existing) + len(proposed),
+        versioning=bump_versioning(release.versioning),
+    )
+    saved_audit = None
+    try:
+        if synced_audit is not None:
+            saved_audit = save_commit_audit_sheet(
                 workspace_root,
-                updated_release,
+                synced_audit,
                 overwrite=True,
             )
-        except LaunchError:
-            # Roll back every just-written entry file so a stale release
-            # revision cannot leave orphan entries or a bumped entry_count.
-            for record in proposed:
-                delete_entry(workspace_root, release.version, record.entry_id)
-            raise
-        event = append_event(
+        save_release(
             workspace_root,
-            event=EVENT_ENTRY_BATCH_ADDED,
-            release_version=release_version,
-            record_revisions={
-                f"release:{release_version}": updated_release.versioning.revision,
-                **{
-                    f"entry:{release_version}/{record.entry_id}": (
-                        record.versioning.revision
-                    )
-                    for record in proposed
-                },
-            },
-            data={"entry_ids": [record.entry_id for record in proposed]},
+            updated_release,
+            overwrite=True,
         )
-        rebuild_indexes(workspace_root)
-        event_ids = [event.event_id]
-    else:
-        event_ids = []
-    return {
-        "kind": "release_entry_batch_preview" if dry_run else "release_entry_batch",
-        "ledger_ref": resolve_project_paths(workspace_root).ledger_ref,
-        "release_version": release_version,
-        "entries": [record.to_dict() for record in proposed],
-        "entry_ids": [record.entry_id for record in proposed],
-        "issues": issues,
-        "written": not dry_run,
-        "events": event_ids,
+    except LaunchError:
+        for record in proposed:
+            delete_entry(workspace_root, release.version, record.entry_id)
+        if saved_audit is not None and audit_sheet is not None:
+            restored_audit = replace(
+                audit_sheet,
+                versioning=next_commit_audit_versioning(saved_audit, audit_sheet),
+            )
+            save_commit_audit_sheet(workspace_root, restored_audit, overwrite=True)
+        raise
+    record_revisions = {
+        f"release:{release_version}": updated_release.versioning.revision,
+        **{
+            f"entry:{release_version}/{record.entry_id}": record.versioning.revision
+            for record in proposed
+        },
     }
+    event_data: dict[str, object] = {"entry_ids": [record.entry_id for record in proposed]}
+    audit_sync_block: dict[str, object] | None = None
+    if saved_audit is not None:
+        record_revisions["commit_audit_sheet"] = saved_audit.versioning.revision
+        event_data["synced_audit_rows"] = synced_rows
+        audit_sync_block = {
+            "updated_rows": synced_rows,
+            "revision": saved_audit.versioning.revision,
+        }
+    event = append_event(
+        workspace_root,
+        event=EVENT_ENTRY_BATCH_ADDED,
+        release_version=release_version,
+        record_revisions=record_revisions,
+        data=event_data,
+    )
+    rebuild_indexes(workspace_root)
+    return _batch_result(
+        workspace_root,
+        release_version=release_version,
+        proposed=proposed,
+        issues=[],
+        lint=lint,
+        coverage_projection=coverage_projection,
+        written=True,
+        events=[event.event_id],
+        audit_sync=audit_sync_block,
+    )
 
 
 def list_release_entries(

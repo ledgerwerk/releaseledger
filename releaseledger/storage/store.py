@@ -40,6 +40,11 @@ from releaseledger.domain.release import (
     release_from_dict,
 )
 from releaseledger.domain.versioning import versioning_from_dict
+from releaseledger.domain.versioning import (
+    RecordVersioning,
+    bump_versioning,
+    initial_versioning,
+)
 from releaseledger.errors import (
     CODE_CONFLICT,
     CODE_NOT_FOUND,
@@ -56,6 +61,7 @@ __all__ = [
     "load_entries",
     "load_release",
     "list_releases",
+    "next_commit_audit_versioning",
     "next_entry_id",
     "rebuild_indexes",
     "release_audit_dir",
@@ -607,6 +613,19 @@ def save_commit_audit_sheet(
             exit_code=2,
         ) from exc
     return sheet
+
+
+def next_commit_audit_versioning(
+    existing: CommitAuditSheetRecord | None,
+    candidate: CommitAuditSheetRecord,
+) -> RecordVersioning:
+    """Return the correct next versioning for an audit sheet candidate."""
+    if existing is None:
+        return initial_versioning()
+    old_data = audit_sheet_to_dict(existing)
+    new_data = audit_sheet_to_dict(candidate)
+    changed = _strip_revision(old_data) != _strip_revision(new_data)
+    return bump_versioning(existing.versioning) if changed else existing.versioning
 
 
 def delete_commit_audit_sheet(workspace_root: Path, version: str) -> bool:

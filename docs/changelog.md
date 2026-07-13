@@ -13,7 +13,7 @@ re-rendering an existing release section. Pass `--template NAME` to select a
 named changelog template profile.
 
 `build` never invents entries from git commits. Git commit ranges require
-`git import` / audit / entry curation before a strict build can pass.
+`git scaffold` / audit / entry curation before a strict build can pass.
 
 ## Full changelog rebuild
 
@@ -114,12 +114,16 @@ postprocessors = [
 
 ## Strict builds
 
+Run `releaseledger release check VERSION --strict --target-file CHANGELOG.md`
+before a final public build.
+
 `releaseledger build --strict` blocks on entry lint errors, empty included
 entries unless `--allow-empty` is supplied, release source refs that are
 not covered by included entries, and (for releases with stored git range
 metadata) git commits that have no accepted entry coverage. Internal-only
 entries satisfy audit coverage but are reported as excluded from the
-public changelog.
+public changelog. A dated `planned` release is also a strict-state failure for
+the final public workflow.
 
 ## Release review
 
@@ -134,6 +138,9 @@ classified as `covered`, `draft_only`, `rejected_only`,
 `internal_only`, or `missing`. Accepted entries with no provenance
 (empty `source_refs`, `issues`, `prs`, and `sources`) are reported as
 orphans. `--strict` exits non-zero when the release is not OK.
+
+Use `releaseledger release check VERSION --strict --target-file CHANGELOG.md`
+as the final consolidated gate immediately before writing `CHANGELOG.md`.
 
 Run review before adding a new entry. If the same `source_ref` is already
 covered by an accepted entry, update the existing entry instead of adding a

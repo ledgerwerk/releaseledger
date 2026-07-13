@@ -221,6 +221,55 @@ def test_add_many_rolls_back_all_entries_on_release_conflict(
     assert load_release(workspace, "0.5.0").entry_count == 0
 
 
+def test_add_many_strict_warning_returns_preview_without_writing(tmp_path: Path) -> None:
+    workspace = _init(tmp_path)
+    _create_release(workspace)
+    result = add_many_release_entries(
+        workspace,
+        release_version="0.5.0",
+        entries=[
+            {
+                "kind": "added",
+                "summary": "Added a reviewed change.",
+                "source_refs": ["git:1111111111111111111111111111111111111111"],
+            }
+        ],
+        fail_on_warning=True,
+    )
+    assert result["written"] is False
+    assert result["issues"], "strict warning should block the batch before writes"
+    assert _entry_files(workspace) == []
+    assert load_release(workspace, "0.5.0").entry_count == 0
+
+
+def test_add_many_rejects_duplicate_source_refs_before_write(tmp_path: Path) -> None:
+    workspace = _init(tmp_path)
+    _create_release(workspace)
+    add_release_entry(
+        workspace,
+        release_version="0.5.0",
+        kind="added",
+        summary="Added baseline reviewed change",
+        source_refs=("git:1111111111111111111111111111111111111111",),
+    )
+    result = add_many_release_entries(
+        workspace,
+        release_version="0.5.0",
+        entries=[
+            {
+                "kind": "fixed",
+                "summary": "Fixed duplicate source coverage",
+                "source_refs": ["git:1111111111111111111111111111111111111111"],
+            }
+        ],
+    )
+    assert result["written"] is False
+    issues = result["issues"]
+    assert isinstance(issues, list)
+    assert any(issue.get("code") == "duplicate_source_ref" for issue in issues)
+    assert len(load_entries(workspace, "0.5.0")) == 1
+
+
 # --------------------------------------------------------------------------
 # Sanity: the stale-revision failure mode is real (no patching)
 # --------------------------------------------------------------------------

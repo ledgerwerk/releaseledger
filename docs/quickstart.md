@@ -32,7 +32,7 @@ This creates `.releaseledger.toml` and the default state layout:
 Releaseledger is git-first. The recommended workflow uses git commit ranges
 as the canonical evidence of shipped changes.
 
-## Create a release and attach the git range
+## Create a release and pin the git snapshot
 
 ```bash
 releaseledger release create 1.2.0 \
@@ -44,37 +44,61 @@ releaseledger release update 1.2.0 \
   --git-head HEAD
 ```
 
-## Generate entries from git commits
+After the snapshot is attached, omit `--head` unless you intentionally want to
+refresh the stored snapshot to a newer commit.
+
+## Create audit evidence and scaffold entries
 
 ```bash
-releaseledger git import 1.2.0 \
-  --base v1.1.0 \
-  --head HEAD \
-  --status draft \
+releaseledger git evidence 1.2.0 --output-dir /tmp/1.2.0-evidence
+releaseledger audit init 1.2.0
+releaseledger audit show 1.2.0 --format yaml --output /tmp/1.2.0-audit.yaml
+releaseledger git scaffold 1.2.0 \
   --output /tmp/1.2.0-entries.yaml
 ```
 
-Edit the YAML to curate summaries, then:
+Curate the audit annotations, then validate the evidence phase:
 
 ```bash
-releaseledger entry add-many 1.2.0 --file /tmp/1.2.0-entries.yaml --dry-run
-releaseledger entry add-many 1.2.0 --file /tmp/1.2.0-entries.yaml
+releaseledger audit apply 1.2.0 \
+  --file /tmp/1.2.0-audit-decisions.yaml \
+  --dry-run
+releaseledger audit apply 1.2.0 \
+  --file /tmp/1.2.0-audit-decisions.yaml
+releaseledger audit validate 1.2.0 --phase evidence --strict
 ```
 
-## Review git coverage and build the changelog
+Edit the entry scaffold to write user-facing summaries from reviewed behavior,
+then validate and write entries atomically:
 
 ```bash
-releaseledger review 1.2.0 --git --strict
-releaseledger build --strict --target-file CHANGELOG.md
-```
-
-For a single release section update only:
-
-```bash
-releaseledger build 1.2.0 \
+releaseledger entry add-many 1.2.0 \
+  --file /tmp/1.2.0-entries.yaml \
+  --dry-run \
   --strict \
-  --target-file CHANGELOG.md \
-  --replace-existing
+  --guard-commit-subjects
+releaseledger entry add-many 1.2.0 \
+  --file /tmp/1.2.0-entries.yaml \
+  --strict \
+  --guard-commit-subjects \
+  --sync-audit
+releaseledger audit validate 1.2.0 --phase complete --strict --include-internal
+```
+
+## Run the final gate and build the changelog
+
+```bash
+releaseledger release check 1.2.0 --strict --target-file CHANGELOG.md
+releaseledger release finalize 1.2.0 --released-at 2026-06-14
+releaseledger build 1.2.0 --strict --target-file CHANGELOG.md
+```
+
+For a single release section update only, `build VERSION` is the default and
+explicit version intent. Rebuild the whole file only when you really mean all
+history:
+
+```bash
+releaseledger build --strict --target-file CHANGELOG.md
 ```
 
 ## Optional: taskledger provenance
@@ -127,7 +151,7 @@ releaseledger changelog 1.2.0 \
   --release-date 2026-06-13
 ```
 
-Use `build` to render and insert a final section:
+Use `build VERSION` to render and insert a final section:
 
 ```bash
 releaseledger build 1.2.0 \

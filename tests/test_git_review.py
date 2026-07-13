@@ -178,6 +178,18 @@ def test_review_git_strict_passes_when_covered(tmp_path: Path) -> None:
             "HEAD",
         ],
     )
+    runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(repo),
+            "release",
+            "finalize",
+            "0.2.0",
+            "--released-at",
+            "2026-06-14",
+        ],
+    )
     # One entry covering both commits.
     (repo / "entry.yaml").write_text(
         f"entries:\n- kind: added\n  summary: Added a and fixed b\n"
@@ -203,6 +215,91 @@ def test_review_git_strict_passes_when_covered(tmp_path: Path) -> None:
     assert data["ok"] is True
     git_checks = data["result"]["checks"]
     assert git_checks.get("git_coverage_ok") is True
+
+
+def test_review_git_reports_snapshot_drift_but_uses_stored_shas(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+    _commit(repo, "root", "README.md")
+    _git(repo, "tag", "v0.1.0")
+    sha_a = _commit(repo, "feat: add a", "a.txt")
+    sha_b = _commit(repo, "fix: handle b", "b.txt")
+    runner.invoke(app, ["--cwd", str(repo), "init"])
+    runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(repo),
+            "release",
+            "create",
+            "0.2.0",
+            "--previous",
+            "0.1.0",
+            "--released-at",
+            "2026-06-14",
+        ],
+    )
+    runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(repo),
+            "release",
+            "update",
+            "0.2.0",
+            "--git-base",
+            "v0.1.0",
+            "--git-head",
+            "HEAD",
+        ],
+    )
+    runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(repo),
+            "release",
+            "finalize",
+            "0.2.0",
+            "--released-at",
+            "2026-06-14",
+        ],
+    )
+    extra_sha = _commit(repo, "feat: add c", "c.txt")
+    (repo / "entry.yaml").write_text(
+        f"entries:\n- kind: added\n  summary: Added a and fixed b\n"
+        f"  source_refs:\n  - 'git:{sha_a}'\n  - 'git:{sha_b}'\n  status: accepted\n"
+    )
+    runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(repo),
+            "entry",
+            "add-many",
+            "0.2.0",
+            "--file",
+            str(repo / "entry.yaml"),
+        ],
+    )
+    result = runner.invoke(
+        app,
+        ["--cwd", str(repo), "--json", "review", "0.2.0", "--git", "--strict"],
+    )
+    data = json.loads(result.output)
+    assert data["ok"] is True
+    drift = data["result"]["git"]["snapshot_drift"]
+    assert drift["status"] == "drifted"
+    assert any(
+        check["label"] == "head"
+        and check["stored_sha"] == sha_b
+        and check["current_sha"] == extra_sha
+        and check["status"] == "drifted"
+        for check in drift["checks"]
+    )
+    covered_refs = {row["source_ref"] for row in data["result"]["coverage"]}
+    assert f"git:{extra_sha}" not in covered_refs
 
 
 # --------------------------------------------------------------------------
@@ -498,6 +595,7 @@ def test_review_require_audit_sheet_passes_when_complete(
     data = json.loads(show.output)["result"]["sheet"]
     for row in data["rows"]:
         row["inspected"] = True
+        row["inspected_paths"] = ["src/example.py"]
         row["decision"] = "accepted"
         row["observed_behavior"] = "Reviewed behavior written by the reviewer."
         if not row.get("evidence_subject"):

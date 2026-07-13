@@ -205,6 +205,73 @@ def test_git_range_uses_stored_head_not_current_head(tmp_path: Path) -> None:
     assert f"git:{extra_sha}" in head_refs
 
 
+def test_git_import_uses_stored_head_not_current_head(tmp_path: Path) -> None:
+    """Regression: git import should scaffold from the pinned stored snapshot."""
+    repo = _init_repo(tmp_path)
+    _commit(repo, "root", "README.md")
+    _git(repo, "tag", "v0.1.0")
+    sha_a = _commit(repo, "feat: add a", "a.txt")
+    sha_b = _commit(repo, "fix: handle b", "b.txt")
+    runner.invoke(app, ["--cwd", str(repo), "init"])
+    result = runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(repo),
+            "release",
+            "create",
+            "0.2.0",
+            "--previous",
+            "0.1.0",
+            "--released-at",
+            "2026-06-14",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(repo),
+            "release",
+            "update",
+            "0.2.0",
+            "--git-base",
+            "v0.1.0",
+            "--git-head",
+            "HEAD",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    extra_sha = _commit(repo, "feat: add c", "c.txt")
+    out = repo / "entries.yaml"
+    payload = _jrun(repo, "git", "import", "0.2.0", "--output", str(out))
+    assert payload["result"]["head_ref"] == "HEAD"
+    assert payload["result"]["head_sha"] == sha_b
+    assert payload["result"]["entry_count"] == 2
+    batch = yaml.safe_load(out.read_text(encoding="utf-8"))
+    refs = {entry["source_refs"][0] for entry in batch["entries"]}
+    assert f"git:{sha_a}" in refs
+    assert f"git:{sha_b}" in refs
+    assert f"git:{extra_sha}" not in refs
+
+
+def test_git_scaffold_alias_emits_metadata_rich_batch(tmp_path: Path) -> None:
+    repo, sha_a, sha_b = _setup_release(tmp_path)
+    out = repo / "entries.yaml"
+    payload = _jrun(repo, "git", "scaffold", "0.2.0", "--output", str(out))
+    assert payload["command"] == "git.scaffold"
+    assert payload["result_type"] == "git_scaffold"
+    batch = yaml.safe_load(out.read_text(encoding="utf-8"))
+    assert payload["result"]["entry_count"] == 2
+    assert batch["object_type"] == "release_entry_batch"
+    assert batch["release_version"] == "0.2.0"
+    assert len(batch["git_base_sha"]) == 40
+    assert len(batch["git_head_sha"]) == 40
+    refs = {entry["source_refs"][0] for entry in batch["entries"]}
+    assert refs == {f"git:{sha_a}", f"git:{sha_b}"}
+
+
 # --------------------------------------------------------------------------
 # git range --evidence
 # --------------------------------------------------------------------------
@@ -255,6 +322,47 @@ def test_git_range_without_evidence_omits_fields(tmp_path: Path) -> None:
         "inferred_kind",
         "subject",
     }
+
+
+def test_git_evidence_exports_manifest_and_patches(tmp_path: Path) -> None:
+    repo, sha_a, sha_b = _setup_release(tmp_path)
+    out_dir = tmp_path / "evidence"
+    payload = _jrun(repo, "git", "evidence", "0.2.0", "--output-dir", str(out_dir))
+    assert payload["result"]["candidate_count"] == 2
+    manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["object_type"] == "git_evidence_manifest"
+    patch_files = {candidate["patch_file"] for candidate in manifest["candidates"]}
+    assert patch_files == {f"{sha_a[:7]}.patch", f"{sha_b[:7]}.patch"}
+    for patch_file in patch_files:
+        assert (out_dir / patch_file).is_file()
+
+
+def test_release_prepare_exports_snapshot_artifacts(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _commit(repo, "root", "README.md")
+    _git(repo, "tag", "v0.1.0")
+    _commit(repo, "feat: add a", "a.txt")
+    _commit(repo, "fix: handle b", "b.txt")
+    runner.invoke(app, ["--cwd", str(repo), "init"])
+    out_dir = tmp_path / "prep"
+    payload = _jrun(
+        repo,
+        "release",
+        "prepare",
+        "0.2.0",
+        "--previous",
+        "0.1.0",
+        "--git-base",
+        "v0.1.0",
+        "--git-head",
+        "HEAD",
+        "--output-dir",
+        str(out_dir),
+    )
+    assert payload["result_type"] == "release_prepare"
+    assert (out_dir / "range.json").is_file()
+    assert (out_dir / "audit.yaml").is_file()
+    assert (out_dir / "entries.yaml").is_file()
 
 
 # --------------------------------------------------------------------------

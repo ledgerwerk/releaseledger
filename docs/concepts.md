@@ -21,6 +21,17 @@ A source ref is a coverage identity. Two kinds are accepted:
 A `git-range:*`, `git-tag:*`, or `git-branch:*` ref is a non-coverable
 range marker — useful as release metadata but never creating a missing-coverage row.
 
+## Pinned release snapshot
+
+Git-backed releases store both symbolic refs and the resolved commit SHAs. The
+resolved SHAs are the immutable snapshot used by default for later git-backed
+commands (`git range`, `git scaffold`, `audit init`, `review`, `release check`,
+strict build coverage). This prevents a moving branch head from silently adding
+new commits to an in-progress release.
+
+Resolve `HEAD` once when attaching the range. A new commit belongs to the
+release only after an explicit refresh.
+
 ## Release
 
 A release is a versioned record stored as `release.md` with YAML front matter
@@ -85,9 +96,15 @@ evidence-only and must not be copied or mechanically transformed into
 release summaries.
 
 Decisions are `needs_review`, `accepted`, `grouped`, `internal`, and
-`rejected`. Strict release review fails when rows remain uninspected, when
-public rows lack accepted entry coverage, or when an entry summary matches a
-commit subject.
+`rejected`. `public_impact` values are `public`, `docs`, `internal`, `none`,
+and `unknown`.
+
+Audit validation is phase-aware:
+
+- `evidence` validates inspection completeness and row evidence quality without
+  requiring entries.
+- `complete` additionally validates accepted entry coverage, internal coverage
+  when requested, and the commit-subject summary guard.
 
 This concept keeps Git as the canonical source of shipped changes while making
 the human or agent review work durable and auditable.
@@ -97,6 +114,13 @@ the human or agent review work durable and auditable.
 Release and entry files contain `versioning.schema_version` and a positive
 `versioning.revision`. New records start at revision 1, and the revision
 increases by exactly one whenever that record file meaningfully changes.
+
+## Planned versus released
+
+A dated `planned` / `draft` / `candidate` release is intentionally treated as a
+consistency warning or strict failure in review/check flows, because default
+public full builds include only `released` releases. Finalize a shipped release
+explicitly before the final public build.
 
 ## Index
 

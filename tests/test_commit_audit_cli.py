@@ -144,6 +144,65 @@ class TestAuditInit:
         ok = _run(repo, "audit", "init", "0.2.0", "--overwrite")
         assert ok.exit_code == 0
 
+    def test_init_uses_stored_head_sha_when_head_moves(self, tmp_path: Path) -> None:
+        repo = _init_repo(tmp_path)
+        _commit(repo, "root", "README.md")
+        _git(repo, "tag", "v0.1.0")
+        sha_a = _commit(repo, "feat: add a", "a.txt")
+        sha_b = _commit(repo, "fix: handle b", "b.txt")
+        assert _run(repo, "init").exit_code == 0
+        assert (
+            _run(
+                repo,
+                "release",
+                "create",
+                "0.2.0",
+                "--previous",
+                "0.1.0",
+                "--released-at",
+                "2026-06-14",
+            ).exit_code
+            == 0
+        )
+        assert (
+            _run(
+                repo,
+                "release",
+                "update",
+                "0.2.0",
+                "--git-base",
+                "v0.1.0",
+                "--git-head",
+                "HEAD",
+            ).exit_code
+            == 0
+        )
+        extra_sha = _commit(repo, "feat: add c", "c.txt")
+        payload = _jrun(repo, "audit", "init", "0.2.0")
+        assert int(payload["result"]["row_count"]) == 2
+        assert payload["result"]["git_head_ref"] == "HEAD"
+        show = _jrun(repo, "audit", "show", "0.2.0", "--format", "json")
+        rows = show["result"]["sheet"]["rows"]
+        refs = {row["source_ref"] for row in rows}
+        assert f"git:{sha_a}" in refs
+        assert f"git:{sha_b}" in refs
+        assert f"git:{extra_sha}" not in refs
+
+    def test_overwrite_after_update_advances_revision(self, tmp_path: Path) -> None:
+        repo, _sha_a, _sha_b = _seed_range(tmp_path)
+        assert _run(repo, "audit", "init", "0.2.0").exit_code == 0
+        sheet_path = tmp_path / "edited.yaml"
+        export = _jrun(repo, "audit", "show", "0.2.0", "--format", "json")
+        data = export["result"]["sheet"]
+        data["rows"][0]["inspected"] = True
+        data["rows"][0]["inspected_paths"] = ["src/example.py"]
+        data["rows"][0]["decision"] = "accepted"
+        data["rows"][0]["observed_behavior"] = "Reviewed behavior."
+        sheet_path.write_text(yaml.safe_dump(data))
+        assert _run(repo, "audit", "update", "0.2.0", "--file", str(sheet_path)).exit_code == 0
+        payload = _jrun(repo, "audit", "init", "0.2.0", "--overwrite")
+        assert int(payload["result"]["revision"]) == 3
+
 
 class TestAuditShow:
     def test_show_markdown_renders_worksheet(self, tmp_path: Path) -> None:
@@ -162,6 +221,14 @@ class TestAuditShow:
         payload = _jrun(repo, "audit", "show", "0.2.0", "--format", "json")
         assert payload["result_type"] == "commit_audit_sheet"
         assert int(payload["result"]["sheet"]["commit_count"]) == 2
+
+    def test_global_json_show_defaults_to_sheet_payload(self, tmp_path: Path) -> None:
+        repo, _sha_a, _sha_b = _seed_range(tmp_path)
+        assert _run(repo, "audit", "init", "0.2.0").exit_code == 0
+        payload = _jrun(repo, "audit", "show", "0.2.0")
+        assert payload["result"]["format"] == "json"
+        assert "sheet" in payload["result"]
+        assert "document" not in payload["result"]
 
     def test_show_writes_output_file(self, tmp_path: Path) -> None:
         repo, _sha_a, _sha_b = _seed_range(tmp_path)
@@ -203,6 +270,17 @@ class TestAuditUpdate:
         assert result.exit_code != 0
         assert "missing" in _human_error(result).lower()
 
+    def test_update_malformed_yaml_returns_validation_error(self, tmp_path: Path) -> None:
+        repo, _sha_a, _sha_b = _seed_range(tmp_path)
+        assert _run(repo, "audit", "init", "0.2.0").exit_code == 0
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("rows:\n  - sha: abcdef:\n")
+        result = _run(repo, "audit", "update", "0.2.0", "--file", str(bad))
+        assert result.exit_code != 0
+        text = _human_error(result)
+        assert "traceback" not in text.lower()
+        assert "line" in text.lower() or "column" in text.lower()
+
 
 class TestAuditValidate:
     @staticmethod
@@ -220,6 +298,7 @@ class TestAuditValidate:
         data = export["result"]["sheet"]
         for row in data["rows"]:
             row["inspected"] = True
+            row["inspected_paths"] = ["src/example.py"]
             row["decision"] = "accepted"
             row["observed_behavior"] = "Reviewed behavior written by the reviewer."
             if not row.get("evidence_subject"):
@@ -293,6 +372,35 @@ class TestAuditValidate:
         result = _run(repo, "audit", "validate", "0.2.0", "--strict")
         assert result.exit_code == 0, _human_error(result)
 
+    def test_evidence_phase_passes_before_entries(self, tmp_path: Path) -> None:
+        repo, sha_a, sha_b = _seed_range(tmp_path)
+        self._seed_sheet(repo, sha_a, sha_b, entries=[])
+        result = _run(
+            repo,
+            "audit",
+            "validate",
+            "0.2.0",
+            "--phase",
+            "evidence",
+            "--strict",
+        )
+        assert result.exit_code == 0, _human_error(result)
+
+    def test_complete_phase_fails_before_entries(self, tmp_path: Path) -> None:
+        repo, sha_a, sha_b = _seed_range(tmp_path)
+        self._seed_sheet(repo, sha_a, sha_b, entries=[])
+        result = _run(
+            repo,
+            "audit",
+            "validate",
+            "0.2.0",
+            "--phase",
+            "complete",
+            "--strict",
+        )
+        assert result.exit_code != 0
+        assert "coverage" in _human_error(result).lower()
+
 
 class TestAuditSync:
     def test_sync_fills_target_entry_id(self, tmp_path: Path) -> None:
@@ -321,6 +429,88 @@ class TestAuditSync:
         show = _jrun(repo, "audit", "show", "0.2.0", "--format", "json")
         targets = {r.get("target_entry_id") for r in show["result"]["sheet"]["rows"]}
         assert targets == {"entry-0001"}
+
+
+class TestAuditApply:
+    def test_apply_merges_row_annotations(self, tmp_path: Path) -> None:
+        repo, sha_a, _sha_b = _seed_range(tmp_path)
+        assert _run(repo, "audit", "init", "0.2.0").exit_code == 0
+        decisions = {
+            "rows": [
+                {
+                    "sha": sha_a,
+                    "inspected": True,
+                    "inspected_paths": ["a.txt"],
+                    "observed_behavior": "Reviewed behavior for commit A.",
+                    "public_impact": "public",
+                    "decision": "accepted",
+                    "target_entry_key": "entry-a",
+                }
+            ]
+        }
+        decisions_path = tmp_path / "audit-decisions.yaml"
+        decisions_path.write_text(yaml.safe_dump(decisions))
+        preview = _jrun(
+            repo,
+            "audit",
+            "apply",
+            "0.2.0",
+            "--file",
+            str(decisions_path),
+            "--dry-run",
+        )
+        assert preview["result"]["written"] is False
+        applied = _jrun(
+            repo,
+            "audit",
+            "apply",
+            "0.2.0",
+            "--file",
+            str(decisions_path),
+        )
+        assert applied["result"]["written"] is True
+        show = _jrun(repo, "audit", "show", "0.2.0", "--format", "json")
+        row = next(r for r in show["result"]["sheet"]["rows"] if r["sha"] == sha_a)
+        assert row["inspected"] is True
+        assert row["decision"] == "accepted"
+        assert row["target_entry_key"] == "entry-a"
+
+
+class TestAuditRefresh:
+    def test_refresh_preserves_reviewed_rows_and_appends_new_commit(
+        self, tmp_path: Path
+    ) -> None:
+        repo, sha_a, sha_b = _seed_range(tmp_path)
+        assert _run(repo, "audit", "init", "0.2.0").exit_code == 0
+        decisions = {
+            "rows": [
+                {
+                    "sha": sha_a,
+                    "inspected": True,
+                    "inspected_paths": ["a.txt"],
+                    "observed_behavior": "Reviewed behavior for commit A.",
+                    "public_impact": "public",
+                    "decision": "accepted",
+                    "target_entry_key": "entry-a",
+                }
+            ]
+        }
+        decisions_path = tmp_path / "audit-decisions.yaml"
+        decisions_path.write_text(yaml.safe_dump(decisions))
+        assert (
+            _run(repo, "audit", "apply", "0.2.0", "--file", str(decisions_path)).exit_code
+            == 0
+        )
+        _commit(repo, "feat: add c", "c.txt")
+        refreshed = _jrun(repo, "audit", "refresh", "0.2.0", "--head", "HEAD")
+        assert refreshed["result"]["preserved_reviewed_rows"] == 1
+        assert refreshed["result"]["new_rows"] == 1
+        show = _jrun(repo, "audit", "show", "0.2.0", "--format", "json")
+        rows = show["result"]["sheet"]["rows"]
+        assert len(rows) == 3
+        row = next(r for r in rows if r["sha"] == sha_a)
+        assert row["decision"] == "accepted"
+        assert row["target_entry_key"] == "entry-a"
 
 
 class TestEntryGuardCommitSubjects:
@@ -375,6 +565,64 @@ class TestEntryGuardCommitSubjects:
             "--guard-commit-subjects",
         )
         assert result.exit_code == 0, _human_error(result)
+
+
+class TestEntryBatchValidation:
+    def test_strict_blocks_warning_batch_before_write(self, tmp_path: Path) -> None:
+        repo, sha_a, _sha_b = _seed_range(tmp_path)
+        batch = {
+            "entries": [
+                {
+                    "kind": "added",
+                    "summary": "Added a reviewed change.",
+                    "source_refs": [f"git:{sha_a}"],
+                    "status": "accepted",
+                }
+            ]
+        }
+        entries_path = repo / "entries.yaml"
+        entries_path.write_text(yaml.safe_dump(batch))
+        result = _run(
+            repo,
+            "entry",
+            "add-many",
+            "0.2.0",
+            "--file",
+            str(entries_path),
+            "--strict",
+        )
+        assert result.exit_code != 0
+        listed = _jrun(repo, "entry", "list", "0.2.0")
+        assert listed["result"]["entries"] == []
+
+    def test_sync_audit_updates_targets_in_same_batch(self, tmp_path: Path) -> None:
+        repo, sha_a, sha_b = _seed_range(tmp_path)
+        assert _run(repo, "audit", "init", "0.2.0").exit_code == 0
+        batch = {
+            "entries": [
+                {
+                    "kind": "added",
+                    "summary": "Added features A and B from reviewed behavior",
+                    "source_refs": [f"git:{sha_a}", f"git:{sha_b}"],
+                    "status": "accepted",
+                }
+            ]
+        }
+        entries_path = repo / "entries.yaml"
+        entries_path.write_text(yaml.safe_dump(batch))
+        payload = _jrun(
+            repo,
+            "entry",
+            "add-many",
+            "0.2.0",
+            "--file",
+            str(entries_path),
+            "--sync-audit",
+        )
+        assert payload["result"]["audit_sync"]["updated_rows"] == 2
+        show = _jrun(repo, "audit", "show", "0.2.0", "--format", "json")
+        targets = {r.get("target_entry_id") for r in show["result"]["sheet"]["rows"]}
+        assert targets == {"entry-0001"}
 
 
 class TestGitImportWarning:

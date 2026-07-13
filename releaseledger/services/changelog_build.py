@@ -41,7 +41,10 @@ from releaseledger.errors import (
     LaunchError,
 )
 from releaseledger.services.entry_lint import lint_release_entries
-from releaseledger.services.git_sources import collect_git_candidates
+from releaseledger.services.git_sources import (
+    collect_git_candidates,
+    resolve_release_snapshot,
+)
 from releaseledger.storage.config import (
     DEFAULT_CHANGELOG,
     KEEPACHANGELOG_PREAMBLE,
@@ -1088,15 +1091,16 @@ def _strict_git_range_coverage(
     a commit in the stored git range has no accepted entry coverage and
     allow_empty is False.
     """
-    base_ref = release.git_base_ref or release.git_base_sha
-    head_ref = release.git_head_ref or release.git_head_sha
-    if not base_ref or not head_ref:
+    if not (release.git_base_sha or release.git_base_ref):
         return [], 0
+    if not (release.git_head_sha or release.git_head_ref):
+        return [], 0
+    snapshot = resolve_release_snapshot(workspace_root, release)
 
     candidates = collect_git_candidates(
         workspace_root,
-        base_ref=base_ref,
-        head_ref=head_ref,
+        base_ref=snapshot.base_spec,
+        head_ref=snapshot.head_spec,
     )
     expected = {
         candidate.source_ref for candidate in candidates if candidate.include_by_default

@@ -257,10 +257,13 @@ def test_review_strict_fails_when_build_would_fail(tmp_path: Path) -> None:
     assert payload["ok"] is False
     assert payload["command"] == "review"
     assert payload["result_type"] == "release_review"
-    # A covered release with a date should pass strict (mirror build --strict).
+    # A covered but still-planned release should still fail strict state checks.
     update = _run(tmp_path, "release", "update", "0.5.0", "--released-at", "2026-06-14")
     assert update.exit_code == 0, update.stdout
     _add_entry(tmp_path, "0.5.0", summary="Covered entry", source_ref="tl:task-0103")
+    still_planned = _jrun(tmp_path, "review", "0.5.0", "--strict")
+    assert still_planned.exit_code != 0, still_planned.stdout
+    _run(tmp_path, "release", "finalize", "0.5.0", "--released-at", "2026-06-14")
     passing = _jrun(tmp_path, "review", "0.5.0", "--strict")
     assert passing.exit_code == 0, passing.stdout
     assert json.loads(passing.stdout)["ok"] is True
@@ -307,3 +310,25 @@ def test_review_uses_boundary_ref_as_expected_ref(tmp_path: Path) -> None:
     assert payload["result"]["ok"] is False
     # boundary_ref is surfaced in the release block too.
     assert payload["result"]["release"]["boundary_ref"] == "tl:task-0105"
+
+
+def test_release_check_reports_planned_dated_release_inconsistency(tmp_path: Path) -> None:
+    _init(tmp_path)
+    _create_release(tmp_path, "0.5.0", source_refs=("tl:task-0103",))
+    _run(tmp_path, "release", "update", "0.5.0", "--released-at", "2026-06-14")
+    _add_entry(tmp_path, "0.5.0", summary="Covered entry", source_ref="tl:task-0103")
+    result = _jrun(tmp_path, "release", "check", "0.5.0", "--strict")
+    assert result.exit_code != 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["result"]["checks"]["release_state_ok"] is False
+
+
+def test_release_check_passes_after_finalize(tmp_path: Path) -> None:
+    _init(tmp_path)
+    _create_release(tmp_path, "0.5.0", source_refs=("tl:task-0103",))
+    _add_entry(tmp_path, "0.5.0", summary="Covered entry", source_ref="tl:task-0103")
+    _run(tmp_path, "release", "finalize", "0.5.0", "--released-at", "2026-06-14")
+    result = _jrun(tmp_path, "release", "check", "0.5.0", "--strict")
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True

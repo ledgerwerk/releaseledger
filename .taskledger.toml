@@ -1,10 +1,10 @@
 # Taskledger branch-scoped state. This block is intentionally safe to commit.
 
-taskledger_dir = '../taskledger-state/releaseledger'
+taskledger_dir = '../ledger/task/releaseledger'
 
 # Stable project identity. Commit this with your source tree.
 project_uuid = "7864d9da-4d0e-47a6-9074-581a4b2d684c"
 ledger_ref = "main"
 ledger_parent_ref = ""
-ledger_next_task_number = 17
+ledger_next_task_number = 18
 ledger_branch_guard = "off"

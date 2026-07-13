@@ -24,6 +24,10 @@ from releaseledger.services.changelog_build import (
     render_changelog_section,
 )
 from releaseledger.services.entry_lint import lint_release_entries
+from releaseledger.services.git_sources import (
+    release_snapshot_drift_report,
+    resolve_release_snapshot,
+)
 from releaseledger.storage.store import load_entries, load_release
 
 __all__ = [
@@ -192,31 +196,35 @@ def _compute_git_expected_refs(
     base_to_use: str | None = git_base
     head_to_use: str | None = git_head
 
-    # Fall back to stored release metadata.
-    if base_to_use is None and release.git_base_sha is not None:
-        base_to_use = release.git_base_sha
-    if head_to_use is None and release.git_head_sha is not None:
-        head_to_use = release.git_head_sha
-
     # Auto-enable git when the release has stored git metadata and the
     # workspace is a git worktree.
-    if not git_enabled and base_to_use is not None and head_to_use is not None:
+    if (
+        not git_enabled
+        and release.git_base_sha is not None
+        and release.git_head_sha is not None
+    ):
         git_enabled = is_git_worktree(workspace_root)
 
-    if not (git_enabled and base_to_use is not None and head_to_use is not None):
+    if not git_enabled:
         return git_block, git_warnings, git_ref_map, expected_refs
 
     try:
+        snapshot = resolve_release_snapshot(
+            workspace_root,
+            release,
+            explicit_base=base_to_use,
+            explicit_head=head_to_use,
+        )
         candidates = collect_git_candidates(
             workspace_root,
-            base_ref=base_to_use,
-            head_ref=head_to_use,
+            base_ref=snapshot.base_spec,
+            head_ref=snapshot.head_spec,
             include_merges=include_merges,
         )
         summary = build_git_range_summary(
             workspace_root,
-            base_ref=base_to_use,
-            head_ref=head_to_use,
+            base_ref=snapshot.base_spec,
+            head_ref=snapshot.head_spec,
             include_merges=include_merges,
         )
         for cand in candidates:
@@ -230,16 +238,25 @@ def _compute_git_expected_refs(
         _tc = summary.get("commit_count", 0)
         total_commits = _tc if isinstance(_tc, int) else 0
         git_block = {
-            "base_ref": summary.get("base_ref"),
+            "base_ref": snapshot.base_ref,
             "base_sha": summary.get("base_sha"),
-            "head_ref": summary.get("head_ref"),
+            "head_ref": snapshot.head_ref,
             "head_sha": summary.get("head_sha"),
             "range": summary.get("range"),
             "commit_count": total_commits,
             "merge_commits_skipped": merge_skipped,
             "candidate_count": len(candidates),
             "include_merges": include_merges,
+            "snapshot_source": snapshot.source,
         }
+        drift = release_snapshot_drift_report(workspace_root, release)
+        if drift is not None:
+            git_block["snapshot_drift"] = drift
+            if drift.get("status") == "drifted":
+                git_warnings.append(
+                    "Stored release snapshot drifted from its symbolic refs; "
+                    "review used the pinned stored SHAs."
+                )
         if merge_skipped:
             git_warnings.append(
                 f"{merge_skipped} merge commit(s) excluded by"
@@ -349,6 +366,7 @@ def build_release_review(
     release_block: dict[str, object] = {
         "version": release.version,
         "status": release.status,
+        "released_at": release.released_at,
         "previous_version": release.previous_version,
         "changelog_file": release.changelog_file,
         "boundary_ref": release.boundary_ref,
@@ -461,16 +479,18 @@ def build_release_review(
     changelog_ok = bool(changelog_block.get("dry_run_ok", False))
 
     git_coverage_ok, git_missing_count = _compute_git_coverage(coverage, git_block)
+    release_state_ok = not (release.released_at and release.status != "released")
     checks: dict[str, object] = {
         "coverage_ok": coverage_ok,
         "lint_ok": lint_ok,
         "changelog_ok": changelog_ok,
+        "release_state_ok": release_state_ok,
     }
     if git_block is not None:
         checks["git_coverage_ok"] = git_coverage_ok
     # `ok` aggregates coverage + lint always, plus changelog and git only in
     # strict mode.
-    ok = coverage_ok and lint_ok and (not strict or changelog_ok)
+    ok = coverage_ok and lint_ok and (not strict or (changelog_ok and release_state_ok))
     if strict and git_block is not None:
         ok = ok and git_coverage_ok
 
@@ -485,6 +505,10 @@ def build_release_review(
         git_coverage_ok=git_coverage_ok,
         git_missing_count=git_missing_count,
     )
+    if not release_state_ok:
+        recommendations.append(
+            f"{release.version} has released_at={release.released_at} but status={release.status}."
+        )
 
     result: dict[str, object] = {
         "kind": "release_review",
@@ -543,13 +567,21 @@ def _build_audit_block(
     report = validate_commit_audit_sheet(
         workspace_root,
         version=version,
+        phase="evidence",
+        strict=False,
+        include_internal=include_internal,
+    )
+    complete = validate_commit_audit_sheet(
+        workspace_root,
+        version=version,
+        phase="complete",
         strict=False,
         include_internal=include_internal,
     )
     row_count_raw = report["row_count"]
     needs_raw = report["needs_review_count"]
     uninsp_raw = report["uninspected_count"]
-    violations_raw = report["subject_summary_violations"]
+    violations_raw = complete["subject_summary_violations"]
     return {
         "exists": True,
         "row_count": row_count_raw if isinstance(row_count_raw, int) else 0,
@@ -558,7 +590,9 @@ def _build_audit_block(
         "subject_summary_violations": [
             str(v) for v in (violations_raw if isinstance(violations_raw, list) else [])
         ],
-        "ok": bool(report["ok"]),
+        "evidence": report,
+        "complete": complete,
+        "ok": bool(report["ok"]) and bool(complete["ok"]),
     }
 
 

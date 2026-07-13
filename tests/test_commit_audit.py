@@ -7,6 +7,7 @@ not require a git worktree. Git-backed ``audit init`` lives in
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -281,10 +282,50 @@ class TestValidateAndSync:
 
     def test_strict_fails_missing_coverage_for_accepted(self, tmp_path: Path) -> None:
         _add_entries(tmp_path, [])
-        sheet = _sheet((_row(SHA_A, decision="accepted", inspected=True),))
+        row = replace(
+            _row(SHA_A, decision="accepted", inspected=True),
+            inspected_paths=("src/a.py",),
+            observed_behavior="Reviewed behavior.",
+        )
+        sheet = _sheet((row,))
         save_commit_audit_sheet(tmp_path, sheet, overwrite=True)
         with pytest.raises(LaunchError):
             validate_commit_audit_sheet(tmp_path, version="0.2.0", strict=True)
+
+    def test_evidence_phase_passes_without_entries(self, tmp_path: Path) -> None:
+        _add_entries(tmp_path, [])
+        row = replace(
+            _row(SHA_A, decision="accepted", inspected=True),
+            inspected_paths=("src/a.py",),
+            observed_behavior="Reviewed behavior.",
+        )
+        sheet = _sheet((row,))
+        save_commit_audit_sheet(tmp_path, sheet, overwrite=True)
+        report = validate_commit_audit_sheet(
+            tmp_path,
+            version="0.2.0",
+            phase="evidence",
+            strict=True,
+        )
+        assert report["ok"] is True
+        assert report["phase"] == "evidence"
+
+    def test_complete_phase_fails_without_entries(self, tmp_path: Path) -> None:
+        _add_entries(tmp_path, [])
+        row = replace(
+            _row(SHA_A, decision="accepted", inspected=True),
+            inspected_paths=("src/a.py",),
+            observed_behavior="Reviewed behavior.",
+        )
+        sheet = _sheet((row,))
+        save_commit_audit_sheet(tmp_path, sheet, overwrite=True)
+        with pytest.raises(LaunchError):
+            validate_commit_audit_sheet(
+                tmp_path,
+                version="0.2.0",
+                phase="complete",
+                strict=True,
+            )
 
     def test_strict_passes_when_accepted_covered(self, tmp_path: Path) -> None:
         _add_entries(
@@ -298,7 +339,15 @@ class TestValidateAndSync:
                 }
             ],
         )
-        sheet = _sheet((_row(SHA_A, decision="accepted", inspected=True),))
+        sheet = _sheet(
+            (
+                replace(
+                    _row(SHA_A, decision="accepted", inspected=True),
+                    inspected_paths=("src/a.py",),
+                    observed_behavior="Reviewed behavior.",
+                ),
+            )
+        )
         save_commit_audit_sheet(tmp_path, sheet, overwrite=True)
         report = validate_commit_audit_sheet(tmp_path, version="0.2.0", strict=True)
         assert report["ok"] is True
@@ -318,7 +367,15 @@ class TestValidateAndSync:
                 }
             ],
         )
-        sheet = _sheet((_row(SHA_A, decision="internal", inspected=True),))
+        sheet = _sheet(
+            (
+                replace(
+                    _row(SHA_A, decision="internal", inspected=True),
+                    inspected_paths=("src/a.py",),
+                    observed_behavior="Reviewed behavior.",
+                ),
+            )
+        )
         save_commit_audit_sheet(tmp_path, sheet, overwrite=True)
         report = validate_commit_audit_sheet(
             tmp_path,

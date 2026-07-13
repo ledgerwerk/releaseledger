@@ -30,9 +30,11 @@ from releaseledger.cli_common import (
 )
 from releaseledger.errors import CODE_USAGE_ERROR, LaunchError, ReleaseledgerError
 from releaseledger.services.audit import (
+    apply_commit_audit_annotations,
     collect_commit_subjects,
     create_commit_audit_sheet,
     guard_entry_summaries,
+    refresh_commit_audit_sheet,
     render_commit_audit_sheet,
     sync_audit_targets_from_entries,
     update_commit_audit_sheet,
@@ -65,11 +67,15 @@ from releaseledger.services.entries import (
 from releaseledger.services.entry_lint import lint_release_entries
 from releaseledger.services.entry_prompt import build_entry_prompt
 from releaseledger.services.git_sources import (
+    export_git_evidence,
     GIT_DEFAULT_HEAD,
     GIT_DEFAULT_INCLUDE_MERGES,
     GitSourceCandidate,
     collect_git_candidates,
+    generate_git_scaffold_batch,
     is_root_base_ref,
+    release_snapshot_drift_report,
+    resolve_release_snapshot,
     resolve_base_sha,
     resolve_git_ref,
 )
@@ -80,6 +86,7 @@ from releaseledger.services.releases import (
     create_release,
     finalize_release,
     list_release_records,
+    prepare_release,
     remove_changelog_section,
     rename_changelog_section,
     rename_release,
@@ -473,6 +480,60 @@ def release_finalize_command(
     )
 
 
+@release_app.command("prepare")
+def release_prepare_command(
+    ctx: typer.Context,
+    version: Annotated[str, typer.Argument(help="Release version string.")],
+    previous_version: Annotated[
+        str | None,
+        typer.Option("--previous", help="Explicit previous release version."),
+    ] = None,
+    released_at: Annotated[
+        str | None,
+        typer.Option("--released-at", help="Release date YYYY-MM-DD."),
+    ] = None,
+    git_base_ref: Annotated[
+        str | None,
+        typer.Option("--git-base", help="Git range base ref."),
+    ] = None,
+    git_head_ref: Annotated[
+        str | None,
+        typer.Option("--git-head", help="Git range head ref."),
+    ] = None,
+    output_dir: Annotated[
+        Path,
+        typer.Option("--output-dir", help="Directory for exported preparation artifacts."),
+    ] = Path(".releaseledger/work"),
+) -> None:
+    """Create/update a planned release snapshot and export working artifacts."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        result = prepare_release(
+            _paths(ctx).workspace_root,
+            version=version,
+            previous_version=previous_version,
+            released_at=released_at,
+            git_base_ref=git_base_ref,
+            git_head_ref=git_head_ref,
+            output_dir=output_dir,
+        )
+        human = (
+            f"prepared release {version}\n"
+            f"  range: {result['outputs']['range_json']}\n"
+            f"  audit: {result['outputs']['audit_yaml']}\n"
+            f"  scaffold: {result['outputs']['entries_yaml']}"
+        )
+        return result, [], human
+
+    run_command(
+        command="release.prepare",
+        result_type="release_prepare",
+        json_output=state.json_output,
+        produce=produce,
+    )
+
+
 @release_app.command("list")
 def release_list_command(ctx: typer.Context) -> None:
     """List all releases."""
@@ -522,12 +583,19 @@ def release_show_command(
             lines.append(f"previous_version: {record['previous_version']}")
         if record.get("git_base_ref"):
             lines.append(f"git_base_ref: {record['git_base_ref']}")
+        if record.get("git_base_sha"):
+            lines.append(f"git_base_sha: {record['git_base_sha']}")
         if record.get("git_head_ref"):
             lines.append(f"git_head_ref: {record['git_head_ref']}")
+        if record.get("git_head_sha"):
+            lines.append(f"git_head_sha: {record['git_head_sha']}")
         if record.get("git_range"):
             lines.append(f"git_range: {record['git_range']}")
         if record.get("git_commit_count") is not None:
             lines.append(f"git_commit_count: {record['git_commit_count']}")
+        drift = result.get("snapshot_drift")
+        if isinstance(drift, dict):
+            lines.append(f"snapshot_drift: {drift.get('status', 'unknown')}")
         lines.append(f"entry_count: {result.get('entry_count', 0)}")
         note = record.get("note")
         if note:
@@ -543,6 +611,58 @@ def release_show_command(
         json_output=state.json_output,
         produce=produce,
     )
+
+
+@release_app.command("check")
+def release_check_command(
+    ctx: typer.Context,
+    version: Annotated[str, typer.Argument(help="Release version string.")],
+    target_file: Annotated[
+        Path | None,
+        typer.Option("--target-file", help="CHANGELOG target file for the dry-run."),
+    ] = None,
+    strict: Annotated[
+        bool,
+        typer.Option("--strict", help="Exit non-zero when the release check fails."),
+    ] = False,
+    include_internal: Annotated[
+        bool,
+        typer.Option("--include-internal", help="Include internal entries in coverage."),
+    ] = False,
+) -> None:
+    """Run the consolidated read-only release gate."""
+    state = cli_state_from_context(ctx)
+    try:
+        release_record = load_release(_paths(ctx).workspace_root, version)
+        require_audit_sheet = bool(
+            release_record.git_base_sha
+            or release_record.git_base_ref
+            or release_record.git_head_sha
+            or release_record.git_head_ref
+        )
+        result = build_release_review(
+            _paths(ctx).workspace_root,
+            version=version,
+            include_internal=include_internal,
+            include_statuses=("accepted",),
+            target_file=target_file,
+            strict=strict,
+            git=True,
+            require_audit_sheet=require_audit_sheet,
+        )
+    except ReleaseledgerError as exc:
+        emit_error(command="release.check", error=exc, json_output=state.json_output)
+        raise typer.Exit(launch_error_exit_code(exc)) from exc
+    ok = bool(result.get("ok", False))
+    emit_payload(
+        command="release.check",
+        result_type="release_check",
+        result=result,
+        human=_render_release_check_human(version, result),
+        json_output=state.json_output,
+    )
+    if strict and not ok:
+        raise typer.Exit(2)
 
 
 @release_app.command("cancel")
@@ -987,6 +1107,10 @@ def entry_add_many_command(
     version: Annotated[str, typer.Argument()],
     source_path: Annotated[Path, typer.Option("--file")],
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    strict: Annotated[
+        bool,
+        typer.Option("--strict", help="Fail on lint warnings as well as errors."),
+    ] = False,
     guard_commit_subjects: Annotated[
         bool,
         typer.Option(
@@ -997,6 +1121,13 @@ def entry_add_many_command(
                     "transforms a commit subject from the audit sheet / git range.",
                 ]
             ),
+        ),
+    ] = False,
+    sync_audit: Annotated[
+        bool,
+        typer.Option(
+            "--sync-audit",
+            help="Sync audit target_entry_id values in the same batch operation.",
         ),
     ] = False,
 ) -> None:
@@ -1022,11 +1153,21 @@ def entry_add_many_command(
             release_version=version,
             entries=entries,
             dry_run=dry_run,
+            fail_on_warning=strict,
+            sync_audit=sync_audit,
         )
         issues = result.get("issues")
         if isinstance(issues, list) and issues:
+            lint = result.get("lint", {})
+            lint_summary = lint.get("summary", {}) if isinstance(lint, dict) else {}
+            warnings = (
+                int(lint_summary.get("warnings", 0))
+                if isinstance(lint_summary, dict)
+                else 0
+            )
             raise ReleaseledgerError(
-                f"Entry batch validation failed with {len(issues)} issue(s).",
+                f"Entry batch validation failed with {len(issues)} issue(s)"
+                f" and {warnings} warning(s).",
                 code="VALIDATION_ERROR",
                 exit_code=2,
             )
@@ -1502,6 +1643,70 @@ def _render_review_human(version: str, result: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def _render_release_check_human(version: str, result: dict[str, object]) -> str:
+    checks = result.get("checks", {})
+    checks_dict = checks if isinstance(checks, dict) else {}
+    git_block = result.get("git")
+    audit_block = result.get("audit")
+    lint = result.get("lint", {})
+    lint_dict = lint if isinstance(lint, dict) else {}
+    coverage = result.get("coverage", [])
+    coverage_list = coverage if isinstance(coverage, list) else []
+    audit_evidence_ok = True
+    audit_complete_ok = True
+    if isinstance(audit_block, dict):
+        evidence = audit_block.get("evidence", {})
+        complete = audit_block.get("complete", {})
+        if isinstance(evidence, dict):
+            audit_evidence_ok = bool(evidence.get("ok", False))
+        if isinstance(complete, dict):
+            audit_complete_ok = bool(complete.get("ok", False))
+    lines = [f"RELEASE CHECK {version}", ""]
+    lines.append(
+        f"Snapshot        {'OK' if git_block else 'WARN'}  "
+        + (
+            str(git_block.get("range", "no stored snapshot"))
+            if isinstance(git_block, dict)
+            else "no stored snapshot"
+        )
+    )
+    lines.append(
+        f"Audit evidence  {'OK' if audit_evidence_ok else 'FAIL'}  "
+        + (
+            f"{audit_block.get('row_count', 0)}/{audit_block.get('row_count', 0)} inspected"
+            if isinstance(audit_block, dict)
+            else "no audit sheet"
+        )
+    )
+    lines.append(
+        f"Entry coverage  {'OK' if bool(checks_dict.get('coverage_ok', False)) else 'FAIL'}  "
+        f"{sum(row.get('status') == 'covered' for row in coverage_list if isinstance(row, dict))}/"
+        f"{len(coverage_list)} refs covered"
+    )
+    lines.append(
+        f"Entry lint      {'OK' if bool(checks_dict.get('lint_ok', False)) else 'FAIL'}  "
+        f"{int(lint_dict.get('errors', 0))} errors, {int(lint_dict.get('warnings', 0))} warnings"
+    )
+    lines.append(
+        f"Release state   {'OK' if bool(checks_dict.get('release_state_ok', False)) else 'FAIL'}  "
+        f"status={result.get('release', {}).get('status', '')} "
+        f"released_at={result.get('release', {}).get('released_at', '')}"
+    )
+    lines.append(
+        f"Changelog       {'OK' if bool(checks_dict.get('changelog_ok', False)) else 'FAIL'}  dry-run rendered"
+    )
+    lines.append(
+        f"Audit complete  {'OK' if audit_complete_ok else 'FAIL'}  "
+        + (
+            "entry coverage and summary guard passed"
+            if audit_complete_ok
+            else "coverage or summary guard failed"
+        )
+    )
+    lines.append(f"Result          {'OK' if result.get('ok') else 'FAIL'}")
+    return "\n".join(lines)
+
+
 @app.command("build")
 def build_command(
     ctx: typer.Context,
@@ -1859,8 +2064,10 @@ def git_range_command(
             state,
             workspace_root,
             display_version="next",
-            base=base,
-            head=head or GIT_DEFAULT_HEAD,
+            base_display=base,
+            head_display=head or GIT_DEFAULT_HEAD,
+            base_spec=base,
+            head_spec=head or GIT_DEFAULT_HEAD,
             include_merges=include_merges,
             evidence=evidence,
         )
@@ -1868,28 +2075,27 @@ def git_range_command(
 
     # Real release: use stored git_* fields when --base/--head not supplied.
     existing = load_release(workspace_root, version)
-    use_base = base or existing.git_base_ref
-    use_head = head or existing.git_head_ref
-    if not use_base:
-        emit_error(
-            command="git.range",
-            error=LaunchError(
-                f"Release {version} has no stored git base."
-                " Pass --base or use 'release update --git-base'.",
-                code=CODE_USAGE_ERROR,
-                exit_code=2,
-            ),
-            json_output=state.json_output,
+    try:
+        snapshot = resolve_release_snapshot(
+            workspace_root,
+            existing,
+            explicit_base=base or None,
+            explicit_head=head or None,
         )
-        raise typer.Exit(2)
+    except LaunchError as exc:
+        emit_error(command="git.range", error=exc, json_output=state.json_output)
+        raise typer.Exit(launch_error_exit_code(exc)) from exc
     _run_git_range(
         state,
         workspace_root,
         display_version=version,
-        base=use_base,
-        head=use_head or GIT_DEFAULT_HEAD,
+        base_display=snapshot.base_ref,
+        head_display=snapshot.head_ref,
+        base_spec=snapshot.base_spec,
+        head_spec=snapshot.head_spec,
         include_merges=include_merges,
         evidence=evidence,
+        drift=release_snapshot_drift_report(workspace_root, existing),
     )
 
 
@@ -1918,21 +2124,24 @@ def _run_git_range(
     workspace_root: Path,
     *,
     display_version: str,
-    base: str,
-    head: str,
+    base_display: str,
+    head_display: str,
+    base_spec: str,
+    head_spec: str,
     include_merges: str,
     evidence: bool = False,
+    drift: dict[str, object] | None = None,
 ) -> None:
     """Render a git range scan (human + JSON)."""
     try:
         candidates = collect_git_candidates(
             workspace_root,
-            base_ref=base,
-            head_ref=head,
+            base_ref=base_spec,
+            head_ref=head_spec,
             include_merges=include_merges,
         )
-        base_sha = resolve_base_sha(workspace_root, base)
-        head_sha = resolve_git_ref(workspace_root, head)
+        base_sha = resolve_base_sha(workspace_root, base_spec)
+        head_sha = resolve_git_ref(workspace_root, head_spec)
     except LaunchError as exc:
         emit_error(command="git.range", error=exc, json_output=state.json_output)
         raise typer.Exit(launch_error_exit_code(exc)) from exc
@@ -1941,24 +2150,26 @@ def _run_git_range(
         1
         for _ in collect_git_candidates(
             workspace_root,
-            base_ref=base,
-            head_ref=head,
+            base_ref=base_spec,
+            head_ref=head_spec,
             include_merges="always",
         )
     ) - len(candidates)
     if skipped < 0:
         skipped = 0
 
-    base_ref_display = ":root" if is_root_base_ref(base) else base
+    base_ref_display = ":root" if is_root_base_ref(base_display) else base_display
     range_str = (
-        f":root..{head_sha}" if is_root_base_ref(base) else f"{base_sha}..{head_sha}"
+        f":root..{head_sha}"
+        if is_root_base_ref(base_spec)
+        else f"{base_sha}..{head_sha}"
     )
     result: dict[str, object] = {
         "kind": "git_range",
         "version": display_version,
         "base_ref": base_ref_display,
         "base_sha": base_sha,
-        "head_ref": head,
+        "head_ref": head_display,
         "head_sha": head_sha,
         "range": range_str,
         "commit_count": len(candidates) + skipped,
@@ -1967,6 +2178,8 @@ def _run_git_range(
         "include_merges": include_merges,
         "candidates": [_candidate_payload(c, evidence=evidence) for c in candidates],
     }
+    if drift is not None:
+        result["snapshot_drift"] = drift
     if state.json_output:
         payload: dict[str, object] = {
             "ok": True,
@@ -1978,8 +2191,10 @@ def _run_git_range(
         return
 
     lines = [f"GIT RANGE {display_version}", ""]
-    lines.append(f"  base: {base} -> {base_sha[:7]}")
-    lines.append(f"  head: {head} -> {head_sha[:7]}")
+    lines.append(f"  base: {base_ref_display} -> {base_sha[:7]}")
+    lines.append(f"  head: {head_display} -> {head_sha[:7]}")
+    if drift is not None:
+        lines.append(f"  snapshot drift: {drift.get('status', 'unknown')}")
     lines.append(f"  commits: {len(candidates) + skipped}")
     if skipped:
         lines.append(f"  merge commits skipped: {skipped}")
@@ -2029,8 +2244,8 @@ def git_import_command(
     ] = "",
     head: Annotated[
         str,
-        typer.Option("--head", help="Head ref (default HEAD)."),
-    ] = GIT_DEFAULT_HEAD,
+        typer.Option("--head", help="Head ref (defaults to the stored release head, then HEAD)."),
+    ] = "",
     include_merges: Annotated[
         str,
         typer.Option(
@@ -2057,62 +2272,65 @@ def git_import_command(
     """
     state = cli_state_from_context(ctx)
     workspace_root = _paths(ctx).workspace_root
+    invoked_name = ctx.info_name or "import"
+    command_name = f"git.{invoked_name}"
+    human_name = "GIT SCAFFOLD" if invoked_name == "scaffold" else "GIT IMPORT"
 
     if version == "next":
         if not base:
             emit_error(
-                command="git.import",
+                command=command_name,
                 error=LaunchError(
-                    "--base is required for 'git import next'.",
+                    f"--base is required for 'git {invoked_name} next'.",
                     code=CODE_USAGE_ERROR,
                     exit_code=2,
                 ),
                 json_output=state.json_output,
             )
             raise typer.Exit(2)
+        base_display = base
+        head_display = head or GIT_DEFAULT_HEAD
+        base_spec = base
+        head_spec = head_display
+        snapshot_source = "explicit"
     else:
         existing = load_release(workspace_root, version)
-        if not base:
-            base = existing.git_base_ref or ""
-        if not base:
-            emit_error(
-                command="git.import",
-                error=LaunchError(
-                    f"Release {version} has no stored git base."
-                    " Pass --base or 'release update --git-base'.",
-                    code=CODE_USAGE_ERROR,
-                    exit_code=2,
-                ),
-                json_output=state.json_output,
+        try:
+            snapshot = resolve_release_snapshot(
+                workspace_root,
+                existing,
+                explicit_base=base or None,
+                explicit_head=head or None,
             )
-            raise typer.Exit(2)
+        except LaunchError as exc:
+            emit_error(command=command_name, error=exc, json_output=state.json_output)
+            raise typer.Exit(launch_error_exit_code(exc)) from exc
+        base_display = snapshot.base_ref
+        head_display = snapshot.head_ref
+        base_spec = snapshot.base_spec
+        head_spec = snapshot.head_spec
+        snapshot_source = snapshot.source
 
     try:
+        batch = generate_git_scaffold_batch(
+            workspace_root,
+            release_version=version,
+            base_ref=base_spec,
+            head_ref=head_spec,
+            include_merges=include_merges,
+            status=status,
+        )
         candidates = collect_git_candidates(
             workspace_root,
-            base_ref=base,
-            head_ref=head,
+            base_ref=base_spec,
+            head_ref=head_spec,
             include_merges=include_merges,
         )
+        base_sha = str(batch["git_base_sha"])
+        head_sha = str(batch["git_head_sha"])
     except LaunchError as exc:
-        emit_error(command="git.import", error=exc, json_output=state.json_output)
+        emit_error(command=command_name, error=exc, json_output=state.json_output)
         raise typer.Exit(launch_error_exit_code(exc)) from exc
-
-    yaml_entries: list[dict[str, object]] = []
-    for c in candidates:
-        entry: dict[str, object] = {
-            "kind": c.inferred_kind,
-            # Summary is intentionally blank. `git import` is a coverage
-            # scaffold; changelog prose must be authored from reviewed evidence,
-            # not copied or inferred from commit subjects.
-            "summary": "",
-            "status": status,
-            "source_refs": [c.source_ref],
-            "paths": list(c.paths),
-            "sources": [c.source_ref],
-        }
-        yaml_entries.append(entry)
-    batch: dict[str, object] = {"entries": yaml_entries}
 
     # Write the YAML file.
     try:
@@ -2123,7 +2341,7 @@ def git_import_command(
             _yaml.dump(batch, f, default_flow_style=False, sort_keys=False)
     except Exception as exc:
         emit_error(
-            command="git.import",
+            command=command_name,
             error=LaunchError(
                 f"Failed to write output file {output}: {exc}",
                 code=CODE_USAGE_ERROR,
@@ -2134,33 +2352,45 @@ def git_import_command(
         raise typer.Exit(2) from exc
 
     result: dict[str, object] = {
-        "kind": "git_import",
+        "kind": "git_scaffold" if invoked_name == "scaffold" else "git_import",
         "version": version,
         "output": str(output),
-        "entry_count": len(yaml_entries),
+        "base_ref": base_display,
+        "base_sha": base_sha,
+        "head_ref": head_display,
+        "head_sha": head_sha,
+        "snapshot_source": snapshot_source,
+        "entry_count": len(candidates),
         "status": status,
-        "entries": yaml_entries,
+        "entries": batch["entries"],
     }
     if state.json_output:
         payload: dict[str, object] = {
             "ok": True,
-            "command": "git.import",
-            "result_type": "git_import",
+            "command": command_name,
+            "result_type": "git_scaffold" if invoked_name == "scaffold" else "git_import",
             "result": result,
         }
         typer.echo(render_json(payload))
         return
 
-    lines = [f"GIT IMPORT {version}", ""]
+    lines = [f"{human_name} {version}", ""]
     lines.append(f"  output: {output}")
-    lines.append(f"  entries: {len(yaml_entries)} (status={status})")
+    lines.append(f"  base: {base_display} -> {base_sha[:7]}")
+    lines.append(f"  head: {head_display} -> {head_sha[:7]}")
+    lines.append(f"  entries: {len(candidates)} (status={status})")
     lines.append("")
     lines.append("Next steps:")
     lines.append(
         "  This is an entry scaffold, not changelog prose. For a durable "
         "review worksheet run:"
     )
-    lines.append(f"  releaseledger audit init {version} --base {base} --head {head}")
+    if version == "next":
+        lines.append(
+            f"  releaseledger audit init {version} --base {base_display} --head {head_display}"
+        )
+    else:
+        lines.append(f"  releaseledger audit init {version}")
     lines.append(
         "  edit the YAML and write user-facing summaries from diffs/docs/tests"
     )
@@ -2168,6 +2398,55 @@ def git_import_command(
     lines.append(f"  releaseledger entry add-many {version} --file {output} --dry-run")
     lines.append(f"  releaseledger entry add-many {version} --file {output}")
     typer.echo("\n".join(lines))
+
+
+git_app.command("scaffold")(git_import_command)
+
+
+@git_app.command("evidence")
+def git_evidence_command(
+    ctx: typer.Context,
+    version: Annotated[str, typer.Argument(help="Release version string.")],
+    output_dir: Annotated[
+        Path,
+        typer.Option("--output-dir", help="Directory for manifest and patch files."),
+    ],
+    base: Annotated[str, typer.Option("--base", help="Base ref override.")] = "",
+    head: Annotated[str, typer.Option("--head", help="Head ref override.")] = "",
+    include_merges: Annotated[
+        str,
+        typer.Option("--include-merges", help="Merge policy for evidence export."),
+    ] = GIT_DEFAULT_INCLUDE_MERGES,
+) -> None:
+    """Export deterministic per-commit patch evidence for a release snapshot."""
+    state = cli_state_from_context(ctx)
+    try:
+        workspace_root = _paths(ctx).workspace_root
+        release = load_release(workspace_root, version)
+        snapshot = resolve_release_snapshot(
+            workspace_root,
+            release,
+            explicit_base=base or None,
+            explicit_head=head or None,
+        )
+        result = export_git_evidence(
+            workspace_root,
+            release_version=version,
+            base_ref=snapshot.base_spec,
+            head_ref=snapshot.head_spec,
+            include_merges=include_merges,
+            output_dir=output_dir,
+        )
+    except LaunchError as exc:
+        emit_error(command="git.evidence", error=exc, json_output=state.json_output)
+        raise typer.Exit(launch_error_exit_code(exc)) from exc
+    emit_payload(
+        command="git.evidence",
+        result_type="git_evidence",
+        result=result,
+        human=f"wrote git evidence for {version} to {output_dir}",
+        json_output=state.json_output,
+    )
 
 
 # --- end git_app ---
@@ -2422,12 +2701,12 @@ def audit_init_command(
     ] = False,
     format_name: Annotated[
         str,
-        typer.Option("--format", help="Output format: markdown or json."),
+        typer.Option("--format", help="Output format: markdown, json, or yaml."),
     ] = "markdown",
 ) -> None:
     """Create the canonical commit audit sheet from the git range."""
     state = cli_state_from_context(ctx)
-    if format_name not in {"markdown", "json"}:
+    if format_name not in {"markdown", "json", "yaml"}:
         err = ReleaseledgerError(
             f"Unsupported --format: {format_name!r}",
             code="USAGE_ERROR",
@@ -2467,9 +2746,9 @@ def audit_show_command(
     ctx: typer.Context,
     version: Annotated[str, typer.Argument(help="Release version string.")],
     format_name: Annotated[
-        str,
-        typer.Option("--format", help="Output format: markdown or json."),
-    ] = "markdown",
+        str | None,
+        typer.Option("--format", help="Output format: markdown, json, or yaml."),
+    ] = None,
     output: Annotated[
         Path | None,
         typer.Option("--output", help="Write rendered output to a file."),
@@ -2477,9 +2756,10 @@ def audit_show_command(
 ) -> None:
     """Render the commit audit sheet for display or export."""
     state = cli_state_from_context(ctx)
-    if format_name not in {"markdown", "json"}:
+    effective_format = format_name or ("json" if state.json_output else "markdown")
+    if effective_format not in {"markdown", "json", "yaml"}:
         err = ReleaseledgerError(
-            f"Unsupported --format: {format_name!r}",
+            f"Unsupported --format: {effective_format!r}",
             code="USAGE_ERROR",
             exit_code=2,
         )
@@ -2488,35 +2768,28 @@ def audit_show_command(
     try:
         workspace_root = _paths(ctx).workspace_root
         rendered = render_commit_audit_sheet(
-            workspace_root, version=version, format_name=format_name
+            workspace_root, version=version, format_name=effective_format
         )
     except ReleaseledgerError as exc:
         emit_error(command="audit.show", error=exc, json_output=state.json_output)
         raise typer.Exit(launch_error_exit_code(exc)) from exc
     if output is not None:
-        text = (
-            json.dumps(rendered, indent=2, sort_keys=True)
-            if isinstance(rendered, dict)
-            else str(rendered)
-        )
+        text = render_json(rendered) if isinstance(rendered, dict) else str(rendered)
         try:
-            output.write_text(text, encoding="utf-8")
-        except OSError as exc:
-            err = ReleaseledgerError(
-                f"Failed to write {output}: {exc}",
-                code="USAGE_ERROR",
-                exit_code=2,
-            )
-            emit_error(command="audit.show", error=err, json_output=state.json_output)
-            raise typer.Exit(launch_error_exit_code(err)) from err
+            write_text_output(output, text)
+        except ReleaseledgerError as exc:
+            emit_error(command="audit.show", error=exc, json_output=state.json_output)
+            raise typer.Exit(launch_error_exit_code(exc)) from exc
         human = f"wrote {output}"
-    elif format_name == "json":
+    elif effective_format == "json":
         human = ""
     else:
         human = str(rendered)
-    payload: dict[str, object] = {"version": version, "format": format_name}
+    payload: dict[str, object] = {"version": version, "format": effective_format}
     if isinstance(rendered, dict):
         payload["sheet"] = rendered
+    elif effective_format == "yaml":
+        payload["yaml"] = rendered
     else:
         payload["document"] = rendered
     emit_payload(
@@ -2525,6 +2798,89 @@ def audit_show_command(
         result=payload,
         human=human,
         json_output=state.json_output,
+    )
+
+
+@audit_app.command("apply")
+def audit_apply_command(
+    ctx: typer.Context,
+    version: Annotated[str, typer.Argument(help="Release version string.")],
+    file: Annotated[Path, typer.Option("--file", help="Row-annotation YAML file.")],
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """Merge row-annotation updates into the canonical commit audit sheet."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        workspace_root = _paths(ctx).workspace_root
+        result = apply_commit_audit_annotations(
+            workspace_root,
+            version=version,
+            file=file,
+            dry_run=dry_run,
+        )
+        action = "previewed" if dry_run or not result.get("written") else "applied"
+        human = (
+            f"{action} audit annotations for {version}: "
+            f"{_as_int(result['updated_rows'])} row(s) updated "
+            f"(revision {_as_int(result['revision'])})"
+        )
+        return result, [], human
+
+    run_command(
+        command="audit.apply",
+        result_type="commit_audit_apply",
+        json_output=state.json_output,
+        produce=produce,
+    )
+
+
+@audit_app.command("refresh")
+def audit_refresh_command(
+    ctx: typer.Context,
+    version: Annotated[str, typer.Argument(help="Release version string.")],
+    base: Annotated[
+        str,
+        typer.Option("--base", help="Git base ref override."),
+    ] = "",
+    head: Annotated[
+        str,
+        typer.Option("--head", help="Git head ref override."),
+    ] = "",
+    allow_remove: Annotated[
+        bool,
+        typer.Option(
+            "--allow-remove",
+            help="Allow commits to disappear from the refreshed audit range.",
+        ),
+    ] = False,
+) -> None:
+    """Reconcile an existing audit sheet with a refreshed git snapshot."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        result = refresh_commit_audit_sheet(
+            _paths(ctx).workspace_root,
+            version=version,
+            git_base=base or None,
+            git_head=head or None,
+            allow_remove=allow_remove,
+        )
+        action = "refreshed" if result.get("written") else "checked"
+        human = (
+            f"{action} audit sheet for {version}: "
+            f"preserved={_as_int(result['preserved_reviewed_rows'])} "
+            f"new={_as_int(result['new_rows'])} "
+            f"removed={_as_int(result['removed_rows'])} "
+            f"(revision {_as_int(result['revision'])})"
+        )
+        return result, [], human
+
+    run_command(
+        command="audit.refresh",
+        result_type="commit_audit_refresh",
+        json_output=state.json_output,
+        produce=produce,
     )
 
 
@@ -2559,10 +2915,18 @@ def audit_update_command(
 def audit_validate_command(
     ctx: typer.Context,
     version: Annotated[str, typer.Argument(help="Release version string.")],
+    phase: Annotated[
+        str,
+        typer.Option("--phase", help="Validation phase: evidence or complete."),
+    ] = "complete",
     strict: Annotated[bool, typer.Option("--strict")] = False,
     include_internal: Annotated[
         bool,
         typer.Option("--include-internal", help="Check internal row coverage."),
+    ] = False,
+    record_event: Annotated[
+        bool,
+        typer.Option("--record-event", help="Append an audit.validated event."),
     ] = False,
 ) -> None:
     """Validate the audit sheet against release entries and git coverage."""
@@ -2572,21 +2936,23 @@ def audit_validate_command(
         result = validate_commit_audit_sheet(
             workspace_root,
             version=version,
+            phase=phase,
             strict=strict,
             include_internal=include_internal,
+            record_event=record_event,
         )
     except ReleaseledgerError as exc:
         emit_error(command="audit.validate", error=exc, json_output=state.json_output)
         raise typer.Exit(launch_error_exit_code(exc)) from exc
     ok = bool(result.get("ok"))
     if ok:
-        human = f"audit validation passed for {version}"
+        human = f"audit {phase} validation passed for {version}"
     else:
         needs = _as_int(result.get("needs_review_count", 0))
         uninsp = _as_int(result.get("uninspected_count", 0))
         missing = len(result.get("missing_entry_coverage", []))  # type: ignore[arg-type]
         human = (
-            f"audit validation for {version}: ok=false "
+            f"audit {phase} validation for {version}: ok=false "
             f"(needs_review={needs}, uninspected={uninsp}, "
             f"missing_coverage={missing})"
         )
