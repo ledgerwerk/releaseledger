@@ -16,7 +16,7 @@ from typing import Any
 if sys.version_info >= (3, 11):
     import tomllib
 else:  # pragma: no cover - Python 3.10 fallback
-    import tomli as tomllib  # type: ignore[import-not-found]
+    import tomli as tomllib
 
 from releaseledger.errors import CODE_CONFIG_ERROR, CODE_USAGE_ERROR, LaunchError
 

@@ -31,8 +31,8 @@ from releaseledger.services.audit import (
     project_audit_entry_coverage,
     sync_audit_sheet_targets,
 )
-from releaseledger.services.events import append_event
 from releaseledger.services.entry_lint import lint_entry_records
+from releaseledger.services.events import append_event
 from releaseledger.storage.paths import resolve_project_paths
 from releaseledger.storage.store import (
     delete_entry,
@@ -274,7 +274,8 @@ def _duplicate_batch_issues(
                     "field": "summary",
                     "code": "duplicate_fingerprint",
                     "message": (
-                        f"Entry content duplicates {owner} by kind/summary/source refs/paths."
+                        f"Entry content duplicates {owner}"
+                        " by kind/summary/source refs/paths."
                     ),
                 }
             )
@@ -733,7 +734,9 @@ def add_many_release_entries(
     combined_entries = [*existing, *proposed]
     audit_sheet = load_commit_audit_sheet(workspace_root, release_version)
     coverage_projection = (
-        project_audit_entry_coverage(audit_sheet, combined_entries, include_internal=True)
+        project_audit_entry_coverage(
+            audit_sheet, combined_entries, include_internal=True
+        )
         if audit_sheet is not None
         else None
     )
@@ -743,17 +746,16 @@ def add_many_release_entries(
                 "severity": "error",
                 "field": "audit",
                 "code": "missing_audit_sheet",
-                "message": "Cannot sync audit targets because the release has no audit sheet.",
+                "message": (
+                    "Cannot sync audit targets because the release has no audit sheet."
+                ),
             }
         )
     blocking_issues = [
         issue
         for issue in issues
         if str(issue.get("severity", "error")) == "error"
-        or (
-            fail_on_warning
-            and str(issue.get("severity", "error")) == "warning"
-        )
+        or (fail_on_warning and str(issue.get("severity", "error")) == "warning")
     ]
     if blocking_issues or dry_run:
         return _batch_result(
@@ -769,7 +771,9 @@ def add_many_release_entries(
     synced_audit = None
     synced_rows = 0
     if sync_audit and audit_sheet is not None:
-        synced_audit, synced_rows = sync_audit_sheet_targets(audit_sheet, combined_entries)
+        synced_audit, synced_rows = sync_audit_sheet_targets(
+            audit_sheet, combined_entries
+        )
     for record in proposed:
         save_entry(workspace_root, record)
     updated_release = replace(
@@ -807,7 +811,9 @@ def add_many_release_entries(
             for record in proposed
         },
     }
-    event_data: dict[str, object] = {"entry_ids": [record.entry_id for record in proposed]}
+    event_data: dict[str, object] = {
+        "entry_ids": [record.entry_id for record in proposed]
+    }
     audit_sync_block: dict[str, object] | None = None
     if saved_audit is not None:
         record_revisions["commit_audit_sheet"] = saved_audit.versioning.revision

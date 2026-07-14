@@ -205,9 +205,7 @@ def _validate_completed_rows(sheet: CommitAuditSheetRecord) -> list[dict[str, ob
                     "source_ref": row.source_ref,
                     "field": "observed_behavior",
                     "code": "empty_observed_behavior",
-                    "message": (
-                        "Completed audit rows require observed_behavior text."
-                    ),
+                    "message": ("Completed audit rows require observed_behavior text."),
                 }
             )
     return issues
@@ -323,7 +321,8 @@ def update_commit_audit_sheet(
             label=f"audit update {version}",
             remediation=[
                 "Export a canonical audit file and edit only the mutable row fields.",
-                f"Run `releaseledger audit show {version} --format yaml --output FILE`.",
+                f"Run `releaseledger audit show {version}"
+                " --format yaml --output FILE`.",
             ],
         )
     )
@@ -385,7 +384,8 @@ def update_commit_audit_sheet(
         "version": version,
         "row_count": len(saved.rows),
         "changed_rows": sum(
-            left != right for left, right in zip(existing.rows, saved.rows, strict=False)
+            left != right
+            for left, right in zip(existing.rows, saved.rows, strict=False)
         ),
         "revision": saved.versioning.revision,
     }
@@ -404,7 +404,8 @@ def apply_commit_audit_annotations(
     existing = load_commit_audit_sheet(workspace_root, version)
     if existing is None:
         raise LaunchError(
-            f"No commit audit sheet for {version}. Run `releaseledger audit init` first.",
+            f"No commit audit sheet for {version}."
+            " Run `releaseledger audit init` first.",
             code=CODE_NOT_FOUND,
             exit_code=2,
         )
@@ -460,7 +461,9 @@ def apply_commit_audit_annotations(
                 code=CODE_VALIDATION_ERROR,
                 exit_code=2,
             )
-        extra = sorted(key for key in item if key not in _MUTABLE_ROW_FIELDS and key != "sha")
+        extra = sorted(
+            key for key in item if key not in _MUTABLE_ROW_FIELDS and key != "sha"
+        )
         if extra:
             raise LaunchError(
                 "Audit apply rows may only update mutable fields; got: "
@@ -476,7 +479,9 @@ def apply_commit_audit_annotations(
         rows_by_sha[sha] = after
         if before != after:
             changed_rows += 1
-    merged_rows = [rows_by_sha[str(row["sha"])] for row in existing_rows if isinstance(row, dict)]
+    merged_rows = [
+        rows_by_sha[str(row["sha"])] for row in existing_rows if isinstance(row, dict)
+    ]
     updated_data = dict(existing_data)
     updated_data["rows"] = merged_rows
     candidate = audit_sheet_from_dict(updated_data)
@@ -539,7 +544,8 @@ def refresh_commit_audit_sheet(
     existing = load_commit_audit_sheet(workspace_root, version)
     if existing is None:
         raise LaunchError(
-            f"No commit audit sheet for {version}. Run `releaseledger audit init` first.",
+            f"No commit audit sheet for {version}."
+            " Run `releaseledger audit init` first.",
             code=CODE_NOT_FOUND,
             exit_code=2,
         )
@@ -593,7 +599,9 @@ def refresh_commit_audit_sheet(
         for sha, row in existing_by_sha.items()
         if sha in candidate_shas and row.inspected
     )
-    new_rows = sum(1 for candidate in candidates if candidate.sha not in existing_by_sha)
+    new_rows = sum(
+        1 for candidate in candidates if candidate.sha not in existing_by_sha
+    )
     result = {
         "kind": "commit_audit_refresh",
         "version": version,
@@ -625,6 +633,7 @@ def refresh_commit_audit_sheet(
     result["revision"] = saved.versioning.revision
     result["written"] = True
     return result
+
 
 # ---------------------------------------------------------------------------
 # Render / show
@@ -808,13 +817,179 @@ def project_audit_entry_coverage(
         row.source_ref
         for row in sheet.rows
         if row.source_ref
-        not in set(coverage["missing_entry_coverage"]) | set(coverage["internal_missing"])
+        not in set(coverage["missing_entry_coverage"])
+        | set(coverage["internal_missing"])
     ]
     return {
         "covered_refs": covered_refs,
         "missing_refs": coverage["missing_entry_coverage"],
         "internal_missing_refs": coverage["internal_missing"],
     }
+
+
+def _row_issue(
+    row: CommitAuditRow,
+    *,
+    field: str,
+    code: str,
+    message: str,
+) -> dict[str, object]:
+    return {
+        "sha": row.sha,
+        "source_ref": row.source_ref,
+        "field": field,
+        "code": code,
+        "message": message,
+    }
+
+
+def _collect_row_issues(
+    sheet: CommitAuditSheetRecord,
+) -> list[dict[str, object]]:
+    """Collect issues arising from individual sheet rows."""
+    issues: list[dict[str, object]] = []
+    for row in sheet.rows:
+        if not row.inspected:
+            issues.append(
+                _row_issue(
+                    row,
+                    field="inspected",
+                    code="uninspected",
+                    message="Row must be marked inspected.",
+                )
+            )
+        if row.decision == "needs_review":
+            issues.append(
+                _row_issue(
+                    row,
+                    field="decision",
+                    code="needs_review",
+                    message="Row decision must move beyond needs_review.",
+                )
+            )
+        if row.inspected and not row.inspected_paths:
+            issues.append(
+                _row_issue(
+                    row,
+                    field="inspected_paths",
+                    code="missing_inspected_paths",
+                    message="Inspected rows must record inspected_paths.",
+                )
+            )
+        if row.decision in _COMPLETED_DECISIONS and not row.observed_behavior.strip():
+            issues.append(
+                _row_issue(
+                    row,
+                    field="observed_behavior",
+                    code="empty_observed_behavior",
+                    message="Completed rows require observed_behavior text.",
+                )
+            )
+    return issues
+
+
+def _collect_coverage_issues(
+    *,
+    phase: str,
+    missing_entry_coverage: list[str],
+    internal_missing: list[str],
+    violations: list[str],
+) -> list[dict[str, object]]:
+    """Collect issues that only apply when phase is ``complete``."""
+    if phase != "complete":
+        return []
+    issues: list[dict[str, object]] = []
+    for ref in missing_entry_coverage:
+        issues.append(
+            {
+                "source_ref": ref,
+                "field": "source_refs",
+                "code": "missing_entry_coverage",
+                "message": f"No accepted entry covers {ref}.",
+            }
+        )
+    for ref in internal_missing:
+        issues.append(
+            {
+                "source_ref": ref,
+                "field": "source_refs",
+                "code": "missing_internal_entry_coverage",
+                "message": f"No accepted internal entry covers {ref}.",
+            }
+        )
+    for ref in violations:
+        issues.append(
+            {
+                "source_ref": ref,
+                "field": "summary",
+                "code": "summary_matches_commit_subject",
+                "message": (f"An accepted entry summary matches commit subject {ref}."),
+            }
+        )
+    return issues
+
+
+def _build_checks(
+    *,
+    issues: list[dict[str, object]],
+    phase: str,
+    missing_entry_coverage: list[str],
+    internal_missing: list[str],
+    violations: list[str],
+    uninspected: list[CommitAuditRow],
+    needs_review: list[CommitAuditRow],
+) -> dict[str, bool]:
+    return {
+        "all_rows_inspected": len(uninspected) == 0,
+        "all_rows_decided": len(needs_review) == 0,
+        "all_inspected_rows_have_paths": not any(
+            issue["code"] == "missing_inspected_paths" for issue in issues
+        ),
+        "all_completed_rows_have_observed_behavior": not any(
+            issue["code"] == "empty_observed_behavior" for issue in issues
+        ),
+        "all_public_decisions_covered": (
+            phase != "complete" or len(missing_entry_coverage) == 0
+        ),
+        "all_internal_decisions_covered_when_requested": (
+            phase != "complete" or len(internal_missing) == 0
+        ),
+        "no_summary_matches_commit_subject": (
+            phase != "complete" or len(violations) == 0
+        ),
+    }
+
+
+def _collect_strict_blockers(
+    *,
+    issues: list[dict[str, object]],
+    phase: str,
+    missing_entry_coverage: list[str],
+    internal_missing: list[str],
+    violations: list[str],
+    uninspected: list[CommitAuditRow],
+    needs_review: list[CommitAuditRow],
+) -> list[str]:
+    blockers: list[str] = []
+    if needs_review:
+        blockers.append(f"{len(needs_review)} row(s) need review")
+    if uninspected:
+        blockers.append(f"{len(uninspected)} row(s) not inspected")
+    if any(issue["code"] == "missing_inspected_paths" for issue in issues):
+        blockers.append("inspected row(s) are missing inspected_paths")
+    if any(issue["code"] == "empty_observed_behavior" for issue in issues):
+        blockers.append("completed row(s) are missing observed_behavior")
+    if phase == "complete" and missing_entry_coverage:
+        blockers.append(
+            f"{len(missing_entry_coverage)} row(s) lack accepted entry coverage"
+        )
+    if phase == "complete" and internal_missing:
+        blockers.append(
+            f"{len(internal_missing)} internal row(s) lack accepted entry coverage"
+        )
+    if phase == "complete" and violations:
+        blockers.append(f"{len(violations)} entry summary/ies match a commit subject")
+    return blockers
 
 
 def validate_commit_audit_sheet(
@@ -849,103 +1024,30 @@ def validate_commit_audit_sheet(
         )
     coverage = _analyze_coverage(sheet, entries, include_internal=include_internal)
 
-    row_count = len(sheet.rows)
     needs_review = [r for r in sheet.rows if r.decision == "needs_review"]
     uninspected = [r for r in sheet.rows if not r.inspected]
     missing_entry_coverage = coverage["missing_entry_coverage"]
     internal_only = coverage["internal_only"]
     internal_missing = coverage["internal_missing"]
     violations = coverage["subject_summary_violations"]
-    issues: list[dict[str, object]] = []
-    for row in uninspected:
-        issues.append(
-            {
-                "sha": row.sha,
-                "source_ref": row.source_ref,
-                "field": "inspected",
-                "code": "uninspected",
-                "message": "Row must be marked inspected.",
-            }
+    issues = _collect_row_issues(sheet)
+    issues.extend(
+        _collect_coverage_issues(
+            phase=phase,
+            missing_entry_coverage=missing_entry_coverage,
+            internal_missing=internal_missing,
+            violations=violations,
         )
-    for row in needs_review:
-        issues.append(
-            {
-                "sha": row.sha,
-                "source_ref": row.source_ref,
-                "field": "decision",
-                "code": "needs_review",
-                "message": "Row decision must move beyond needs_review.",
-            }
-        )
-    for row in sheet.rows:
-        if row.inspected and not row.inspected_paths:
-            issues.append(
-                {
-                    "sha": row.sha,
-                    "source_ref": row.source_ref,
-                    "field": "inspected_paths",
-                    "code": "missing_inspected_paths",
-                    "message": "Inspected rows must record inspected_paths.",
-                }
-            )
-        if row.decision in _COMPLETED_DECISIONS and not row.observed_behavior.strip():
-            issues.append(
-                {
-                    "sha": row.sha,
-                    "source_ref": row.source_ref,
-                    "field": "observed_behavior",
-                    "code": "empty_observed_behavior",
-                    "message": "Completed rows require observed_behavior text.",
-                }
-            )
-    if phase == "complete":
-        for ref in missing_entry_coverage:
-            issues.append(
-                {
-                    "source_ref": ref,
-                    "field": "source_refs",
-                    "code": "missing_entry_coverage",
-                    "message": f"No accepted entry covers {ref}.",
-                }
-            )
-        for ref in internal_missing:
-            issues.append(
-                {
-                    "source_ref": ref,
-                    "field": "source_refs",
-                    "code": "missing_internal_entry_coverage",
-                    "message": f"No accepted internal entry covers {ref}.",
-                }
-            )
-        for ref in violations:
-            issues.append(
-                {
-                    "source_ref": ref,
-                    "field": "summary",
-                    "code": "summary_matches_commit_subject",
-                    "message": f"An accepted entry summary matches commit subject {ref}.",
-                }
-            )
-
-    checks = {
-        "all_rows_inspected": len(uninspected) == 0,
-        "all_rows_decided": len(needs_review) == 0,
-        "all_inspected_rows_have_paths": not any(
-            issue["code"] == "missing_inspected_paths" for issue in issues
-        ),
-        "all_completed_rows_have_observed_behavior": not any(
-            issue["code"] == "empty_observed_behavior" for issue in issues
-        ),
-        "all_public_decisions_covered": (
-            phase != "complete" or len(missing_entry_coverage) == 0
-        ),
-        "all_internal_decisions_covered_when_requested": (
-            phase != "complete" or len(internal_missing) == 0
-        ),
-        "no_summary_matches_commit_subject": (
-            phase != "complete" or len(violations) == 0
-        ),
-    }
+    )
+    checks = _build_checks(
+        issues=issues,
+        phase=phase,
+        missing_entry_coverage=missing_entry_coverage,
+        internal_missing=internal_missing,
+        violations=violations,
+        uninspected=uninspected,
+        needs_review=needs_review,
+    )
     ok = not issues
 
     report: dict[str, object] = {
@@ -953,7 +1055,7 @@ def validate_commit_audit_sheet(
         "version": version,
         "phase": phase,
         "ok": ok,
-        "row_count": row_count,
+        "row_count": len(sheet.rows),
         "needs_review_count": len(needs_review),
         "uninspected_count": len(uninspected),
         "missing_entry_coverage": missing_entry_coverage,
@@ -964,27 +1066,15 @@ def validate_commit_audit_sheet(
         "issues": issues,
     }
     if strict:
-        blockers: list[str] = []
-        if needs_review:
-            blockers.append(f"{len(needs_review)} row(s) need review")
-        if uninspected:
-            blockers.append(f"{len(uninspected)} row(s) not inspected")
-        if any(issue["code"] == "missing_inspected_paths" for issue in issues):
-            blockers.append("inspected row(s) are missing inspected_paths")
-        if any(issue["code"] == "empty_observed_behavior" for issue in issues):
-            blockers.append("completed row(s) are missing observed_behavior")
-        if phase == "complete" and missing_entry_coverage:
-            blockers.append(
-                f"{len(missing_entry_coverage)} row(s) lack accepted entry coverage"
-            )
-        if phase == "complete" and internal_missing:
-            blockers.append(
-                f"{len(internal_missing)} internal row(s) lack accepted entry coverage"
-            )
-        if phase == "complete" and violations:
-            blockers.append(
-                f"{len(violations)} entry summary/ies match a commit subject"
-            )
+        blockers = _collect_strict_blockers(
+            issues=issues,
+            phase=phase,
+            missing_entry_coverage=missing_entry_coverage,
+            internal_missing=internal_missing,
+            violations=violations,
+            uninspected=uninspected,
+            needs_review=needs_review,
+        )
         if blockers:
             if record_event:
                 append_event(

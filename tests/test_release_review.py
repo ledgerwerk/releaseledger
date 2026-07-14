@@ -312,7 +312,9 @@ def test_review_uses_boundary_ref_as_expected_ref(tmp_path: Path) -> None:
     assert payload["result"]["release"]["boundary_ref"] == "tl:task-0105"
 
 
-def test_release_check_reports_planned_dated_release_inconsistency(tmp_path: Path) -> None:
+def test_release_check_reports_planned_dated_release_inconsistency(
+    tmp_path: Path,
+) -> None:
     _init(tmp_path)
     _create_release(tmp_path, "0.5.0", source_refs=("tl:task-0103",))
     _run(tmp_path, "release", "update", "0.5.0", "--released-at", "2026-06-14")

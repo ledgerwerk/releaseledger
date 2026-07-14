@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import cast
 
 import ledgercore
 
-from releaseledger.domain.entry import entry_from_dict
+from releaseledger.domain.entry import ReleaseEntryRecord, entry_from_dict
 from releaseledger.errors import CODE_VALIDATION_ERROR, LaunchError
 from releaseledger.storage.paths import resolve_project_paths
 from releaseledger.storage.store import load_entries, load_release, release_dir
@@ -47,7 +48,7 @@ def _issue(
 
 def validate_entry_summary(summary: str) -> list[dict[str, object]]:
     """Return deterministic style and validity findings for a summary."""
-    issues: list[dict[str, str]] = []
+    issues: list[dict[str, object]] = []
     if not isinstance(summary, str) or not summary.strip():
         return [_issue("error", "Summary must not be empty.", code="empty")]
     if "\n" in summary or "\r" in summary:
@@ -171,7 +172,7 @@ def assert_entry_summary_valid(summary: str, *, fail_on_warning: bool = True) ->
     ]
     if blocking:
         raise LaunchError(
-            "; ".join(issue["message"] for issue in blocking),
+            "; ".join(str(issue["message"]) for issue in blocking),
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
         )
@@ -240,8 +241,8 @@ def lint_release_entries(
             valid_ids.discard(path.stem)
     entries = [entry for entry in entries if entry.entry_id in valid_ids]
     lint_result = lint_entry_records(entries, strict=strict)
-    issues.extend(lint_result["issues"])  # type: ignore[arg-type]
-    entry_results = lint_result["entries"]  # type: ignore[assignment]
+    issues.extend(cast(list[dict[str, object]], lint_result["issues"]))
+    entry_results = cast(list[dict[str, object]], lint_result["entries"])
     summary = lint_result["summary"]
     assert isinstance(summary, dict)
     errors = int(summary["errors"])

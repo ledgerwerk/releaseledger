@@ -26,7 +26,10 @@ def test_skill_disallows_parallel_releaseledger_mutations() -> None:
     text = SKILL.read_text(encoding="utf-8")
     assert "Do not run multiple releaseledger mutating commands concurrently" in text
     assert "Never run a command and its verification concurrently." in text
-    assert "mutation before issuing `show`, `list`, `review`, `validate`, or file checks" in text
+    assert (
+        "mutation before issuing `show`, `list`, `review`, `validate`, or file checks"
+        in text
+    )
 
 
 def test_skill_uses_phase_aware_audit_validation_and_release_check() -> None:

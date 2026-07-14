@@ -29,9 +29,9 @@ initial implementation skips merges while keeping their PR metadata for grouping
 
 from __future__ import annotations
 
-import re
-import json
 import hashlib
+import json
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -927,7 +927,9 @@ def export_git_evidence(
         "candidates": manifest_candidates,
     }
     manifest_path = output_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return {
         "kind": "git_evidence",
         "release_version": release_version,

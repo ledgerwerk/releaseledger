@@ -8,7 +8,6 @@ subcommands. Subcommand groups are registered progressively (``init``,
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Annotated
 
@@ -67,17 +66,17 @@ from releaseledger.services.entries import (
 from releaseledger.services.entry_lint import lint_release_entries
 from releaseledger.services.entry_prompt import build_entry_prompt
 from releaseledger.services.git_sources import (
-    export_git_evidence,
     GIT_DEFAULT_HEAD,
     GIT_DEFAULT_INCLUDE_MERGES,
     GitSourceCandidate,
     collect_git_candidates,
+    export_git_evidence,
     generate_git_scaffold_batch,
     is_root_base_ref,
     release_snapshot_drift_report,
-    resolve_release_snapshot,
     resolve_base_sha,
     resolve_git_ref,
+    resolve_release_snapshot,
 )
 from releaseledger.services.releases import (
     UNSET,
@@ -502,7 +501,9 @@ def release_prepare_command(
     ] = None,
     output_dir: Annotated[
         Path,
-        typer.Option("--output-dir", help="Directory for exported preparation artifacts."),
+        typer.Option(
+            "--output-dir", help="Directory for exported preparation artifacts."
+        ),
     ] = Path(".releaseledger/work"),
 ) -> None:
     """Create/update a planned release snapshot and export working artifacts."""
@@ -518,11 +519,13 @@ def release_prepare_command(
             git_head_ref=git_head_ref,
             output_dir=output_dir,
         )
+        outputs = result.get("outputs")
+        outputs_dict = outputs if isinstance(outputs, dict) else {}
         human = (
             f"prepared release {version}\n"
-            f"  range: {result['outputs']['range_json']}\n"
-            f"  audit: {result['outputs']['audit_yaml']}\n"
-            f"  scaffold: {result['outputs']['entries_yaml']}"
+            f"  range: {outputs_dict.get('range_json', '')}\n"
+            f"  audit: {outputs_dict.get('audit_yaml', '')}\n"
+            f"  scaffold: {outputs_dict.get('entries_yaml', '')}"
         )
         return result, [], human
 
@@ -627,7 +630,9 @@ def release_check_command(
     ] = False,
     include_internal: Annotated[
         bool,
-        typer.Option("--include-internal", help="Include internal entries in coverage."),
+        typer.Option(
+            "--include-internal", help="Include internal entries in coverage."
+        ),
     ] = False,
 ) -> None:
     """Run the consolidated read-only release gate."""
@@ -1652,6 +1657,8 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
     lint_dict = lint if isinstance(lint, dict) else {}
     coverage = result.get("coverage", [])
     coverage_list = coverage if isinstance(coverage, list) else []
+    release_block = result.get("release")
+    release_dict = release_block if isinstance(release_block, dict) else {}
     audit_evidence_ok = True
     audit_complete_ok = True
     if isinstance(audit_block, dict):
@@ -1670,30 +1677,37 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
             else "no stored snapshot"
         )
     )
-    lines.append(
-        f"Audit evidence  {'OK' if audit_evidence_ok else 'FAIL'}  "
-        + (
-            f"{audit_block.get('row_count', 0)}/{audit_block.get('row_count', 0)} inspected"
-            if isinstance(audit_block, dict)
-            else "no audit sheet"
-        )
+    audit_evidence_text = (
+        f"{audit_block.get('row_count', 0)}/{audit_block.get('row_count', 0)} inspected"
+        if isinstance(audit_block, dict)
+        else "no audit sheet"
+    )
+    evidence_status = "OK" if audit_evidence_ok else "FAIL"
+    lines.append(f"Audit evidence  {evidence_status}  {audit_evidence_text}")
+    covered_count = sum(
+        row.get("status") == "covered" for row in coverage_list if isinstance(row, dict)
     )
     lines.append(
-        f"Entry coverage  {'OK' if bool(checks_dict.get('coverage_ok', False)) else 'FAIL'}  "
-        f"{sum(row.get('status') == 'covered' for row in coverage_list if isinstance(row, dict))}/"
-        f"{len(coverage_list)} refs covered"
+        f"Entry coverage  "
+        f"{'OK' if bool(checks_dict.get('coverage_ok', False)) else 'FAIL'}  "
+        f"{covered_count}/{len(coverage_list)} refs covered"
     )
     lines.append(
-        f"Entry lint      {'OK' if bool(checks_dict.get('lint_ok', False)) else 'FAIL'}  "
-        f"{int(lint_dict.get('errors', 0))} errors, {int(lint_dict.get('warnings', 0))} warnings"
+        f"Entry lint      "
+        f"{'OK' if bool(checks_dict.get('lint_ok', False)) else 'FAIL'}  "
+        f"{int(lint_dict.get('errors', 0))} errors, "
+        f"{int(lint_dict.get('warnings', 0))} warnings"
     )
     lines.append(
-        f"Release state   {'OK' if bool(checks_dict.get('release_state_ok', False)) else 'FAIL'}  "
-        f"status={result.get('release', {}).get('status', '')} "
-        f"released_at={result.get('release', {}).get('released_at', '')}"
+        f"Release state   "
+        f"{'OK' if bool(checks_dict.get('release_state_ok', False)) else 'FAIL'}  "
+        f"status={release_dict.get('status', '')} "
+        f"released_at={release_dict.get('released_at', '')}"
     )
     lines.append(
-        f"Changelog       {'OK' if bool(checks_dict.get('changelog_ok', False)) else 'FAIL'}  dry-run rendered"
+        f"Changelog       "
+        f"{'OK' if bool(checks_dict.get('changelog_ok', False)) else 'FAIL'}  "
+        "dry-run rendered"
     )
     lines.append(
         f"Audit complete  {'OK' if audit_complete_ok else 'FAIL'}  "
@@ -2244,7 +2258,9 @@ def git_import_command(
     ] = "",
     head: Annotated[
         str,
-        typer.Option("--head", help="Head ref (defaults to the stored release head, then HEAD)."),
+        typer.Option(
+            "--head", help="Head ref (defaults to the stored release head, then HEAD)."
+        ),
     ] = "",
     include_merges: Annotated[
         str,
@@ -2368,7 +2384,9 @@ def git_import_command(
         payload: dict[str, object] = {
             "ok": True,
             "command": command_name,
-            "result_type": "git_scaffold" if invoked_name == "scaffold" else "git_import",
+            "result_type": "git_scaffold"
+            if invoked_name == "scaffold"
+            else "git_import",
             "result": result,
         }
         typer.echo(render_json(payload))
@@ -2387,7 +2405,8 @@ def git_import_command(
     )
     if version == "next":
         lines.append(
-            f"  releaseledger audit init {version} --base {base_display} --head {head_display}"
+            f"  releaseledger audit init {version}"
+            f" --base {base_display} --head {head_display}"
         )
     else:
         lines.append(f"  releaseledger audit init {version}")

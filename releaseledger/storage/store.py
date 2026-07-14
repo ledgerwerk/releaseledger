@@ -39,11 +39,11 @@ from releaseledger.domain.release import (
     parse_release_version_tuple,
     release_from_dict,
 )
-from releaseledger.domain.versioning import versioning_from_dict
 from releaseledger.domain.versioning import (
     RecordVersioning,
     bump_versioning,
     initial_versioning,
+    versioning_from_dict,
 )
 from releaseledger.errors import (
     CODE_CONFLICT,

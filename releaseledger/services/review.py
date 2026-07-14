@@ -507,7 +507,8 @@ def build_release_review(
     )
     if not release_state_ok:
         recommendations.append(
-            f"{release.version} has released_at={release.released_at} but status={release.status}."
+            f"{release.version} has released_at={release.released_at}"
+            f" but status={release.status}."
         )
 
     result: dict[str, object] = {

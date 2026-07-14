@@ -199,7 +199,10 @@ class TestAuditInit:
         data["rows"][0]["decision"] = "accepted"
         data["rows"][0]["observed_behavior"] = "Reviewed behavior."
         sheet_path.write_text(yaml.safe_dump(data))
-        assert _run(repo, "audit", "update", "0.2.0", "--file", str(sheet_path)).exit_code == 0
+        assert (
+            _run(repo, "audit", "update", "0.2.0", "--file", str(sheet_path)).exit_code
+            == 0
+        )
         payload = _jrun(repo, "audit", "init", "0.2.0", "--overwrite")
         assert int(payload["result"]["revision"]) == 3
 
@@ -270,7 +273,9 @@ class TestAuditUpdate:
         assert result.exit_code != 0
         assert "missing" in _human_error(result).lower()
 
-    def test_update_malformed_yaml_returns_validation_error(self, tmp_path: Path) -> None:
+    def test_update_malformed_yaml_returns_validation_error(
+        self, tmp_path: Path
+    ) -> None:
         repo, _sha_a, _sha_b = _seed_range(tmp_path)
         assert _run(repo, "audit", "init", "0.2.0").exit_code == 0
         bad = tmp_path / "bad.yaml"
@@ -498,7 +503,9 @@ class TestAuditRefresh:
         decisions_path = tmp_path / "audit-decisions.yaml"
         decisions_path.write_text(yaml.safe_dump(decisions))
         assert (
-            _run(repo, "audit", "apply", "0.2.0", "--file", str(decisions_path)).exit_code
+            _run(
+                repo, "audit", "apply", "0.2.0", "--file", str(decisions_path)
+            ).exit_code
             == 0
         )
         _commit(repo, "feat: add c", "c.txt")

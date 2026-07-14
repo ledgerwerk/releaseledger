@@ -39,15 +39,15 @@ from releaseledger.errors import (
     CODE_VALIDATION_ERROR,
     LaunchError,
 )
-from releaseledger.services.changelog_build import (
-    find_release_section,
-    remove_release_section,
-    rename_release_section,
-)
 from releaseledger.services.audit import (
     create_commit_audit_sheet,
     refresh_commit_audit_sheet,
     render_commit_audit_sheet,
+)
+from releaseledger.services.changelog_build import (
+    find_release_section,
+    remove_release_section,
+    rename_release_section,
 )
 from releaseledger.services.events import append_event
 from releaseledger.services.git_sources import (
@@ -56,14 +56,14 @@ from releaseledger.services.git_sources import (
     generate_git_scaffold_batch,
     is_root_base_ref,
     release_snapshot_drift_report,
-    resolve_release_snapshot,
     resolve_base_sha,
     resolve_git_ref,
+    resolve_release_snapshot,
 )
 from releaseledger.storage.paths import resolve_project_paths
 from releaseledger.storage.store import (
-    load_commit_audit_sheet,
     list_releases,
+    load_commit_audit_sheet,
     load_entries,
     load_release,
     rebuild_indexes,
@@ -737,7 +737,7 @@ def prepare_release(
         if released_at is not None:
             update_kwargs["released_at"] = released_at
         if len(update_kwargs) > 1:
-            update_release(workspace_root, **update_kwargs)
+            update_release(workspace_root, **update_kwargs)  # type: ignore[arg-type]
     if git_base_ref is not None or git_head_ref is not None:
         update_release(
             workspace_root,
@@ -758,7 +758,9 @@ def prepare_release(
         if audit_exists
         else create_commit_audit_sheet(workspace_root, version=version)
     )
-    audit_yaml = render_commit_audit_sheet(workspace_root, version=version, format_name="yaml")
+    audit_yaml = render_commit_audit_sheet(
+        workspace_root, version=version, format_name="yaml"
+    )
     assert isinstance(audit_yaml, str)
     scaffold = generate_git_scaffold_batch(
         workspace_root,

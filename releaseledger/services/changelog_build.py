@@ -1692,7 +1692,7 @@ def build_full_changelog_file(  # noqa: C901
                 unreleased_version, folded_body
             )
             unreleased_version_rendered = unreleased_version
-            unreleased_entry_count = int(rendered_unreleased["entry_count"])
+            unreleased_entry_count = int(str(rendered_unreleased["entry_count"]))
         # Exclude the folded release from normal release sections.
         selected = [r for r in selected if r.version != unreleased_version]
 

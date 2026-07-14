@@ -221,7 +221,9 @@ def test_add_many_rolls_back_all_entries_on_release_conflict(
     assert load_release(workspace, "0.5.0").entry_count == 0
 
 
-def test_add_many_strict_warning_returns_preview_without_writing(tmp_path: Path) -> None:
+def test_add_many_strict_warning_returns_preview_without_writing(
+    tmp_path: Path,
+) -> None:
     workspace = _init(tmp_path)
     _create_release(workspace)
     result = add_many_release_entries(
