@@ -89,6 +89,21 @@
   {
     "audience": null,
     "breaking": false,
+    "entry_id": "entry-0001",
+    "internal": false,
+    "kind": "added",
+    "order": 1,
+    "record_revision": 2,
+    "release_version": "0.3.4",
+    "scopes": [],
+    "source_refs": ["git:e1ed352bb1276209ed0a52fd1295139fc04f5f5d"],
+    "sources": ["git:e1ed352bb1276209ed0a52fd1295139fc04f5f5d"],
+    "status": "accepted",
+    "summary": "Added release prepare, release check, audit evidence and complete phases, snapshot drift detection, and entry batch duplicate detection with strict and sync-audit options"
+  },
+  {
+    "audience": null,
+    "breaking": false,
     "entry_id": "entry-0002",
     "internal": false,
     "kind": "added",
@@ -169,6 +184,21 @@
     "source_refs": ["git:7c600e5bf0a4016a79c3032fbef997ffcc64b1d1"],
     "status": "accepted",
     "summary": "Fixed documentation formatting with pre-commit"
+  },
+  {
+    "audience": null,
+    "breaking": false,
+    "entry_id": "entry-0002",
+    "internal": true,
+    "kind": "docs",
+    "order": 2,
+    "record_revision": 1,
+    "release_version": "0.3.4",
+    "scopes": [],
+    "source_refs": ["git:37c5af72e73e7f71864072c15a9e09e7410781ca"],
+    "sources": ["git:37c5af72e73e7f71864072c15a9e09e7410781ca"],
+    "status": "accepted",
+    "summary": "Documented v0.3.3 release entry backfill into the ledger"
   },
   {
     "audience": null,
@@ -257,6 +287,21 @@
   {
     "audience": null,
     "breaking": false,
+    "entry_id": "entry-0003",
+    "internal": true,
+    "kind": "fixed",
+    "order": 3,
+    "record_revision": 1,
+    "release_version": "0.3.4",
+    "scopes": [],
+    "source_refs": ["git:803098570c7407aaf84cd8f8a5e4f93f1e331da0"],
+    "sources": ["git:803098570c7407aaf84cd8f8a5e4f93f1e331da0"],
+    "status": "accepted",
+    "summary": "Fixed removed features test for the refactored entry lint no accepted entries warning"
+  },
+  {
+    "audience": null,
+    "breaking": false,
     "entry_id": "entry-0004",
     "internal": false,
     "kind": "added",
@@ -326,6 +371,21 @@
     "source_refs": ["git:9f10c3d476e4bbc0326717d5c57613bdb86fa074"],
     "status": "accepted",
     "summary": "Changed full builds to omit an empty Unreleased section and its link reference"
+  },
+  {
+    "audience": null,
+    "breaking": false,
+    "entry_id": "entry-0004",
+    "internal": true,
+    "kind": "fixed",
+    "order": 4,
+    "record_revision": 1,
+    "release_version": "0.3.4",
+    "scopes": [],
+    "source_refs": ["git:9f64538a27b5bdd309444c5670a60ded1502d0c4"],
+    "sources": ["git:9f64538a27b5bdd309444c5670a60ded1502d0c4"],
+    "status": "accepted",
+    "summary": "Fixed mypy findings and pre-commit formatting across releaseledger services and tests"
   },
   {
     "audience": null,

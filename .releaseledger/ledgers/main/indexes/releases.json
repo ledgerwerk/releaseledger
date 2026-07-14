@@ -82,5 +82,19 @@
     "status": "released",
     "title": "Release 0.3.3",
     "version": "0.3.3"
+  },
+  {
+    "artifact_count": 0,
+    "boundary_ref": null,
+    "changelog_file": null,
+    "entry_count": 4,
+    "previous_version": "0.3.3",
+    "record_revision": 4,
+    "released_at": "2026-07-14",
+    "source_count": null,
+    "source_refs": [],
+    "status": "released",
+    "title": "Release 0.3.4",
+    "version": "0.3.4"
   }
 ]
