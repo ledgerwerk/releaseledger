@@ -317,14 +317,18 @@ def test_entry_batch_returns_all_structured_issues(tmp_path: Path) -> None:
     )
     assert result["written"] is False
     assert result["entry_ids"] == []
-    assert len(result["issues"]) == 2
+    assert len(result["issues"]) == 3
     assert result["issues"][0]["index"] == 0
     assert result["issues"][0]["entry_id"] == "entry-0001"
     assert result["issues"][1]["index"] == 1
     assert result["issues"][1]["entry_id"] == "entry-0002"
+    assert result["issues"][2]["severity"] == "warning"
+    assert result["issues"][2]["code"] == "no_accepted_entries"
+    assert result["issues"][2]["field"] == "status"
+    assert result["issues"][2]["message"] == "Release has no accepted entries."
     assert all(
         {"index", "entry_id", "field", "severity", "message"} <= issue.keys()
-        for issue in result["issues"]
+        for issue in result["issues"][:2]
     )
 
 
