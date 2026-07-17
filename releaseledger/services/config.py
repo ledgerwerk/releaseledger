@@ -13,11 +13,6 @@ from releaseledger.storage.config import (
     ProjectConfig,
     load_project_config,
 )
-from releaseledger.storage.paths import (
-    ProjectLocator,
-    load_project_locator,
-    resolve_project_paths,
-)
 
 __all__ = [
     "config_set_releaseledger_dir",
@@ -29,68 +24,111 @@ __all__ = [
 def storage_where(workspace_root: Path) -> dict[str, object]:
     """Return a read-only diagnostic dict describing the effective storage location.
 
-    Never mutates state. Safe to call from any working directory that resolves
-    to the same project (e.g. a subdirectory).
+    Never mutates state. Checks for canonical schema-3 manifest first,
+    then falls back to legacy detection.
     """
-    locator: ProjectLocator = load_project_locator(workspace_root)
-    rldir = locator.releaseledger_dir
+    root = Path(workspace_root).resolve()
 
-    layout_ok = False
-    indexes_ok = False
-    ledger_ref: str = ""
-    ledger_dir: str = ""
-
-    # Only try to resolve further paths when a config exists that the
-    # locator could read.  load_project_locator defaults source='default'
-    # when no config is found, in which case resolve_project_paths will
-    # fail.  Guard against that.
-    if locator.config_path.is_file():
+    # Check for canonical manifest first.
+    manifest_path = root / ".ledger" / "ledger.toml"
+    if manifest_path.is_file():
         try:
-            paths = resolve_project_paths(locator.workspace_root)
-            ledger_ref = paths.ledger_ref
-            ledger_dir = str(paths.ledger_dir)
-            layout_ok = (
-                paths.releases_dir.is_dir()
-                and paths.events_dir.is_dir()
-                and paths.indexes_dir.is_dir()
+            from releaseledger.ledgercore_backend import load_releaseledger_ledger_layout
+
+            layout = load_releaseledger_ledger_layout(
+                root, allow_missing=False, validate_storage=False
             )
-            indexes_ok = (
-                paths.releases_index_path.is_file()
-                and paths.entries_index_path.is_file()
-            )
-        except Exception:  # pragma: no cover - defensive: partial layout
+            ledger_ref = ""
+            ledger_dir = ""
+            try:
+                from releaseledger.storage.paths import resolve_project_paths
+
+                paths = resolve_project_paths(root)
+                ledger_ref = paths.ledger_ref
+                ledger_dir = str(paths.ledger_dir)
+            except Exception:
+                pass
+
+            legacy_detected = False
+            from releaseledger.migration import discover_legacy_project
+
+            try:
+                discover_legacy_project(root)
+                legacy_detected = True
+            except Exception:
+                pass
+
+            return {
+                "kind": "storage_location",
+                "project_root": str(layout.project_root),
+                "project_uuid": layout.project_uuid,
+                "project_name": layout.project_name or "",
+                "manifest_path": str(layout.manifest_path),
+                "local_config_path": str(layout.local_config_path),
+                "tool_config_path": str(layout.config_path),
+                "data_root": str(layout.data_root),
+                "data_storage": str(layout.data_storage),
+                "data_source": layout.data_source,
+                "external_root": str(layout.external_root) if layout.external_root else "",
+                "indexes_root": str(layout.indexes_root),
+                "active_ledger_ref": ledger_ref,
+                "active_ledger_dir": ledger_dir,
+                "layout_valid": True,
+                "legacy_detected": legacy_detected,
+                "migration_state": "canonical-ready",
+                # Compatibility aliases for one release.
+                "workspace_root": str(layout.project_root),
+                "releaseledger_dir": str(layout.data_root),
+                "inside_workspace": layout.data_storage == "project",
+            }
+        except Exception:
             pass
 
-    root = locator.workspace_root.resolve()
-    inside = False
-    try:
-        rldir.resolve().relative_to(root)
-        inside = True
-    except ValueError:
-        pass
+    # Legacy detection (no canonical manifest or load failed).
+    from releaseledger.migration import discover_legacy_project
 
-    return {
-        "kind": "storage_location",
-        "workspace_root": str(root),
-        "config_path": str(locator.config_path),
-        "releaseledger_dir": str(rldir.resolve()),
-        "ledger_ref": ledger_ref,
-        "ledger_dir": ledger_dir,
-        "inside_workspace": inside,
-        "source": locator.source,
-        "layout_exists": layout_ok,
-        "indexes_exist": indexes_ok,
-    }
+    try:
+        config_path, _ = discover_legacy_project(root)
+        return {
+            "kind": "storage_location",
+            "project_root": str(root),
+            "legacy_detected": True,
+            "legacy_config_path": str(config_path),
+            "migration_state": "legacy",
+            "layout_valid": False,
+            "data_root": "",
+            "indexes_root": "",
+            "workspace_root": str(root),
+            "releaseledger_dir": "",
+        }
+    except Exception:
+        return {
+            "kind": "storage_location",
+            "project_root": str(root),
+            "legacy_detected": False,
+            "migration_state": "uninitialized",
+            "layout_valid": False,
+            "workspace_root": str(root),
+        }
 
 
 def config_show(workspace_root: Path) -> dict[str, object]:
     """Return a read-only dict with validated config values and resolved paths."""
-    locator = load_project_locator(workspace_root)
-    root = locator.workspace_root.resolve()
+    from releaseledger.ledgercore_backend import load_releaseledger_ledger_layout
+
+    root = Path(workspace_root).resolve()
+    try:
+        layout = load_releaseledger_ledger_layout(root, allow_missing=False)
+        project_name = layout.project_name
+    except Exception:
+        layout = None
+        project_name = None
+
     config: ProjectConfig | None = None
-    if locator.config_path.is_file():
+    config_path = root / ".ledger" / "releaseledger" / "config.toml"
+    if config_path.is_file():
         try:
-            config = load_project_config(locator.config_path)
+            config = load_project_config(config_path)
         except LaunchError:
             config = None
     config_dict: dict[str, object] = {}
@@ -100,9 +138,7 @@ def config_show(workspace_root: Path) -> dict[str, object]:
             "ledger_ref": config.ledger_ref,
             "ledger_parent_ref": config.ledger_parent_ref,
             "ledger_branch_guard": config.ledger_branch_guard,
-            "ledger": {
-                "code": config.ledger_code,
-            },
+            "ledger_code": config.ledger_code,
             "release": {
                 "default_changelog": config.default_changelog,
                 "default_status": config.default_status,
@@ -129,10 +165,13 @@ def config_show(workspace_root: Path) -> dict[str, object]:
         }
     return {
         "kind": "config_show",
-        "workspace_root": str(root),
-        "config_path": str(locator.config_path),
-        "releaseledger_dir": str(locator.releaseledger_dir.resolve()),
+        "project_root": str(root),
+        "project_name": project_name or "",
+        "config_path": str(config_path),
         "config": config_dict,
+        # Compatibility aliases.
+        "workspace_root": str(root),
+        "releaseledger_dir": str(layout.data_root) if layout else "",
     }
 
 

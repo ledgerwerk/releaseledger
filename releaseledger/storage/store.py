@@ -59,11 +59,14 @@ __all__ = [
     "delete_commit_audit_sheet",
     "load_commit_audit_sheet",
     "load_entries",
+    "load_entries_for_paths",
     "load_release",
     "list_releases",
+    "list_releases_for_paths",
     "next_commit_audit_versioning",
     "next_entry_id",
     "rebuild_indexes",
+    "rebuild_indexes_for_paths",
     "release_audit_dir",
     "release_dir",
     "release_markdown_path",
@@ -332,7 +335,87 @@ def load_entries(
         except LaunchError:
             continue
     records.sort(key=_entry_sort_key)
+    records.sort(key=_entry_sort_key)
     return records
+
+
+def load_entries_for_paths(
+    paths: ProjectPaths, release_version: str
+) -> list[ReleaseEntryRecord]:
+    """Return all entries for a release under the given *paths*.
+
+    Unlike :func:`load_entries`, this does not resolve the project from
+    ``workspace_root``. It uses the supplied :class:`ProjectPaths`
+    directly so branch-merge and migration can inspect ledgers other than
+    the currently active one without writing the tool config.
+    """
+    safe_version = validate_release_version(release_version)
+    entries_dir = _entries_dir(paths, safe_version)
+    if not entries_dir.is_dir():
+        return []
+    records: list[ReleaseEntryRecord] = []
+    for child in sorted(entries_dir.glob("entry-*.md"), key=lambda p: p.name):
+        try:
+            front_matter, body = ledgercore.read_front_matter_document(child)
+        except ledgercore.FrontMatterError:
+            continue
+        data: dict[str, object] = dict(front_matter)
+        data["body"] = body if body else None
+        try:
+            records.append(entry_from_dict(data))
+        except LaunchError:
+            continue
+    records.sort(key=_entry_sort_key)
+    return records
+
+
+def list_releases_for_paths(
+    paths: ProjectPaths,
+) -> list[ReleaseRecord]:
+    """Return all releases for the given *paths* without project resolution.
+
+    See :func:`load_entries_for_paths` for rationale."""
+    bundle = paths.releases_dir
+    if not bundle.is_dir():
+        return []
+    records: list[ReleaseRecord] = []
+    for child in sorted(bundle.glob("*"), key=lambda p: p.name):
+        if not child.is_dir():
+            continue
+        version = child.name
+        if not _VERSION_RE.fullmatch(version):
+            continue
+        candidate = child / "release.md"
+        if not candidate.is_file():
+            continue
+        try:
+            front_matter, body = ledgercore.read_front_matter_document(candidate)
+        except ledgercore.FrontMatterError:
+            continue
+        data: dict[str, object] = dict(front_matter)
+        data["body"] = body if body else None
+        try:
+            records.append(release_from_dict(data))
+        except LaunchError:
+            continue
+    records.sort(key=_release_sort_key)
+    return records
+
+
+def rebuild_indexes_for_paths(paths: ProjectPaths) -> None:
+    """Rebuild indexes for the given *paths* without project resolution."""
+    releases = list_releases_for_paths(paths)
+    release_rows = [_release_index_row(record) for record in releases]
+
+    entry_rows: list[dict[str, object]] = []
+    for record in releases:
+        for entry in load_entries_for_paths(paths, record.version):
+            entry_rows.append(_entry_index_row(entry))
+    entry_rows.sort(key=lambda row: (row.get("order"), row.get("entry_id")))
+
+    ledgercore.ensure_dir(paths.indexes_dir)
+    ledgercore.write_json(paths.releases_index_path, release_rows)
+    ledgercore.write_json(paths.entries_index_path, entry_rows)
 
 
 def _entry_sort_key(entry: ReleaseEntryRecord) -> tuple[object, ...]:
@@ -381,19 +464,7 @@ def _entry_index_row(entry: ReleaseEntryRecord) -> dict[str, object]:
 def rebuild_indexes(workspace_root: Path) -> None:
     """Rebuild ``releases.json`` and ``entries.json`` from on-disk records."""
     paths = _resolve(workspace_root)
-    releases = list_releases(workspace_root)
-    release_rows = [_release_index_row(record) for record in releases]
-
-    entry_rows: list[dict[str, object]] = []
-    for record in releases:
-        for entry in load_entries(workspace_root, record.version):
-            entry_rows.append(_entry_index_row(entry))
-    entry_rows.sort(key=lambda row: (row.get("order"), row.get("entry_id")))
-
-    ledgercore.ensure_dir(paths.indexes_dir)
-    ledgercore.write_json(paths.releases_index_path, release_rows)
-    ledgercore.write_json(paths.entries_index_path, entry_rows)
-
+    rebuild_indexes_for_paths(paths)
 
 def save_entries_for_release(
     workspace_root: Path,

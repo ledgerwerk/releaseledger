@@ -6,4 +6,16 @@ integrations do not depend on internal module paths.
 
 from __future__ import annotations
 
-__all__: list[str] = []
+__all__: list[str] = [
+    "ProjectConfig",
+    "ProjectPaths",
+    "ReleaseledgerLedgerLayout",
+    "ReleaseledgerProject",
+]
+
+from releaseledger.api.config import (
+    ProjectConfig,
+    ProjectPaths,
+    ReleaseledgerLedgerLayout,
+    ReleaseledgerProject,
+)

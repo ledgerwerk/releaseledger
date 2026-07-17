@@ -169,7 +169,7 @@ def branch_start(
             code=CODE_USAGE_ERROR,
             exit_code=2,
         )
-    # Copy the parent ledger tree to the branch ledger.
+    # Copy the parent ledger tree to the branch ledger (exclude old cache/indexes).
     import shutil
 
     shutil.copytree(parent_paths.ledger_dir, branch_paths.ledger_dir)
@@ -179,11 +179,16 @@ def branch_start(
         ledger_ref=branch_ref,
         parent_ref=parent_ref,
     )
+    # Rebuild indexes for the new branch in the cache mount.
+    from releaseledger.storage.store import rebuild_indexes_for_paths
+
+    rebuild_indexes_for_paths(branch_paths)
     return {
         "kind": "branch_start",
         "branch_ref": branch_ref,
         "previous_ledger_ref": current_ledger_ref,
         "ledger_dir": str(branch_paths.ledger_dir),
+        "indexes_rebuilt": True,
     }
 
 
@@ -218,38 +223,25 @@ def branch_merge(
             exit_code=2,
         )
     paths = resolve_project_paths(workspace_root)
-    releaseledger_dir = paths.releaseledger_dir
-    branch_ledger_dir = releaseledger_dir / "ledgers" / branch_ref
-    target_ledger_dir = releaseledger_dir / "ledgers" / into_ref
-    if not branch_ledger_dir.is_dir():
+    branch_paths = paths.paths_for_ledger(branch_ref)
+    target_paths = paths.paths_for_ledger(into_ref)
+    if not branch_paths.ledger_dir.is_dir():
         raise LaunchError(
             f"Branch ledger '{branch_ref}' not found.",
             code=CODE_USAGE_ERROR,
             exit_code=2,
         )
-    if not target_ledger_dir.is_dir():
+    if not target_paths.ledger_dir.is_dir():
         raise LaunchError(
             f"Target ledger '{into_ref}' not found.",
             code=CODE_USAGE_ERROR,
             exit_code=2,
         )
-    # Load branch entries for the release.
-    from releaseledger.storage.store import load_entries
 
-    # Temporarily switch ledger_ref to load branch entries.
-    _update_config_ledger_ref(
-        paths.config_path,
-        ledger_ref=branch_ref,
-        parent_ref="",
-    )
-    branch_entries = load_entries(workspace_root, release_version)
-    # Switch back to target.
-    _update_config_ledger_ref(
-        paths.config_path,
-        ledger_ref=into_ref,
-        parent_ref="",
-    )
-    target_entries = load_entries(workspace_root, release_version)
+    from releaseledger.storage.store import load_entries_for_paths
+
+    branch_entries = load_entries_for_paths(branch_paths, release_version)
+    target_entries = load_entries_for_paths(target_paths, release_version)
 
     # Build a set of source_refs already present in the target.
     target_refs: set[str] = set()
@@ -299,6 +291,10 @@ def branch_merge(
             f"{len(skipped_stale)} entry(s) skipped (no source_refs or potentially"
             " stale; manual review needed)."
         )
+    # Rebuild indexes for the target ledger.
+    from releaseledger.storage.store import rebuild_indexes_for_paths
+
+    rebuild_indexes_for_paths(target_paths)
     return {
         "kind": "branch_merge",
         "branch_ref": branch_ref,
@@ -309,6 +305,7 @@ def branch_merge(
         "skipped_duplicate": skipped_duplicate,
         "skipped_stale": skipped_stale,
         "warnings": warnings,
+        "indexes_rebuilt": True,
     }
 
 

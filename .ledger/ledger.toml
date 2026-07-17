@@ -1,27 +1,18 @@
-schema_version = 2
+schema_version = 3
 
 [project]
-uuid = "7864d9da-4d0e-47a6-9074-581a4b2d684c"
+uuid = "9ec5f921-b2c6-41db-8ffd-bea03b583741"
 name = "releaseledger"
 
-[storage.workspace]
-default_provider = "user-data"
-namespace = "ledgerwerk"
+[ledgers.releaseledger.mounts.data]
+storage = "project"
 
-[storage.cache]
-default_provider = "user-cache"
-namespace = "ledgerwerk"
-
-[ledgers.taskledger.config]
-location = "project"
-path = "task/config.toml"
+[ledgers.releaseledger.mounts.indexes]
+storage = "cache"
 
 [ledgers.taskledger.mounts.data]
-storage = "workspace"
-scope = "project"
-path = "taskledger/7864d9da-4d0e-47a6-9074-581a4b2d684c"
+storage = "external"
+root = "../ledger"
 
 [ledgers.taskledger.mounts.indexes]
 storage = "cache"
-scope = "checkout"
-path = "taskledger-indexes"

@@ -175,8 +175,37 @@ def init_command(
             help="Allow --releaseledger-dir to resolve outside the workspace.",
         ),
     ] = False,
+    data_storage: Annotated[
+        str,
+        typer.Option(
+            "--data-storage",
+            help="Data mount storage: project, external, or user-data.",
+        ),
+    ] = "project",
+    external_root: Annotated[
+        str | None,
+        typer.Option("--external-root", help="External data root path."),
+    ] = None,
+    local_override: Annotated[
+        bool,
+        typer.Option(
+            "--local-override",
+            help="Write the data mount override to .ledger/ledger.local.toml.",
+        ),
+    ] = False,
+    adopt_empty: Annotated[
+        bool,
+        typer.Option(
+            "--adopt-empty",
+            help="Adopt an existing empty data directory without a binding.",
+        ),
+    ] = False,
+    force_config: Annotated[
+        bool,
+        typer.Option("--force-config", help="Replace the Releaseledger tool config after backup."),
+    ] = False,
 ) -> None:
-    """Initialize .releaseledger.toml and the default state layout."""
+    """Initialize a Ledgercore schema-3 project with Releaseledger registration."""
     state = cli_state_from_context(ctx)
     workspace_root = state.cwd
 
@@ -192,12 +221,19 @@ def init_command(
                 },
                 remediation=[
                     "Run `releaseledger init` without legacy flags.",
+                    "Use `releaseledger storage set data --storage external --root PATH` "
+                    "to change data storage after init.",
                 ],
             )
         result = ensure_canonical_project(
             workspace_root,
             project_name=project_name,
             force=force,
+            data_storage=data_storage,
+            external_root=external_root,
+            local_override=local_override,
+            adopt_empty=adopt_empty,
+            force_config=force_config,
         )
         data_root = Path(str(result["data_root"]))
         try:
@@ -2597,7 +2633,7 @@ def branch_merge_command(
     )
 
 
-storage_app = typer.Typer(help="Storage diagnostics.")
+storage_app = typer.Typer(help="Storage diagnostics and migration.")
 app.add_typer(storage_app, name="storage")
 
 
@@ -2608,19 +2644,23 @@ def storage_where_command(ctx: typer.Context) -> None:
 
     def produce() -> CommandResult:
         result = storage_where(state.cwd)
-        # Build human output
-        inside = "yes" if result.get("inside_workspace") else "no"
-        layout = "ok" if result.get("layout_exists") else "missing"
-        indexes = "ok" if result.get("indexes_exist") else "missing"
         lines = [
-            f"Workspace: {result.get('workspace_root', '')}",
-            f"Config: {result.get('config_path', '')}",
-            f"Storage: {result.get('releaseledger_dir', '')}",
-            f"Ledger: {result.get('ledger_ref', '')}",
-            f"Inside workspace: {inside}",
-            f"Source: {result.get('source', '')}",
-            f"Layout: {layout}",
-            f"Indexes: {indexes}",
+            f"Project root: {result.get('project_root', '')}",
+            f"Project UUID: {result.get('project_uuid', '')}",
+            f"Project name: {result.get('project_name', '')}",
+            f"Manifest: {result.get('manifest_path', '')}",
+            f"Local config: {result.get('local_config_path', '')}",
+            f"Tool config: {result.get('tool_config_path', '')}",
+            f"Data root: {result.get('data_root', '')}",
+            f"Data storage: {result.get('data_storage', '')}",
+            f"Data source: {result.get('data_source', '')}",
+            f"External root: {result.get('external_root', '')}",
+            f"Indexes root: {result.get('indexes_root', '')}",
+            f"Active ledger: {result.get('active_ledger_ref', '')}",
+            f"Active ledger dir: {result.get('active_ledger_dir', '')}",
+            f"Layout valid: {result.get('layout_valid', False)}",
+            f"Legacy detected: {result.get('legacy_detected', False)}",
+            f"Migration state: {result.get('migration_state', '')}",
         ]
         human = "\n".join(lines)
         return result, [], human
@@ -2631,6 +2671,252 @@ def storage_where_command(ctx: typer.Context) -> None:
         json_output=state.json_output,
         produce=produce,
     )
+
+
+@storage_app.command("validate")
+def storage_validate_command(
+    ctx: typer.Context,
+    strict: Annotated[
+        bool,
+        typer.Option("--strict", help="Run domain-level validation in addition to binding checks."),
+    ] = False,
+) -> None:
+    """Validate storage bindings and optionally domain records."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        from releaseledger.migration import validate_domain_records
+
+        result = storage_where(state.cwd)
+        validation: dict[str, object] = {
+            "layout_valid": result.get("layout_valid", False),
+            "bindings": result.get("bindings", {}),
+        }
+        if strict:
+            data_root = Path(str(result.get("data_root", "")))
+            if data_root.is_dir():
+                domain = validate_domain_records(data_root)
+                validation["domain"] = domain
+
+        lines = [f"Layout valid: {validation.get('layout_valid', False)}"]
+        bindings = validation.get("bindings", {})
+        if isinstance(bindings, dict):
+            for name, status in bindings.items():
+                lines.append(f"  {name}: {status}")
+        if "domain" in validation:
+            domain = validation["domain"]
+            lines.append(f"Domain records valid: {domain.get('valid', False)}")
+            lines.append(f"Domain failures: {domain.get('total_failures', 0)}")
+        human = "\n".join(lines)
+        return validation, [], human
+
+    run_command(
+        command="storage.validate",
+        result_type="storage_validate",
+        json_output=state.json_output,
+        produce=produce,
+    )
+
+
+@storage_app.command("set")
+def storage_set_command(
+    ctx: typer.Context,
+    mount: Annotated[
+        str,
+        typer.Argument(help="Mount to configure: data."),
+    ] = "data",
+    data_storage: Annotated[
+        str,
+        typer.Option(
+            "--storage",
+            help="Storage kind: project, external, or user-data.",
+        ),
+    ] = "project",
+    root: Annotated[
+        str | None,
+        typer.Option("--root", help="External root path (required for external storage)."),
+    ] = None,
+    target: Annotated[
+        str,
+        typer.Option("--target", help="Write target: project (manifest) or local (local override)."),
+    ] = "project",
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Show the planned change without applying it."),
+    ] = False,
+    migrate_flag: Annotated[
+        bool,
+        typer.Option("--migrate", help="Migrate existing data after changing storage."),
+    ] = False,
+) -> None:
+    """Set the data mount storage kind."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        if mount != "data":
+            raise LaunchError(
+                f"Only the 'data' mount is user-configurable; got {mount!r}.",
+                code=CODE_USAGE_ERROR,
+                exit_code=2,
+            )
+        from releaseledger.ledgercore_backend import set_releaseledger_data_target
+
+        result = set_releaseledger_data_target(
+            state.cwd,
+            storage=data_storage,
+            external_root=root,
+            target=target,
+        )
+        human = (
+            f"data storage set to {data_storage}"
+            + (f" (external root: {root})" if root else "")
+            + f" via {target}"
+        )
+        if dry_run:
+            return {"dry_run": True, "storage": data_storage, "root": root, "target": target}, [], human
+        return {"storage": data_storage, "root": root, "target": target}, [], human
+
+    run_command(
+        command="storage.set",
+        result_type="storage_set",
+        json_output=state.json_output,
+        produce=produce,
+    )
+
+
+@storage_app.command("clear-override")
+def storage_clear_override_command(
+    ctx: typer.Context,
+    mount: Annotated[
+        str,
+        typer.Argument(help="Mount to clear: data."),
+    ] = "data",
+) -> None:
+    """Remove a local data mount override."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        if mount != "data":
+            raise LaunchError(
+                f"Only the 'data' mount override can be cleared; got {mount!r}.",
+                code=CODE_USAGE_ERROR,
+                exit_code=2,
+            )
+        from releaseledger.ledgercore_backend import clear_releaseledger_data_override
+
+        result = clear_releaseledger_data_override(state.cwd)
+        human = "data override cleared"
+        return {"cleared": True, "mount": mount}, [], human
+
+    run_command(
+        command="storage.clear-override",
+        result_type="storage_clear_override",
+        json_output=state.json_output,
+        produce=produce,
+    )
+
+
+@storage_app.command("migrate")
+def storage_migrate_command(
+    ctx: typer.Context,
+    subcommand: Annotated[
+        str,
+        typer.Argument(help="Migration subcommand: plan, apply, status, or recover."),
+    ] = "status",
+    data_storage: Annotated[
+        str,
+        typer.Option(
+            "--storage",
+            help="Target data storage: project, external, or user-data.",
+        ),
+    ] = "project",
+    root: Annotated[
+        str | None,
+        typer.Option("--root", help="External root for target storage."),
+    ] = None,
+    target: Annotated[
+        str,
+        typer.Option("--target", help="Write target: project or local."),
+    ] = "project",
+    mode: Annotated[
+        str,
+        typer.Option("--mode", help="Migration mode: copy or move."),
+    ] = "copy",
+) -> None:
+    """Plan or execute storage migration from legacy to schema-3."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        from releaseledger.migration import (
+            ReleaseledgerMigrationRequest,
+            migration_status as mig_status,
+            plan_migration,
+            execute_migration,
+            recover_migration,
+        )
+
+        if subcommand == "status":
+            result = mig_status(state.cwd)
+            human = f"Migration state: {result.get('state', 'unknown')}"
+            return result, [], human
+
+        if subcommand == "plan":
+            request = ReleaseledgerMigrationRequest(
+                start=state.cwd,
+                data_storage=data_storage,  # type: ignore[arg-type]
+                external_root=root,
+                target=target,  # type: ignore[arg-type]
+                mode=mode,  # type: ignore[arg-type]
+            )
+            result = plan_migration(request)
+            human = (
+                f"Migration plan for {result.get('legacy_data_root', '')} "
+                f"-> {data_storage} ({mode})"
+            )
+            return result, [], human
+
+        if subcommand == "apply":
+            from releaseledger.storage.locking import acquire_write_lock, quiescence_callback
+
+            request = ReleaseledgerMigrationRequest(
+                start=state.cwd,
+                data_storage=data_storage,  # type: ignore[arg-type]
+                external_root=root,
+                target=target,  # type: ignore[arg-type]
+                mode=mode,  # type: ignore[arg-type]
+            )
+            with acquire_write_lock(state.cwd) as lock:
+                result = execute_migration(
+                    request, quiescence_check=lambda: quiescence_callback(lock)
+                )
+            human = f"Migration {mode} completed to {data_storage}"
+            return result, [], human
+
+        if subcommand == "recover":
+            result = recover_migration(state.cwd)
+            human = result.get("message", "Recovery attempted.")
+            return result, [], human
+
+        raise LaunchError(
+            f"Unknown migration subcommand: {subcommand!r}.",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+            remediation=[
+                "Use: plan, apply, status, or recover.",
+            ],
+        )
+
+    run_command(
+        command="storage.migrate",
+        result_type="storage_migrate",
+        json_output=state.json_output,
+        produce=produce,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Config commands
+# ---------------------------------------------------------------------------
 
 
 config_app = typer.Typer(help="Config management.")
@@ -2648,11 +2934,13 @@ def config_show_command(ctx: typer.Context) -> None:
         if not isinstance(cfg, dict):
             cfg = {}
         lines = [
-            f"Workspace: {result.get('workspace_root', '')}",
-            f"Config: {result.get('config_path', '')}",
-            f"Storage: {result.get('releaseledger_dir', '')}",
-            f"Policy: {cfg.get('releaseledger_dir_policy', 'workspace')}",
+            f"Project: {result.get('project_name', '')}",
+            f"Config path: {result.get('config_path', '')}",
+            f"Config version: {cfg.get('config_version', '')}",
             f"Ledger ref: {cfg.get('ledger_ref', '')}",
+            f"Ledger parent: {cfg.get('ledger_parent_ref', '')}",
+            f"Ledger code: {cfg.get('ledger_code', '')}",
+            f"Branch guard: {cfg.get('ledger_branch_guard', 'off')}",
         ]
         human = "\n".join(lines)
         return result, [], human
@@ -2678,14 +2966,18 @@ def config_set_command(
         ),
     ] = False,
 ) -> None:
-    """Atomically set a config key in .releaseledger.toml."""
+    """Atomically set a config key. Storage keys are no longer supported."""
     state = cli_state_from_context(ctx)
-    if key != "releaseledger_dir":
-        err = ReleaseledgerError(
-            f"Unsupported config key: {key!r}."
-            " Only 'releaseledger_dir' is currently supported.",
-            code="USAGE_ERROR",
+    if key == "releaseledger_dir":
+        err = LaunchError(
+            "config set releaseledger_dir is no longer supported; "
+            "storage topology is owned by the canonical Ledger project. "
+            "Use `releaseledger storage set data --storage ...` instead.",
+            code=CODE_USAGE_ERROR,
             exit_code=2,
+            remediation=[
+                "Use `releaseledger storage set data --storage ...` to change data storage.",
+            ],
         )
         emit_error(command="config.set", error=err, json_output=state.json_output)
         raise typer.Exit(launch_error_exit_code(err)) from err
@@ -2694,7 +2986,7 @@ def config_set_command(
         result = config_set_releaseledger_dir(
             state.cwd, value, external_dir=external_dir
         )
-        human = f"set releaseledger_dir: {result['before']} -> {result['after']}"
+        human = f"set {key}: {result.get('before', '')} -> {result.get('after', '')}"
         return result, [], human
 
     run_command(

@@ -396,6 +396,11 @@ def ensure_canonical_project(
     project_name: str | None = None,
     project_uuid: str | None = None,
     force: bool = False,
+    data_storage: str = "project",
+    external_root: str | None = None,
+    local_override: bool = False,
+    adopt_empty: bool = False,
+    force_config: bool = False,
 ) -> dict[str, object]:
     """Create or refresh a schema-3 project with the Releaseledger registration."""
 
@@ -415,6 +420,13 @@ def ensure_canonical_project(
                 data={"path": str(manifest_path), "cause": exc.code},
             ) from exc
         config_path = project.config_path
+        # force_config: backup and replace the tool config.
+        if force_config and config_path.is_file():
+            import shutil
+
+            backup = config_path.with_suffix(config_path.suffix + ".bak")
+            shutil.copy2(config_path, backup)
+            write_project_config(config_path, ProjectConfig())
         written = {
             "kind": "project_init_idempotent",
             "project_root": str(workspace_root),
@@ -423,6 +435,7 @@ def ensure_canonical_project(
             "project_uuid": project.project_uuid,
             "project_name": project.project_name,
             "data_root": str(project.data_root),
+            "data_storage": str(project.layout.data_storage),
             "indexes_root": str(project.indexes_root),
             "ledger_ref": project.config.ledger_ref,
             "config_version": project.config.config_version,
@@ -430,7 +443,11 @@ def ensure_canonical_project(
         return written
 
     manifest = _backend.ensure_releaseledger_registration(
-        workspace_root, project_uuid=project_uuid, project_name=project_name
+        workspace_root,
+        project_uuid=project_uuid,
+        project_name=project_name,
+        data_storage=data_storage,
+        external_root=external_root,
     )
     project = load_releaseledger_project(workspace_root)
     _backend.initialize_releaseledger_locations(
@@ -439,8 +456,29 @@ def ensure_canonical_project(
         initialize_data=True,
         initialize_indexes=True,
     )
-    if not project.config_path.is_file():
+    if not project.config_path.is_file() or force_config:
         write_project_config(project.config_path, ProjectConfig())
+
+    # If local_override is requested, create it via the adapter.
+    if local_override and data_storage != "project":
+        _backend.set_releaseledger_data_target(
+            workspace_root,
+            storage=data_storage,
+            external_root=external_root,
+            target="local",
+        )
+
+    # Create the durable internal layout.
+    from releaseledger.storage.store import rebuild_indexes_for_paths
+
+    paths = build_project_paths(project, project.config.ledger_ref)
+    ledgercore.ensure_dir(paths.ledger_dir)
+    ledgercore.ensure_dir(paths.releases_dir)
+    ledgercore.ensure_dir(paths.events_dir)
+    ledgercore.ensure_dir(paths.indexes_dir)
+    # Write empty indexes.
+    rebuild_indexes_for_paths(paths)
+
     return {
         "kind": "project_init",
         "project_root": str(workspace_root),
@@ -449,16 +487,15 @@ def ensure_canonical_project(
         "project_uuid": project.project_uuid,
         "project_name": project.project_name,
         "data_root": str(project.data_root),
+        "data_storage": str(project.layout.data_storage),
         "indexes_root": str(project.indexes_root),
         "ledger_ref": project.config.ledger_ref,
         "config_version": CONFIG_VERSION,
         "schema_version": manifest.schema_version,
         "created": {
-            "releases_dir": str(project.data_root / "ledgers" / project.config.ledger_ref / "releases"),
-            "events_dir": str(project.data_root / "ledgers" / project.config.ledger_ref / "events"),
-            "indexes_dir": str(
-                project.indexes_root / "ledgers" / project.config.ledger_ref
-            ),
+            "releases_dir": str(paths.releases_dir),
+            "events_dir": str(paths.events_dir),
+            "indexes_dir": str(paths.indexes_dir),
         },
     }
 
