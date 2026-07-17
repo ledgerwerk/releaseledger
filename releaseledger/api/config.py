@@ -11,6 +11,8 @@ from releaseledger.ledgercore_backend import (
 from releaseledger.migration import discover_legacy_project, migration_status
 from releaseledger.services.config import (
     config_set_releaseledger_dir as _config_set_releaseledger_dir,
+)
+from releaseledger.services.config import (
     config_show,
     storage_where,
 )

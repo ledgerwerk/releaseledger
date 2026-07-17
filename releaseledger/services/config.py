@@ -33,7 +33,9 @@ def storage_where(workspace_root: Path) -> dict[str, object]:
     manifest_path = root / ".ledger" / "ledger.toml"
     if manifest_path.is_file():
         try:
-            from releaseledger.ledgercore_backend import load_releaseledger_ledger_layout
+            from releaseledger.ledgercore_backend import (
+                load_releaseledger_ledger_layout,
+            )
 
             layout = load_releaseledger_ledger_layout(
                 root, allow_missing=False, validate_storage=False
@@ -69,7 +71,9 @@ def storage_where(workspace_root: Path) -> dict[str, object]:
                 "data_root": str(layout.data_root),
                 "data_storage": str(layout.data_storage),
                 "data_source": layout.data_source,
-                "external_root": str(layout.external_root) if layout.external_root else "",
+                "external_root": str(layout.external_root)
+                if layout.external_root
+                else "",
                 "indexes_root": str(layout.indexes_root),
                 "active_ledger_ref": ledger_ref,
                 "active_ledger_dir": ledger_dir,

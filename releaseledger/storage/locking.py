@@ -104,9 +104,7 @@ def quiescence_callback(lock: FileLock) -> None:
         )
 
 
-def write_locked(
-    project_root: Path, *, timeout: float = _LOCK_TIMEOUT_SECONDS
-) -> Any:
+def write_locked(project_root: Path, *, timeout: float = _LOCK_TIMEOUT_SECONDS) -> Any:
     """Decorator / context wrapper that acquires the write lock for a function.
 
     When used as a decorator, the first positional argument after ``self``

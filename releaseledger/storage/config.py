@@ -399,7 +399,11 @@ def _config_from_dict(data: Mapping[str, Any], source: str) -> ProjectConfig:
             f"this releaseledger build requires config_version = {CONFIG_VERSION}.",
             code=CODE_CONFIG_ERROR,
             exit_code=2,
-            data={"source": source, "found": config_version, "required": CONFIG_VERSION},
+            data={
+                "source": source,
+                "found": config_version,
+                "required": CONFIG_VERSION,
+            },
         )
 
     ledger_section = data.get("ledger", {})
@@ -597,7 +601,9 @@ def _config_from_dict(data: Mapping[str, Any], source: str) -> ProjectConfig:
         ),
         git_include_merges=git_include_merges,
         git_require_clean_worktree=_require_bool(
-            git_section.get("require_clean_worktree", GIT_DEFAULT_REQUIRE_CLEAN_WORKTREE),
+            git_section.get(
+                "require_clean_worktree", GIT_DEFAULT_REQUIRE_CLEAN_WORKTREE
+            ),
             "git.require_clean_worktree",
             source,
         ),
@@ -617,6 +623,7 @@ def _config_from_dict(data: Mapping[str, Any], source: str) -> ProjectConfig:
             source,
         ),
     )
+
 
 def project_name_or_default(project) -> str:
     """Return the project name, falling back to the tool or directory name.
@@ -687,7 +694,9 @@ def _config_to_tomlkit(config: ProjectConfig) -> tomlkit.TOMLDocument:
 
     doc = tomlkit.document()
     doc.add("config_version", config.config_version)
-    doc.add(tomlkit.comment("Branch-scoped release state. This block is safe to commit."))
+    doc.add(
+        tomlkit.comment("Branch-scoped release state. This block is safe to commit.")
+    )
     doc.add("ledger_ref", config.ledger_ref)
     doc.add("ledger_parent_ref", config.ledger_parent_ref)
     doc.add("ledger_branch_guard", config.ledger_branch_guard)
@@ -890,31 +899,42 @@ def update_project_config(
     return updated
 
 
-def _apply_changes(
-    config: ProjectConfig, changes: Mapping[str, Any]
-) -> ProjectConfig:
+def _apply_changes(config: ProjectConfig, changes: Mapping[str, Any]) -> ProjectConfig:
     """Translate a dotted-key patch into a typed config update."""
 
     flat: dict[str, Any] = {}
     for key, value in changes.items():
-        if isinstance(value, Mapping) and key in {"ledger", "release", "changelog", "git"}:
+        if isinstance(value, Mapping) and key in {
+            "ledger",
+            "release",
+            "changelog",
+            "git",
+        }:
             for sub_key, sub_value in value.items():
                 flat[f"{key}.{sub_key}"] = sub_value
         else:
             flat[key] = value
 
     if "ledger_ref" in flat:
-        config = config.replace(ledger_ref=_require_str(flat["ledger_ref"], "ledger_ref", "patch"))
+        config = config.replace(
+            ledger_ref=_require_str(flat["ledger_ref"], "ledger_ref", "patch")
+        )
     if "ledger_parent_ref" in flat:
         config = config.replace(
-            ledger_parent_ref=_require_str(flat["ledger_parent_ref"], "ledger_parent_ref", "patch")
+            ledger_parent_ref=_require_str(
+                flat["ledger_parent_ref"], "ledger_parent_ref", "patch"
+            )
         )
     if "ledger_branch_guard" in flat:
         config = config.replace(
-            ledger_branch_guard=_require_str(flat["ledger_branch_guard"], "ledger_branch_guard", "patch")
+            ledger_branch_guard=_require_str(
+                flat["ledger_branch_guard"], "ledger_branch_guard", "patch"
+            )
         )
     if "ledger.code" in flat:
-        config = config.replace(ledger_code=_require_str(flat["ledger.code"], "ledger.code", "patch"))
+        config = config.replace(
+            ledger_code=_require_str(flat["ledger.code"], "ledger.code", "patch")
+        )
     if "release.default_changelog" in flat:
         config = config.replace(
             default_changelog=_require_str(
@@ -930,20 +950,28 @@ def _apply_changes(
     if "release.allow_dirty_worktree" in flat:
         config = config.replace(
             allow_dirty_worktree=_require_bool(
-                flat["release.allow_dirty_worktree"], "release.allow_dirty_worktree", "patch"
+                flat["release.allow_dirty_worktree"],
+                "release.allow_dirty_worktree",
+                "patch",
             )
         )
     if "changelog.body" in flat:
         config = config.replace(
-            changelog_body=_require_str(flat["changelog.body"], "changelog.body", "patch")
+            changelog_body=_require_str(
+                flat["changelog.body"], "changelog.body", "patch"
+            )
         )
     if "changelog.footer" in flat:
         config = config.replace(
-            changelog_footer=_require_str(flat["changelog.footer"], "changelog.footer", "patch")
+            changelog_footer=_require_str(
+                flat["changelog.footer"], "changelog.footer", "patch"
+            )
         )
     if "git.max_commits" in flat:
         config = config.replace(
-            git_max_commits=_require_int(flat["git.max_commits"], "git.max_commits", "patch")
+            git_max_commits=_require_int(
+                flat["git.max_commits"], "git.max_commits", "patch"
+            )
         )
     return config
 
@@ -956,7 +984,11 @@ def render_default_project_config(
     """Render the canonical config v2 default text."""
     """Render the canonical config v2 default text."""
 
-    return tomlkit.dumps(_config_to_tomlkit(ProjectConfig(ledger_ref=ledger_ref, ledger_code=ledger_code)))
+    return tomlkit.dumps(
+        _config_to_tomlkit(
+            ProjectConfig(ledger_ref=ledger_ref, ledger_code=ledger_code)
+        )
+    )
 
 
 def render_default_releaseledger_toml(

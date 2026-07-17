@@ -280,9 +280,7 @@ def resolve_project_paths(
     return build_project_paths(project, selected)
 
 
-def build_project_paths(
-    project: ReleaseledgerProject, ledger_ref: str
-) -> ProjectPaths:
+def build_project_paths(project: ReleaseledgerProject, ledger_ref: str) -> ProjectPaths:
     """Build a :class:`ProjectPaths` for ``ledger_ref`` against ``project``."""
 
     if not isinstance(ledger_ref, str) or not ledger_ref.strip():
@@ -382,13 +380,13 @@ def initialize_project(
             code=CODE_USAGE_ERROR,
             exit_code=2,
         )
-    manifest_path = workspace_root / ".ledger" / "ledger.toml"
     # ``force`` is accepted for legacy compatibility but is now a no-op:
     # the schema-3 init is idempotent, so re-running on an existing
     # canonical project returns a summary rather than overwriting.
     return ensure_canonical_project(
         workspace_root, project_name=project_name, force=False
     )
+
 
 def ensure_canonical_project(
     workspace_root: Path,

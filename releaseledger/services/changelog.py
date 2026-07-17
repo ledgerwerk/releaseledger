@@ -41,6 +41,7 @@ def _project_name(paths: ProjectPaths) -> str:
     except Exception:  # pragma: no cover - defensive fallback
         return paths.workspace_root.name or DEFAULT_LEDGER_NAME
 
+
 def _entry_payload(entry: ReleaseEntryRecord) -> dict[str, object]:
     return {
         "entry_id": entry.entry_id,

@@ -108,7 +108,7 @@ def test_adapter_may_import_detailed_apis() -> None:
     adapter_path = PACKAGE_ROOT / "ledgercore_backend.py"
     assert adapter_path.is_file(), f"missing adapter at {adapter_path}"
     saw_forbidden = False
-    for lineno, imported in _iter_imports(adapter_path):
+    for _lineno, imported in _iter_imports(adapter_path):
         if _is_forbidden_import(imported):
             saw_forbidden = True
             break
@@ -141,4 +141,3 @@ def test_no_stale_forbidden_imports() -> None:
 def _module_name_for(path: Path) -> str:
     rel = path.relative_to(PACKAGE_ROOT.parent).with_suffix("")
     return ".".join(rel.parts)
-

@@ -53,7 +53,7 @@ def _write_schema3_manifest(
     ledgers = tomlkit.table()
     rl = tomlkit.table()
     mounts = tomlkit.table()
-    if DATA_MOUNT := backend.DATA_MOUNT not in drop_mounts:
+    if backend.DATA_MOUNT not in drop_mounts:
         data = tomlkit.table()
         data.add("storage", data_storage)
         if external_root:
@@ -126,33 +126,27 @@ def test_local_overlay_changes_storage(
     assert new_layout.data_source == "local"
 
 
-def test_external_storage_with_root(
-    tmp_path: Path, isolated_user_roots: None
-) -> None:
+def test_external_storage_with_root(tmp_path: Path, isolated_user_roots: None) -> None:
     proj = tmp_path / "proj"
     proj.mkdir()
     external = tmp_path / "ledger"
-    _write_schema3_manifest(
-        proj, data_storage="external", external_root="../ledger"
-    )
+    _write_schema3_manifest(proj, data_storage="external", external_root="../ledger")
     layout = _load_layout(proj)
     assert layout.data_storage == "external"
     assert layout.external_root is not None
     resolved_external = external.resolve()
     assert str(layout.data_root).startswith(str(resolved_external))
 
-def test_user_data_storage(
-    tmp_path: Path, isolated_user_roots: None
-) -> None:
+
+def test_user_data_storage(tmp_path: Path, isolated_user_roots: None) -> None:
     proj = tmp_path / "proj"
     proj.mkdir()
     _write_schema3_manifest(proj, data_storage="user-data")
     layout = _load_layout(proj)
     assert str(layout.data_root).startswith(str(tmp_path / "data" / "ledgerwerk"))
 
-def test_cache_indexes_mount(
-    tmp_path: Path, isolated_user_roots: None
-) -> None:
+
+def test_cache_indexes_mount(tmp_path: Path, isolated_user_roots: None) -> None:
     proj = tmp_path / "proj"
     proj.mkdir()
     _write_schema3_manifest(proj, indexes_storage="cache")
@@ -188,9 +182,7 @@ def test_data_storage_must_be_supported_kind(
     assert exc.value.data["actual_storage"] == "cache"
 
 
-def test_missing_mount_rejected(
-    tmp_path: Path, isolated_user_roots: None
-) -> None:
+def test_missing_mount_rejected(tmp_path: Path, isolated_user_roots: None) -> None:
     proj = tmp_path / "proj"
     proj.mkdir()
     _write_schema3_manifest(proj, drop_mounts=(backend.INDEXES_MOUNT,))
@@ -200,14 +192,10 @@ def test_missing_mount_rejected(
     assert backend.INDEXES_MOUNT in exc.value.data["missing_mounts"]
 
 
-def test_extra_mount_rejected(
-    tmp_path: Path, isolated_user_roots: None
-) -> None:
+def test_extra_mount_rejected(tmp_path: Path, isolated_user_roots: None) -> None:
     proj = tmp_path / "proj"
     proj.mkdir()
-    _write_schema3_manifest(
-        proj, extra_mounts={"extra": {"storage": "project"}}
-    )
+    _write_schema3_manifest(proj, extra_mounts={"extra": {"storage": "project"}})
     with pytest.raises(LaunchError) as exc:
         _load_layout(proj, validate_storage=False)
     assert exc.value.code == "CONFIG_ERROR"
@@ -253,9 +241,7 @@ def test_ledgercore_error_preserves_cause(
     assert exc.value.__cause__ is not None
 
 
-def test_load_is_read_only(
-    tmp_path: Path, isolated_user_roots: None
-) -> None:
+def test_load_is_read_only(tmp_path: Path, isolated_user_roots: None) -> None:
     proj = tmp_path / "proj"
     proj.mkdir()
     _write_schema3_manifest(proj)

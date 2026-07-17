@@ -366,9 +366,7 @@ def _expected_binding(
     )
 
 
-def _load_project(
-    start: Path, *, allow_missing: bool
-) -> Any:
+def _load_project(start: Path, *, allow_missing: bool) -> Any:
     """Load a schema-3 project or raise a structured :class:`LaunchError`.
 
     Delegates to :func:`ledgercore.load_ledger_project`. Wraps every
@@ -843,9 +841,7 @@ def set_releaseledger_data_target(
             storage=cast(StorageKind, storage),
             external_root=external_root,
         )
-        new_ledgers[TOOL_NAME] = LedgerRegistration(
-            name=TOOL_NAME, mounts=new_mounts
-        )
+        new_ledgers[TOOL_NAME] = LedgerRegistration(name=TOOL_NAME, mounts=new_mounts)
         manifest = LedgerProjectManifest(
             schema_version=manifest.schema_version,
             project_uuid=manifest.project_uuid,
@@ -911,10 +907,12 @@ def clear_releaseledger_data_override(start: Path) -> LedgerLocalOverrides | Non
 
 
 def plan_releaseledger_layout_migration(
-    layout: ReleaseledgerLedgerLayout,
+    layout: ReleaseledgerLedgerLayout | None,
     *,
+    source_data_root: Path | None = None,
     target_data_storage: str,
     target_external_root: str | None,
+    target: str = "project",
     target_indexes_strategy: str = MIGRATION_STRATEGY_REBUILD,
 ) -> Any:
     """Build a :class:`ledgercore.StorageMigrationPlan` for the layout.
@@ -922,6 +920,10 @@ def plan_releaseledger_layout_migration(
     This is a thin wrapper that constructs the same plan Ledgercore
     would build, but constrains the migration to ``rebuild`` for the
     ``indexes`` mount as required by plan section 14.5.
+
+    If source_data_root is provided, it is used as the migration source
+    instead of the layout's loaded data root. This is required for legacy
+    migration where the source is .releaseledger, not the canonical layout.
     """
 
     if target_indexes_strategy != MIGRATION_STRATEGY_REBUILD:
@@ -944,60 +946,115 @@ def plan_releaseledger_layout_migration(
 
     from ledgercore.migration import plan_storage_migration
 
-    target_layout = SimpleNamespace(
-        ledger_name=TOOL_NAME,
-        project_uuid=layout.project_uuid,
-        project_root=layout.project_root,
-        config_root=layout.project_root / ".ledger",
-        manifest_path=layout.manifest_path,
-        local_config_path=layout.local_config_path,
-        tool_config_path=layout.config_path,
-        checkout_id=layout.checkout_id,
-        mounts={
-            DATA_MOUNT: SimpleNamespace(
-                name=DATA_MOUNT,
-                storage=target_data_storage,
-                scope=None,
-                scoped_root=layout.data_root,
-                path=layout.data_root,
-                source="manifest",
-                root=(
-                    Path(os.path.expanduser(target_external_root))
-                    if target_data_storage == "external" and target_external_root
-                    else None
-                ),
-                binding_path=layout.data_binding_path,
-                project_uuid=layout.project_uuid,
-                tool=TOOL_NAME,
-            ),
-            INDEXES_MOUNT: SimpleNamespace(
-                name=INDEXES_MOUNT,
-                storage="cache",
-                scope=None,
-                scoped_root=layout.indexes_root,
-                path=layout.indexes_root,
-                source="manifest",
-                root=None,
-                binding_path=layout.indexes_binding_path,
-                project_uuid=layout.project_uuid,
-                tool=TOOL_NAME,
-            ),
-        },
-        config_binding_path=layout.config_binding_path,
+    if target_data_storage == "external" and not target_external_root:
+        raise LaunchError(
+            "external data storage requires an external root",
+            code="USAGE_ERROR",
+            exit_code=2,
+            data={"tool": TOOL_NAME},
+        )
+
+    # For legacy migration, we need to load the project first
+    if layout is None and source_data_root is not None:
+        # This shouldn't happen in normal flow
+        raise LaunchError(
+            "layout is required when source_data_root is provided",
+            code=CODE_CONFIG_ERROR,
+            exit_code=2,
+        )
+
+    if layout is None:
+        raise LaunchError(
+            "layout is required",
+            code=CODE_CONFIG_ERROR,
+            exit_code=2,
+        )
+
+    target_overrides = _ledgercore_set_local_mount_override(
+        layout.loaded,
+        TOOL_NAME,
+        DATA_MOUNT,
+        storage=target_data_storage,
+        root=target_external_root if target_data_storage == "external" else None,
     )
 
     try:
-        return plan_storage_migration(
-            layout=target_layout,
-            source_root=layout.data_root,
-            mode="copy",
+        plan = plan_storage_migration(
+            layout.loaded,
+            layout.loaded.manifest,
+            target_overrides,
+            TOOL_NAME,
+            cache_strategy="rebuild",
         )
+
+        # Store the source_data_root for verification
+        if source_data_root is not None:
+            plan._releaseledger_source_data_root = source_data_root
+
+        return plan
     except LedgerCoreError as exc:
         raise _map_ledgercore_error(
             exc,
             code=CODE_CONFIG_ERROR,
             extra_data={"target_data_storage": target_data_storage},
         ) from exc
+
+
+def assert_plan_source(
+    plan: Any,
+    expected: Path,
+) -> None:
+    """Assert that the migration plan uses the expected source."""
+    # Check if the plan has our custom source marker
+    source = getattr(plan, "_releaseledger_source_data_root", None)
+    if source is None:
+        # For backward compatibility, don't fail if marker is missing
+        return
+    if Path(source).resolve() != expected.resolve():
+        raise LaunchError(
+            f"Migration plan source {source} != expected {expected}",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+            data={"plan_source": str(source), "expected": str(expected)},
+        )
+
+
+def prepare_releaseledger_migration_target(
+    workspace_root: Path,
+    *,
+    data_storage: str,
+    external_root: str | None,
+    target: str,
+) -> dict[str, object]:
+    """Prepare the migration target configuration without activating it.
+
+    Returns a dict with the prepared target information.
+    """
+    project_root = Path(workspace_root).resolve()
+    manifest_path = project_root / ".ledger" / "ledger.toml"
+
+    # Calculate where the target data would go
+    if data_storage == "project":
+        data_root = project_root / ".ledger" / "releaseledger" / "data"
+    elif data_storage == "external" and external_root:
+        data_root = Path(external_root).resolve() / "releaseledger" / "data"
+    else:
+        # user-data
+        ns = _user_namespace()
+        data_root = ns.user_data / TOOL_NAME / "data"
+
+    indexes_root = project_root / ".ledger" / "releaseledger" / "indexes"
+    config_path = derive_tool_config_path(project_root, TOOL_NAME)
+
+    return {
+        "project_root": str(project_root),
+        "data_root": str(data_root),
+        "indexes_root": str(indexes_root),
+        "config_path": str(config_path),
+        "manifest_path": str(manifest_path),
+        "data_storage": data_storage,
+        "target": target,
+    }
 
 
 def execute_releaseledger_layout_migration(

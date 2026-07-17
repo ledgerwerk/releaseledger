@@ -202,7 +202,9 @@ def init_command(
     ] = False,
     force_config: Annotated[
         bool,
-        typer.Option("--force-config", help="Replace the Releaseledger tool config after backup."),
+        typer.Option(
+            "--force-config", help="Replace the Releaseledger tool config after backup."
+        ),
     ] = False,
 ) -> None:
     """Initialize a Ledgercore schema-3 project with Releaseledger registration."""
@@ -217,11 +219,14 @@ def init_command(
                 code=CODE_USAGE_ERROR,
                 exit_code=2,
                 data={
-                    "flag": "--releaseledger-dir" if releaseledger_dir is not None else "--external-dir",
+                    "flag": "--releaseledger-dir"
+                    if releaseledger_dir is not None
+                    else "--external-dir",
                 },
                 remediation=[
                     "Run `releaseledger init` without legacy flags.",
-                    "Use `releaseledger storage set data --storage external --root PATH` "
+                    "Use `releaseledger storage set data --storage external` "
+                    "`--root PATH` to change data storage after init.",
                     "to change data storage after init.",
                 ],
             )
@@ -2678,7 +2683,10 @@ def storage_validate_command(
     ctx: typer.Context,
     strict: Annotated[
         bool,
-        typer.Option("--strict", help="Run domain-level validation in addition to binding checks."),
+        typer.Option(
+            "--strict",
+            help="Run domain-level validation in addition to binding checks.",
+        ),
     ] = False,
 ) -> None:
     """Validate storage bindings and optionally domain records."""
@@ -2734,11 +2742,16 @@ def storage_set_command(
     ] = "project",
     root: Annotated[
         str | None,
-        typer.Option("--root", help="External root path (required for external storage)."),
+        typer.Option(
+            "--root", help="External root path (required for external storage)."
+        ),
     ] = None,
     target: Annotated[
         str,
-        typer.Option("--target", help="Write target: project (manifest) or local (local override)."),
+        typer.Option(
+            "--target",
+            help="Write target: project (manifest) or local (local override).",
+        ),
     ] = "project",
     dry_run: Annotated[
         bool,
@@ -2761,7 +2774,7 @@ def storage_set_command(
             )
         from releaseledger.ledgercore_backend import set_releaseledger_data_target
 
-        result = set_releaseledger_data_target(
+        set_releaseledger_data_target(
             state.cwd,
             storage=data_storage,
             external_root=root,
@@ -2773,7 +2786,16 @@ def storage_set_command(
             + f" via {target}"
         )
         if dry_run:
-            return {"dry_run": True, "storage": data_storage, "root": root, "target": target}, [], human
+            return (
+                {
+                    "dry_run": True,
+                    "storage": data_storage,
+                    "root": root,
+                    "target": target,
+                },
+                [],
+                human,
+            )
         return {"storage": data_storage, "root": root, "target": target}, [], human
 
     run_command(
@@ -2804,7 +2826,7 @@ def storage_clear_override_command(
             )
         from releaseledger.ledgercore_backend import clear_releaseledger_data_override
 
-        result = clear_releaseledger_data_override(state.cwd)
+        clear_releaseledger_data_override(state.cwd)
         human = "data override cleared"
         return {"cleared": True, "mount": mount}, [], human
 
@@ -2849,10 +2871,12 @@ def storage_migrate_command(
     def produce() -> CommandResult:
         from releaseledger.migration import (
             ReleaseledgerMigrationRequest,
-            migration_status as mig_status,
-            plan_migration,
             execute_migration,
+            plan_migration,
             recover_migration,
+        )
+        from releaseledger.migration import (
+            migration_status as mig_status,
         )
 
         if subcommand == "status":
@@ -2876,7 +2900,10 @@ def storage_migrate_command(
             return result, [], human
 
         if subcommand == "apply":
-            from releaseledger.storage.locking import acquire_write_lock, quiescence_callback
+            from releaseledger.storage.locking import (
+                acquire_write_lock,
+                quiescence_callback,
+            )
 
             request = ReleaseledgerMigrationRequest(
                 start=state.cwd,
@@ -2976,7 +3003,8 @@ def config_set_command(
             code=CODE_USAGE_ERROR,
             exit_code=2,
             remediation=[
-                "Use `releaseledger storage set data --storage ...` to change data storage.",
+                "Use `releaseledger storage set data --storage ...` "
+                "to change data storage.",
             ],
         )
         emit_error(command="config.set", error=err, json_output=state.json_output)

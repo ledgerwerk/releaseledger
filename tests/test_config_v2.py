@@ -108,7 +108,6 @@ def test_round_trip_preserves_comments_and_order(tmp_path: Path) -> None:
             """
         )
     )
-    before = p.read_text()
     loaded = cfg.load_project_config(p)
     cfg.write_project_config(p, loaded)
     after = p.read_text()
@@ -116,7 +115,7 @@ def test_round_trip_preserves_comments_and_order(tmp_path: Path) -> None:
     assert "# Custom header comment" in after
     # Section ordering: changelog appears after release by default order;
     # we only check that the custom comment and the body survived.
-    assert 'multi\n    line' in after or 'multi' in after
+    assert "multi\n    line" in after or "multi" in after
     assert "<!-- generated -->" in after
     # The body is intentionally re-rendered; ensure the comment is preserved
     # but the overall file must still be a valid v2 config.
@@ -246,9 +245,7 @@ def test_reject_unknown_top_level_key(tmp_path: Path) -> None:
 
 def test_reject_invalid_git_include_merges(tmp_path: Path) -> None:
     p = tmp_path / "config.toml"
-    p.write_text(
-        "config_version = 2\n[git]\ninclude_merges = 'sometimes'\n"
-    )
+    p.write_text("config_version = 2\n[git]\ninclude_merges = 'sometimes'\n")
     with pytest.raises(LaunchError) as exc:
         cfg.load_project_config(p)
     assert exc.value.code == "CONFIG_ERROR"

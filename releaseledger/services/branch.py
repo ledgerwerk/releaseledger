@@ -165,7 +165,8 @@ def branch_start(
     branch_paths = parent_paths.paths_for_ledger(branch_ref)
     if branch_paths.ledger_dir.exists():
         raise LaunchError(
-            f"Branch ledger '{branch_ref}' already exists at {branch_paths.ledger_dir}.",
+            f"Branch ledger '{branch_ref}' already exists at "
+            f"{branch_paths.ledger_dir}.",
             code=CODE_USAGE_ERROR,
             exit_code=2,
         )
@@ -339,9 +340,7 @@ def _update_config_ledger_ref(
         write_project_config,
     )
 
-    config = (
-        ProjectConfig() if not config_path.is_file() else _load_config(config_path)
-    )
+    config = ProjectConfig() if not config_path.is_file() else _load_config(config_path)
     updated = config.replace(ledger_ref=ledger_ref, ledger_parent_ref=parent_ref)
     write_project_config(config_path, updated)
 

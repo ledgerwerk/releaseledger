@@ -144,6 +144,7 @@ def test_legacy_initialize_project_rejects_removed_flags(
     # The flag stored in data uses the same spelling as the user-facing option.
     assert "releaseledger-dir" in str(exc.value.data.get("flag", ""))
 
+
 def test_legacy_initialize_project_rejects_external_dir(
     tmp_path: Path, isolated_user_roots: None
 ) -> None:

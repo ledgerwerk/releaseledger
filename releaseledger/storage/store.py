@@ -466,6 +466,7 @@ def rebuild_indexes(workspace_root: Path) -> None:
     paths = _resolve(workspace_root)
     rebuild_indexes_for_paths(paths)
 
+
 def save_entries_for_release(
     workspace_root: Path,
     release_version: str,
