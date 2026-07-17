@@ -8,20 +8,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import ledgercore
-
-from releaseledger.errors import LaunchError
+from releaseledger.errors import CODE_USAGE_ERROR, LaunchError
 from releaseledger.storage.config import (
     ProjectConfig,
     load_project_config,
-    render_default_releaseledger_toml,
 )
 from releaseledger.storage.paths import (
     ProjectLocator,
-    find_project_config,
     load_project_locator,
     resolve_project_paths,
-    resolve_releaseledger_dir,
 )
 
 __all__ = [
@@ -102,15 +97,11 @@ def config_show(workspace_root: Path) -> dict[str, object]:
     if config is not None:
         config_dict = {
             "config_version": config.config_version,
-            "releaseledger_dir": config.releaseledger_dir,
-            "releaseledger_dir_policy": config.releaseledger_dir_policy,
             "ledger_ref": config.ledger_ref,
             "ledger_parent_ref": config.ledger_parent_ref,
-            "ledger_next_entry_number": config.ledger_next_entry_number,
             "ledger_branch_guard": config.ledger_branch_guard,
             "ledger": {
                 "code": config.ledger_code,
-                "name": config.ledger_name,
             },
             "release": {
                 "default_changelog": config.default_changelog,
@@ -151,58 +142,15 @@ def config_set_releaseledger_dir(
     *,
     external_dir: bool = False,
 ) -> dict[str, object]:
-    """Atomically rewrite .releaseledger.toml with a new releaseledger_dir.
+    """Storage mutation now lives under ``releaseledger storage set``."""
 
-    Returns a dict with before, after, and config_path for JSON mode.
-    Raises LaunchError on validation failure.
-    """
-    start = workspace_root.expanduser().resolve()
-    if start.is_file():
-        start = start.parent
-    config_path = find_project_config(start)
-    if config_path is None:
-        raise LaunchError(
-            "Project not initialized: no .releaseledger.toml found.",
-            code="NOT_FOUND",
-            exit_code=2,
-            remediation=["Run `releaseledger init` to create the config."],
-        )
-    root = config_path.parent.resolve()
-    config = load_project_config(config_path)
-    before = config.releaseledger_dir
-
-    # Determine the new policy.
-    policy = config.releaseledger_dir_policy
-    if external_dir:
-        candidate = Path(value)
-        if not candidate.is_absolute():
-            resolved = (root / value).resolve()
-            try:
-                resolved.relative_to(root)
-            except ValueError:
-                policy = "external"
-            else:
-                # Path is inside workspace; keep existing policy.
-                pass
-        # Absolute paths are accepted regardless.
-    else:
-        # Validate with the current policy (or workspace if unchanged).
-        resolve_releaseledger_dir(root, value, policy=policy)
-
-    # Render the new TOML with the resolved policy.
-    toml_text = render_default_releaseledger_toml(
-        releaseledger_dir=value,
-        project_name=config.ledger_name,
-        ledger_ref=config.ledger_ref,
-        policy=policy,
+    raise LaunchError(
+        "config set releaseledger_dir is no longer supported; storage "
+        "topology is owned by the canonical Ledger project.",
+        code=CODE_USAGE_ERROR,
+        exit_code=2,
+        data={"command": "config set releaseledger_dir", "value": value},
+        remediation=[
+            "Use `releaseledger storage set data --storage ... --root ...`.",
+        ],
     )
-    ledgercore.atomic_write_text(config_path, toml_text)
-
-    return {
-        "kind": "config_set",
-        "config_path": str(config_path),
-        "key": "releaseledger_dir",
-        "before": before,
-        "after": value,
-        "policy": policy,
-    }

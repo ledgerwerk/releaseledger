@@ -13,7 +13,7 @@ from releaseledger.domain.entry import ReleaseEntryRecord, normalize_entry_statu
 from releaseledger.domain.release import ReleaseRecord
 from releaseledger.domain.states import ENTRY_KIND_TITLES
 from releaseledger.services.entry_lint import lint_release_entries
-from releaseledger.storage.config import DEFAULT_LEDGER_NAME, load_project_config
+from releaseledger.storage.config import DEFAULT_LEDGER_NAME
 from releaseledger.storage.paths import ProjectPaths, resolve_project_paths
 from releaseledger.storage.store import load_entries, load_release
 
@@ -35,12 +35,11 @@ _GROUP_ORDER = (
 
 def _project_name(paths: ProjectPaths) -> str:
     try:
-        config = load_project_config(paths.config_path)
-        name = config.ledger_name or DEFAULT_LEDGER_NAME
-        return name
+        from releaseledger.storage.config import project_name_or_default
+
+        return project_name_or_default(paths.project)
     except Exception:  # pragma: no cover - defensive fallback
         return paths.workspace_root.name or DEFAULT_LEDGER_NAME
-
 
 def _entry_payload(entry: ReleaseEntryRecord) -> dict[str, object]:
     return {

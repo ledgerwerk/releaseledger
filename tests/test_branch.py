@@ -189,7 +189,7 @@ def test_branch_guard_warn_does_not_block(tmp_path: Path) -> None:
     _git(repo, "checkout", "-b", "other")
     _run(repo, "init")
     # Set guard to warn via config edit.
-    config_path = repo / ".releaseledger.toml"
+    config_path = repo / ".ledger" / "releaseledger" / "config.toml"
     content = config_path.read_text()
     content = content.replace(
         'ledger_branch_guard = "off"', 'ledger_branch_guard = "warn"'
@@ -206,7 +206,7 @@ def test_branch_guard_on_blocks_mutating(tmp_path: Path) -> None:
     _commit(repo, "init", "README.md")
     _git(repo, "checkout", "-b", "other")
     _run(repo, "init")
-    config_path = repo / ".releaseledger.toml"
+    config_path = repo / ".ledger" / "releaseledger" / "config.toml"
     content = config_path.read_text()
     content = content.replace(
         'ledger_branch_guard = "off"', 'ledger_branch_guard = "on"'
@@ -223,7 +223,7 @@ def test_branch_guard_readonly_always_allowed(tmp_path: Path) -> None:
     _commit(repo, "init", "README.md")
     _git(repo, "checkout", "-b", "other")
     _run(repo, "init")
-    config_path = repo / ".releaseledger.toml"
+    config_path = repo / ".ledger" / "releaseledger" / "config.toml"
     content = config_path.read_text()
     content = content.replace(
         'ledger_branch_guard = "off"', 'ledger_branch_guard = "on"'

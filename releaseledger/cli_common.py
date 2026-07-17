@@ -210,13 +210,13 @@ def check_mutating_branch_guard(
     """
     try:
         from releaseledger.services.branch import check_branch_guard
-        from releaseledger.storage.config import load_project_config
+        from releaseledger.storage.paths import load_releaseledger_project
 
-        config = load_project_config(workspace_root / ".releaseledger.toml")
+        project = load_releaseledger_project(workspace_root)
         warning = check_branch_guard(
             workspace_root,
-            ledger_ref=config.ledger_ref,
-            branch_guard=config.ledger_branch_guard,
+            ledger_ref=project.config.ledger_ref,
+            branch_guard=project.config.ledger_branch_guard,
             mutating=True,
         )
         if warning:

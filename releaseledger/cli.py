@@ -95,10 +95,10 @@ from releaseledger.services.releases import (
     update_release,
 )
 from releaseledger.services.review import build_release_review
-from releaseledger.storage.config import load_project_config
 from releaseledger.storage.paths import (
     ProjectPaths,
-    initialize_project,
+    ensure_canonical_project,
+    load_releaseledger_project,
     require_project,
 )
 from releaseledger.storage.store import load_release
@@ -181,20 +181,34 @@ def init_command(
     workspace_root = state.cwd
 
     def produce() -> CommandResult:
-        result = initialize_project(
+        if releaseledger_dir is not None or external_dir:
+            raise LaunchError(
+                "--releaseledger-dir and --external-dir are no longer "
+                "supported; configure the canonical Ledger project instead.",
+                code=CODE_USAGE_ERROR,
+                exit_code=2,
+                data={
+                    "flag": "--releaseledger-dir" if releaseledger_dir is not None else "--external-dir",
+                },
+                remediation=[
+                    "Run `releaseledger init` without legacy flags.",
+                ],
+            )
+        result = ensure_canonical_project(
             workspace_root,
-            releaseledger_dir=releaseledger_dir,
             project_name=project_name,
             force=force,
-            external_dir=external_dir,
         )
-        rel_dir = Path(str(result["releaseledger_dir"]))
+        data_root = Path(str(result["data_root"]))
         try:
-            display = rel_dir.relative_to(workspace_root.resolve())
+            display = data_root.relative_to(workspace_root.resolve())
             display_str = str(display)
         except ValueError:
-            display_str = str(rel_dir)
-        human = f"initialized releaseledger in {display_str}\nwrote .releaseledger.toml"
+            display_str = str(data_root)
+        human = (
+            f"initialized releaseledger in {display_str}\n"
+            "wrote .ledger/ledger.toml and .ledger/releaseledger/config.toml"
+        )
         return result, [], human
 
     run_command(
@@ -2485,11 +2499,11 @@ def branch_status_command(ctx: typer.Context) -> None:
 
     def produce() -> CommandResult:
         workspace_root = _paths(ctx).workspace_root
-        config = load_project_config(workspace_root / ".releaseledger.toml")
+        project = load_releaseledger_project(workspace_root)
         result = branch_status(
             workspace_root,
-            ledger_ref=config.ledger_ref,
-            branch_guard=config.ledger_branch_guard,
+            ledger_ref=project.config.ledger_ref,
+            branch_guard=project.config.ledger_branch_guard,
         )
         lines = ["BRANCH STATUS", ""]
         lines.append(
@@ -2527,12 +2541,12 @@ def branch_start_command(
 
     def produce() -> CommandResult:
         workspace_root = _paths(ctx).workspace_root
-        config = load_project_config(workspace_root / ".releaseledger.toml")
+        project = load_releaseledger_project(workspace_root)
         result = branch_start(
             workspace_root,
             branch_ref=branch,
             parent_ref=parent,
-            current_ledger_ref=config.ledger_ref,
+            current_ledger_ref=project.config.ledger_ref,
         )
         return result, [], f"started branch ledger {branch} from {parent}"
 

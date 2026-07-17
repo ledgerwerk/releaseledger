@@ -142,10 +142,7 @@ def branch_start(
     Design §9.5: branch ledgers are for advanced workflows where release
     entries are committed on feature branches before merge.
     """
-    from releaseledger.storage.paths import (
-        CANONICAL_PROJECT_CONFIG_FILENAME,
-        resolve_project_paths,
-    )
+    from releaseledger.storage.paths import resolve_project_paths
 
     _validate_ref_name(branch_ref, "branch")
     _validate_ref_name(parent_ref, "parent")
@@ -155,43 +152,38 @@ def branch_start(
             code=CODE_USAGE_ERROR,
             exit_code=2,
         )
-    config_path = workspace_root / CANONICAL_PROJECT_CONFIG_FILENAME
-    # Resolve the parent ledger dir.
-    parent_paths = resolve_project_paths(workspace_root)
-    releaseledger_dir = parent_paths.releaseledger_dir
-    parent_ledger_dir = releaseledger_dir / "ledgers" / parent_ref
-    if not parent_ledger_dir.is_dir():
+    parent_paths = resolve_project_paths(workspace_root, ledger_ref=parent_ref)
+    if not parent_paths.ledger_dir.is_dir():
         raise LaunchError(
-            f"Parent ledger '{parent_ref}' not found at {parent_ledger_dir}.",
+            f"Parent ledger '{parent_ref}' not found at {parent_paths.ledger_dir}.",
             code=CODE_USAGE_ERROR,
             exit_code=2,
             remediation=[
                 "Check ledger_ref values with `releaseledger config show`.",
             ],
         )
-    branch_ledger_dir = releaseledger_dir / "ledgers" / branch_ref
-    if branch_ledger_dir.exists():
+    branch_paths = parent_paths.paths_for_ledger(branch_ref)
+    if branch_paths.ledger_dir.exists():
         raise LaunchError(
-            f"Branch ledger '{branch_ref}' already exists at {branch_ledger_dir}.",
+            f"Branch ledger '{branch_ref}' already exists at {branch_paths.ledger_dir}.",
             code=CODE_USAGE_ERROR,
             exit_code=2,
         )
     # Copy the parent ledger tree to the branch ledger.
     import shutil
 
-    shutil.copytree(parent_ledger_dir, branch_ledger_dir)
+    shutil.copytree(parent_paths.ledger_dir, branch_paths.ledger_dir)
     # Update config: set ledger_ref and ledger_parent_ref.
     _update_config_ledger_ref(
-        config_path,
+        parent_paths.config_path,
         ledger_ref=branch_ref,
         parent_ref=parent_ref,
     )
     return {
         "kind": "branch_start",
         "branch_ref": branch_ref,
-        "parent_ref": parent_ref,
         "previous_ledger_ref": current_ledger_ref,
-        "ledger_dir": str(branch_ledger_dir),
+        "ledger_dir": str(branch_paths.ledger_dir),
     }
 
 
@@ -343,18 +335,21 @@ def _update_config_ledger_ref(
     ledger_ref: str,
     parent_ref: str,
 ) -> None:
-    """Update ledger_ref and ledger_parent_ref in the config TOML."""
-    import ledgercore
+    """Update ``ledger_ref`` and ``ledger_parent_ref`` via the typed writer."""
 
+    from releaseledger.storage.config import (
+        ProjectConfig,
+        write_project_config,
+    )
+
+    config = (
+        ProjectConfig() if not config_path.is_file() else _load_config(config_path)
+    )
+    updated = config.replace(ledger_ref=ledger_ref, ledger_parent_ref=parent_ref)
+    write_project_config(config_path, updated)
+
+
+def _load_config(config_path: Path):
     from releaseledger.storage.config import load_project_config
 
-    config = load_project_config(config_path)
-    from releaseledger.storage.config import render_default_releaseledger_toml
-
-    toml_text = render_default_releaseledger_toml(
-        releaseledger_dir=config.releaseledger_dir,
-        project_name=config.ledger_name,
-        ledger_ref=ledger_ref,
-        policy=config.releaseledger_dir_policy,
-    )
-    ledgercore.atomic_write_text(config_path, toml_text)
+    return load_project_config(config_path)

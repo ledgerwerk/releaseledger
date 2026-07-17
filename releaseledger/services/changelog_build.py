@@ -95,8 +95,9 @@ _UNRELEASED_RE = re.compile(r"^##\s+\[?\s*Unreleased\s*\]?\s*$", re.IGNORECASE)
 
 def _project_name(paths: ProjectPaths) -> str:
     try:
-        config = load_project_config(paths.config_path)
-        return config.ledger_name or paths.workspace_root.name or "releaseledger"
+        from releaseledger.storage.config import project_name_or_default
+
+        return project_name_or_default(paths.project)
     except Exception:  # pragma: no cover - defensive fallback
         return paths.workspace_root.name or "releaseledger"
 
