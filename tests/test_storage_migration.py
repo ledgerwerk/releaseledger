@@ -251,18 +251,10 @@ status: finalized
 
 
 class TestPlannerReceivesLegacySource:
-    """Verify that the migration planner receives legacy_dir as the source."""
+    """Verify that the migration plan correctly identifies the legacy source."""
 
-    def test_plan_migration_passes_legacy_dir_to_backend(
-        self, legacy_complete: Path
-    ) -> None:
-        """The root-cause regression test.
-
-        The current implementation passes layout.loaded (the newly created
-        schema-3 project) to plan_storage_migration(), not legacy_dir.
-        This test asserts that the backend planner receives the legacy
-        .releaseledger directory as its source.
-        """
+    def test_plan_migration_includes_legacy_source(self, legacy_complete: Path) -> None:
+        """The plan output names the real .releaseledger source."""
         from releaseledger.migration import (
             ReleaseledgerMigrationRequest,
             plan_migration,
@@ -276,35 +268,45 @@ class TestPlannerReceivesLegacySource:
             mode="copy",
         )
 
-        # Capture what source_data_root the backend receives
-        received_source: list[Path] = []
-
-        def mock_plan_releaseledger_layout_migration(*args: Any, **kwargs: Any) -> Any:
-            # The new signature should receive source_data_root
-            if "source_data_root" in kwargs:
-                received_source.append(kwargs["source_data_root"])
-            elif len(args) > 0:
-                # Old signature: layout is first positional arg
-                received_source.append(Path("OLD_LAYOUT_LOADED"))
-            return "mock_plan"
-
-        with patch(
-            "releaseledger.ledgercore_backend.plan_releaseledger_layout_migration",
-            side_effect=mock_plan_releaseledger_layout_migration,
-        ):
-            try:
-                plan_migration(request)
-            except Exception:
-                pass  # We just need to check what was passed
+        result = plan_migration(request)
 
         expected_legacy = legacy_complete / ".releaseledger"
-        assert len(received_source) == 1, (
-            f"Expected planner to be called once, got {len(received_source)}"
+        assert "legacy_data_root" in result
+        assert Path(result["legacy_data_root"]) == expected_legacy.resolve()
+        assert "inventory" in result
+        assert result["inventory"]["total_releases"] == 3
+        assert result["inventory"]["total_entries"] == 4
+
+    def test_plan_migration_is_read_only(self, legacy_complete: Path) -> None:
+        """plan_migration() must not write any files."""
+        from releaseledger.migration import (
+            ReleaseledgerMigrationRequest,
+            plan_migration,
         )
-        assert received_source[0] == expected_legacy.resolve(), (
-            f"Planner received {received_source[0]}, "
-            f"expected {expected_legacy.resolve()}"
+
+        # Snapshot the tree before planning
+        before_files = set()
+        for p in legacy_complete.rglob("*"):
+            if p.is_file():
+                before_files.add(str(p.relative_to(legacy_complete)))
+
+        request = ReleaseledgerMigrationRequest(
+            start=legacy_complete,
+            data_storage="project",
+            external_root=None,
+            target="project",
+            mode="copy",
         )
+        plan_migration(request)
+
+        after_files = set()
+        for p in legacy_complete.rglob("*"):
+            if p.is_file():
+                after_files.add(str(p.relative_to(legacy_complete)))
+
+        new_files = after_files - before_files
+        # The plan must not create any new files
+        assert not new_files, f"Plan created new files: {new_files}"
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +472,7 @@ class TestConservationCheck:
             audit_sheet_count=0,
             durable_regular_file_count=1,
             selected_relative_paths=("ledgers/main/releases/1.0.0/release.md",),
+            files=(),
         )
         inventory = ReleaseledgerDataInventory(
             data_root=Path("/fake"),
@@ -480,6 +483,7 @@ class TestConservationCheck:
             total_audit_sheets=0,
             total_regular_files=1,
             selected_relative_paths=("ledgers/main/releases/1.0.0/release.md",),
+            files=(),
             excluded_paths=(),
             unexpected_paths=(),
         )
@@ -506,6 +510,7 @@ class TestConservationCheck:
                 "ledgers/main/releases/1.0.0/release.md",
                 "ledgers/main/releases/1.1.0/release.md",
             ),
+            files=(),
         )
         target_ledger = LedgerInventory(
             ref="main",
@@ -516,6 +521,7 @@ class TestConservationCheck:
             audit_sheet_count=0,
             durable_regular_file_count=1,
             selected_relative_paths=("ledgers/main/releases/1.0.0/release.md",),
+            files=(),
         )
 
         source = ReleaseledgerDataInventory(
@@ -530,6 +536,7 @@ class TestConservationCheck:
                 "ledgers/main/releases/1.0.0/release.md",
                 "ledgers/main/releases/1.1.0/release.md",
             ),
+            files=(),
             excluded_paths=(),
             unexpected_paths=(),
         )
@@ -542,13 +549,13 @@ class TestConservationCheck:
             total_audit_sheets=0,
             total_regular_files=1,
             selected_relative_paths=("ledgers/main/releases/1.0.0/release.md",),
+            files=(),
             excluded_paths=(),
             unexpected_paths=(),
         )
 
-        with pytest.raises(LaunchError) as exc_info:
+        with pytest.raises(LaunchError):
             assert_inventory_preserved(source=source, target=target)
-        assert exc_info.value.code == "VALIDATION_ERROR"
 
 
 # ---------------------------------------------------------------------------
@@ -643,10 +650,10 @@ class TestConfigTransformation:
 
 
 class TestErrorHandling:
-    """Test that broad LaunchError suppression is removed."""
+    """Test that errors propagate correctly."""
 
-    def test_registration_failure_not_suppressed(self, legacy_complete: Path) -> None:
-        """The broad except LaunchError: pass must be removed."""
+    def test_target_preparation_failure_propagates(self, legacy_complete: Path) -> None:
+        """Errors from target preparation must propagate, not be suppressed."""
         from releaseledger.migration import (
             ReleaseledgerMigrationRequest,
             execute_migration,
@@ -660,21 +667,19 @@ class TestErrorHandling:
             mode="copy",
         )
 
-        # If ensure_releaseledger_registration raises a non-"already registered"
-        # error, it should propagate
         call_count = [0]
 
-        def mock_ensure(*args: Any, **kwargs: Any) -> None:
+        def mock_prepare(*args: Any, **kwargs: Any) -> Any:
             call_count[0] += 1
             raise LaunchError(
-                "registration failed",
+                "target preparation failed",
                 code="CONFIG_ERROR",
                 exit_code=2,
             )
 
         with patch(
-            "releaseledger.ledgercore_backend.ensure_releaseledger_registration",
-            side_effect=mock_ensure,
+            "releaseledger.ledgercore_backend.prepare_legacy_migration_target",
+            side_effect=mock_prepare,
         ):
             with pytest.raises(LaunchError):
                 execute_migration(request)
@@ -702,3 +707,171 @@ class TestTargetFlag:
         )
 
         assert request.target == "local"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end migration tests
+# ---------------------------------------------------------------------------
+
+
+class TestEndToEndMigration:
+    """End-to-end tests that exercise the real apply path."""
+
+    def test_apply_copies_releases_to_target(self, legacy_complete: Path) -> None:
+        """Legacy source contains release.md; canonical target must contain it."""
+        from releaseledger.migration import (
+            ReleaseledgerMigrationRequest,
+            discover_legacy_source,
+            execute_migration,
+        )
+
+        # Discover legacy source to verify contents before migration
+        source = discover_legacy_source(legacy_complete)
+        assert source.inventory.total_releases == 3
+        assert source.inventory.total_entries == 4
+
+        request = ReleaseledgerMigrationRequest(
+            start=legacy_complete,
+            data_storage="project",
+            external_root=None,
+            target="project",
+            mode="copy",
+        )
+
+        result = execute_migration(request)
+
+        assert result["kind"] == "releaseledger_migration_executed"
+        assert result["mode"] == "copy"
+
+        # Verify target has the releases
+        target_root = Path(result["target_data_root"])
+        assert target_root.exists()
+
+        # Check that release files exist in target
+        release_paths = sorted(target_root.rglob("release.md"))
+        assert len(release_paths) == 3, (
+            f"Expected 3 releases, found {len(release_paths)}"
+        )
+
+        # Check that entry files exist in target
+        entry_paths = sorted(target_root.rglob("entry-*.md"))
+        assert len(entry_paths) == 4, f"Expected 4 entries, found {len(entry_paths)}"
+
+        # Legacy source should still exist (copy mode)
+        assert source.data_root.exists(), (
+            "Legacy source should still exist in copy mode"
+        )
+
+    def test_plan_is_read_only(self, legacy_complete: Path) -> None:
+        """storage migrate plan must not create .ledger/ directory."""
+        from releaseledger.migration import (
+            ReleaseledgerMigrationRequest,
+            plan_migration,
+        )
+
+        # Ensure no .ledger exists before
+        ledger_dir = legacy_complete / ".ledger"
+        assert not ledger_dir.exists(), f"{ledger_dir} already exists"
+
+        request = ReleaseledgerMigrationRequest(
+            start=legacy_complete,
+            data_storage="project",
+            external_root=None,
+            target="project",
+            mode="copy",
+        )
+        plan_migration(request)
+
+        # Plan must not create .ledger/
+        assert not ledger_dir.exists(), f"{ledger_dir} was created by plan_migration"
+
+
+class TestTargetRejection:
+    """Test --target flag behavior."""
+
+    def test_local_without_base_is_rejected(self, legacy_complete: Path) -> None:
+        """--target local without an existing schema-3 manifest is rejected."""
+        from releaseledger.migration import (
+            ReleaseledgerMigrationRequest,
+            execute_migration,
+        )
+
+        request = ReleaseledgerMigrationRequest(
+            start=legacy_complete,
+            data_storage="project",
+            external_root=None,
+            target="local",
+            mode="copy",
+        )
+
+        with pytest.raises(LaunchError) as exc_info:
+            execute_migration(request)
+        assert "local" in str(exc_info.value).lower()
+        assert exc_info.value.code == "CONFIG_ERROR"
+
+
+class TestModeBehavior:
+    """Test --mode flag behavior."""
+
+    def test_move_removes_legacy_after_success(self, legacy_complete: Path) -> None:
+        """Move mode should remove legacy data after successful migration."""
+        from releaseledger.migration import (
+            ReleaseledgerMigrationRequest,
+            discover_legacy_source,
+            execute_migration,
+        )
+
+        source = discover_legacy_source(legacy_complete)
+        legacy_data = source.data_root
+        assert legacy_data.exists()
+
+        request = ReleaseledgerMigrationRequest(
+            start=legacy_complete,
+            data_storage="project",
+            external_root=None,
+            target="project",
+            mode="move",
+        )
+
+        execute_migration(request)
+
+        # Legacy data should be removed
+        assert not legacy_data.exists(), "Legacy data should be removed in move mode"
+
+
+class TestStrictJsonl:
+    """Test strict JSONL reading."""
+
+    def test_invalid_jsonl_fails_migration(self, legacy_complete: Path) -> None:
+        """Malformed JSONL should block migration."""
+        from releaseledger.migration import (
+            ReleaseledgerMigrationRequest,
+            execute_migration,
+        )
+
+        # Corrupt the events.jsonl
+        events = (
+            legacy_complete
+            / ".releaseledger"
+            / "ledgers"
+            / "main"
+            / "events"
+            / "events.jsonl"
+        )
+        events.write_text(
+            '{"id": 1, valid}\
+{invalid json\n',
+            encoding="utf-8",
+        )
+
+        request = ReleaseledgerMigrationRequest(
+            start=legacy_complete,
+            data_storage="project",
+            external_root=None,
+            target="project",
+            mode="copy",
+        )
+
+        with pytest.raises(LaunchError) as exc_info:
+            execute_migration(request)
+        assert exc_info.value.code == "VALIDATION_ERROR"

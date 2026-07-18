@@ -2864,6 +2864,13 @@ def storage_migrate_command(
         str,
         typer.Option("--mode", help="Migration mode: copy or move."),
     ] = "copy",
+    preserve_legacy_config: Annotated[
+        bool,
+        typer.Option(
+            "--preserve-legacy-config",
+            help="Keep the legacy config file after move migration.",
+        ),
+    ] = False,
 ) -> None:
     """Plan or execute storage migration from legacy to schema-3."""
     state = cli_state_from_context(ctx)
@@ -2891,6 +2898,7 @@ def storage_migrate_command(
                 external_root=root,
                 target=target,  # type: ignore[arg-type]
                 mode=mode,  # type: ignore[arg-type]
+                preserve_legacy_config=preserve_legacy_config,
             )
             result = plan_migration(request)
             human = (
@@ -2911,12 +2919,17 @@ def storage_migrate_command(
                 external_root=root,
                 target=target,  # type: ignore[arg-type]
                 mode=mode,  # type: ignore[arg-type]
+                preserve_legacy_config=preserve_legacy_config,
             )
             with acquire_write_lock(state.cwd) as lock:
                 result = execute_migration(
                     request, quiescence_check=lambda: quiescence_callback(lock)
                 )
-            human = f"Migration {mode} completed to {data_storage}"
+            migrated_count = result.get("inventory", {}).get("total_releases", 0)
+            human = (
+                f"Migration {mode} completed to {data_storage} "
+                f"({migrated_count} releases migrated)"
+            )
             return result, [], human
 
         if subcommand == "recover":

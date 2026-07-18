@@ -87,15 +87,18 @@ __all__ = [
     "DATA_MOUNT",
     "INDEXES_MOUNT",
     "MIGRATION_STRATEGY_REBUILD",
+    "PreparedReleaseledgerTarget",
     "ReleaseledgerLedgerLayout",
     "TOOL_NAME",
     "UserNamespace",
+    "build_releaseledger_legacy_migration_plan",
     "clear_releaseledger_data_override",
     "ensure_releaseledger_registration",
     "execute_releaseledger_layout_migration",
     "initialize_releaseledger_locations",
     "load_releaseledger_ledger_layout",
     "plan_releaseledger_layout_migration",
+    "prepare_legacy_migration_target",
     "set_releaseledger_data_target",
 ]
 
@@ -125,6 +128,22 @@ class UserNamespace:
 
     user_data: Path
     user_cache: Path
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedReleaseledgerTarget:
+    """Prepared migration target, computed without writing any files."""
+
+    project_root: Path
+    project_uuid: str
+    project_name: str | None
+    config_path: Path
+    data_root: Path
+    indexes_root: Path
+    config_binding: StorageBinding
+    data_binding: StorageBinding
+    indexes_binding: StorageBinding
+    config_changes: Any  # LedgerProjectManifest or LedgerLocalOverrides
 
 
 @dataclass(frozen=True, slots=True)
@@ -954,15 +973,6 @@ def plan_releaseledger_layout_migration(
             data={"tool": TOOL_NAME},
         )
 
-    # For legacy migration, we need to load the project first
-    if layout is None and source_data_root is not None:
-        # This shouldn't happen in normal flow
-        raise LaunchError(
-            "layout is required when source_data_root is provided",
-            code=CODE_CONFIG_ERROR,
-            exit_code=2,
-        )
-
     if layout is None:
         raise LaunchError(
             "layout is required",
@@ -986,11 +996,7 @@ def plan_releaseledger_layout_migration(
             TOOL_NAME,
             cache_strategy="rebuild",
         )
-
-        # Store the source_data_root for verification
-        if source_data_root is not None:
-            plan._releaseledger_source_data_root = source_data_root
-
+        # Do not mutate the frozen dataclass.
         return plan
     except LedgerCoreError as exc:
         raise _map_ledgercore_error(
@@ -1000,81 +1006,242 @@ def plan_releaseledger_layout_migration(
         ) from exc
 
 
-def assert_plan_source(
-    plan: Any,
-    expected: Path,
-) -> None:
-    """Assert that the migration plan uses the expected source."""
-    # Check if the plan has our custom source marker
-    source = getattr(plan, "_releaseledger_source_data_root", None)
-    if source is None:
-        # For backward compatibility, don't fail if marker is missing
-        return
-    if Path(source).resolve() != expected.resolve():
-        raise LaunchError(
-            f"Migration plan source {source} != expected {expected}",
-            code=CODE_VALIDATION_ERROR,
-            exit_code=2,
-            data={"plan_source": str(source), "expected": str(expected)},
-        )
+def build_releaseledger_legacy_migration_plan(
+    *,
+    prepared_target: PreparedReleaseledgerTarget,
+    staged_data_root: Path,
+    staged_config_path: Path,
+    project_uuid: str,
+) -> Any:
+    """Build an immutable StorageMigrationPlan from a staged legacy source.
+
+    Constructs a real ledgercore StorageMigrationPlan whose data item
+    source is the staged data root and destination is the prepared
+    canonical target. The plan is built manually (not via the generic
+    planner) so the source is always the stage, never the current
+    canonical data mount.
+    """
+    import uuid
+
+    from ledgercore.migration import StorageMigrationItem, StorageMigrationPlan
+
+    migration_id = str(uuid.uuid4())
+
+    # Config item: copy the transformed config from stage to canonical
+    config_item = StorageMigrationItem(
+        component="config",
+        tool_name=TOOL_NAME,
+        mount_name="config",
+        source=staged_config_path,
+        destination=prepared_target.config_path,
+        source_binding=prepared_target.config_binding,
+        destination_binding=prepared_target.config_binding,
+        strategy="copy",  # type: ignore[arg-type]
+    )
+
+    # Data item: copy staged data to canonical data mount
+    data_item = StorageMigrationItem(
+        component="mount",
+        tool_name=TOOL_NAME,
+        mount_name=DATA_MOUNT,
+        source=staged_data_root,
+        destination=prepared_target.data_root,
+        source_binding=prepared_target.data_binding,
+        destination_binding=prepared_target.data_binding,
+        strategy="copy",  # type: ignore[arg-type]
+    )
+
+    # Indexes item: rebuild at destination
+    indexes_item = StorageMigrationItem(
+        component="mount",
+        tool_name=TOOL_NAME,
+        mount_name=INDEXES_MOUNT,
+        source=staged_data_root,
+        destination=prepared_target.indexes_root,
+        source_binding=prepared_target.data_binding,
+        destination_binding=prepared_target.indexes_binding,
+        strategy="rebuild",  # type: ignore[arg-type]
+    )
+
+    plan = StorageMigrationPlan(
+        migration_id=migration_id,
+        project_uuid=project_uuid,
+        items=(config_item, data_item, indexes_item),
+        config_changes=prepared_target.config_changes,
+        warnings=(),
+    )
+
+    return plan
 
 
-def prepare_releaseledger_migration_target(
+def prepare_legacy_migration_target(
     workspace_root: Path,
     *,
-    data_storage: str,
-    external_root: str | None,
-    target: str,
-) -> dict[str, object]:
-    """Prepare the migration target configuration without activating it.
+    project_name: str | None = None,
+    data_storage: str = "project",
+    external_root: str | None = None,
+    target: str = "project",
+) -> PreparedReleaseledgerTarget:
+    """Prepare the migration target without writing any files.
 
-    Returns a dict with the prepared target information.
+    Reads existing canonical files if they exist but never writes.
+    Returns a PreparedReleaseledgerTarget with all computed paths
+    and bindings needed to build the migration plan.
     """
+    import uuid as _uuid
+
     project_root = Path(workspace_root).resolve()
     manifest_path = project_root / ".ledger" / "ledger.toml"
 
-    # Calculate where the target data would go
-    if data_storage == "project":
-        data_root = project_root / ".ledger" / "releaseledger" / "data"
-    elif data_storage == "external" and external_root:
-        data_root = Path(external_root).resolve() / "releaseledger" / "data"
+    # Resolve project identity from existing manifest or generate new
+    if manifest_path.is_file():
+        document = _ledgercore_read_ledger_manifest(manifest_path)
+        if isinstance(document, LedgerProjectManifest):
+            resolved_uuid = document.project_uuid
+            resolved_name = document.project_name or project_name
+        else:
+            resolved_uuid = str(_uuid.uuid4())
+            resolved_name = project_name
     else:
-        # user-data
-        ns = _user_namespace()
-        data_root = ns.user_data / TOOL_NAME / "data"
+        resolved_uuid = str(_uuid.uuid4())
+        resolved_name = project_name
 
-    indexes_root = project_root / ".ledger" / "releaseledger" / "indexes"
+    # Reject --target local when no base manifest exists
+    if target == "local" and not manifest_path.is_file():
+        raise LaunchError(
+            "--target local requires an existing schema-3 project manifest. "
+            "Use --target project for legacy bootstrap or create a project first.",
+            code=CODE_CONFIG_ERROR,
+            exit_code=2,
+            remediation=[
+                "Run `releaseledger init` to create a schema-3 project.",
+                "Or use `--target project` for legacy migration.",
+            ],
+        )
+
+    # Compute mount paths
+    if data_storage == "project":
+        data_root = derive_project_mount_path(project_root, TOOL_NAME, DATA_MOUNT)
+    elif data_storage == "external" and external_root:
+        data_root = derive_external_mount_path(
+            external_root,
+            TOOL_NAME,
+            resolved_uuid,
+            DATA_MOUNT,
+            project_root=project_root,
+        )
+    elif data_storage == "user-data":
+        ns = _user_namespace()
+        data_root = derive_user_data_mount_path(
+            ns.user_data, TOOL_NAME, resolved_uuid, DATA_MOUNT
+        )
+    else:
+        data_root = derive_project_mount_path(project_root, TOOL_NAME, DATA_MOUNT)
+
+    checkout_id = _derive_checkout_id(project_root)
+    ns = _user_namespace()
+    indexes_root = derive_cache_mount_path(
+        ns.user_cache, TOOL_NAME, resolved_uuid, checkout_id, INDEXES_MOUNT
+    )
     config_path = derive_tool_config_path(project_root, TOOL_NAME)
 
-    return {
-        "project_root": str(project_root),
-        "data_root": str(data_root),
-        "indexes_root": str(indexes_root),
-        "config_path": str(config_path),
-        "manifest_path": str(manifest_path),
-        "data_storage": data_storage,
-        "target": target,
-    }
+    # Build expected bindings (pure — no writes)
+    config_binding = _expected_binding(
+        project_uuid=resolved_uuid,
+        project_name=resolved_name,
+        tool=TOOL_NAME,
+        mount="config",
+        storage="project",
+    )
+    data_binding = _expected_binding(
+        project_uuid=resolved_uuid,
+        project_name=resolved_name,
+        tool=TOOL_NAME,
+        mount=DATA_MOUNT,
+        storage=data_storage,
+    )
+    indexes_binding = _expected_binding(
+        project_uuid=resolved_uuid,
+        project_name=resolved_name,
+        tool=TOOL_NAME,
+        mount=INDEXES_MOUNT,
+        storage="cache",
+    )
+
+    # Build config_changes for activation after data copy
+    # For project target: full manifest (creates .ledger/ledger.toml)
+    # For local target: local overrides (creates .ledger/ledger.local.toml)
+    if target == "project":
+        from ledgercore.manifest import MountOverride
+
+        registration = LedgerRegistration(
+            name=TOOL_NAME,
+            mounts={
+                DATA_MOUNT: MountDefinition(
+                    name=DATA_MOUNT,
+                    storage=cast(StorageKind, data_storage),
+                    external_root=external_root,
+                ),
+                INDEXES_MOUNT: MountDefinition(
+                    name=INDEXES_MOUNT,
+                    storage="cache",
+                    external_root=None,
+                ),
+            },
+        )
+        config_changes = LedgerProjectManifest(
+            schema_version=3,
+            project_uuid=resolved_uuid,
+            project_name=resolved_name,
+            ledgers={TOOL_NAME: registration},
+        )
+    else:
+        overrides = LedgerLocalOverrides(
+            schema_version=3,
+            ledgers={
+                TOOL_NAME: {
+                    DATA_MOUNT: MountOverride(
+                        storage=cast(StorageKind, data_storage),
+                        external_root=external_root,
+                    )
+                }
+            },
+        )
+        config_changes = overrides
+
+    return PreparedReleaseledgerTarget(
+        project_root=project_root,
+        project_uuid=resolved_uuid,
+        project_name=resolved_name,
+        config_path=config_path,
+        data_root=data_root,
+        indexes_root=indexes_root,
+        config_binding=config_binding,
+        data_binding=data_binding,
+        indexes_binding=indexes_binding,
+        config_changes=config_changes,
+    )
 
 
 def execute_releaseledger_layout_migration(
     plan: Any,
     *,
-    mode: str,
-    quiescence_check: Callable[[], None],
-    staged_domain_transform: Callable[[Path], None] | None = None,
+    mode: str = "copy",
+    verify: str = "sha256",
+    quiescence_check: Callable[[], None] | None = None,
+    project_root: Path | None = None,
 ) -> Any:
     """Run a Releaseledger migration plan through :mod:`ledgercore.migration`.
 
-    ``quiescence_check`` is invoked immediately before copy and again
-    before any activation step. ``staged_domain_transform`` receives the
-    staging path so the Releaseledger domain can rebuild indexes there
-    before activation.
+    Uses only the ledgercore 0.5.0 executor contract. Does not pass
+    ``staged_transform``, which is not in the declared minimum version.
     """
 
     from ledgercore.migration import execute_storage_migration
 
     def _safe_check() -> None:
+        if quiescence_check is None:
+            return
         try:
             quiescence_check()
         except Exception as exc:  # pragma: no cover - domain-defined
@@ -1086,15 +1253,24 @@ def execute_releaseledger_layout_migration(
             ) from exc
 
     try:
-        return execute_storage_migration(
-            plan,
-            mode=mode,
-            quiescence_check=_safe_check,
-            staged_transform=staged_domain_transform,
-        )
+        kwargs: dict[str, object] = {
+            "mode": mode,
+            "verify": verify,
+            "quiescence_check": _safe_check,
+        }
+        if project_root is not None:
+            kwargs["project_root"] = project_root
+        return execute_storage_migration(plan, **kwargs)  # type: ignore[arg-type]
     except LedgerCoreError as exc:
         raise _map_ledgercore_error(
             exc,
             code=CODE_CONFIG_ERROR,
             extra_data={"mode": mode},
+        ) from exc
+    except (OSError, ValueError) as exc:
+        raise LaunchError(
+            "storage migration execution failed",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+            data={"mode": mode},
         ) from exc
