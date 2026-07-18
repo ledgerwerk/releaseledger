@@ -28,6 +28,9 @@ def isolated_user_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     # platformdirs on macOS uses these; set on every platform for safety.
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    # Windows platformdirs ignores XDG vars; override the actual env vars.
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
 
 
 def _write_schema3_manifest(
@@ -101,7 +104,7 @@ def test_schema3_project_storage(tmp_path: Path, isolated_user_roots: None) -> N
     assert layout.data_storage == "project"
     assert layout.data_source == "manifest"
     assert layout.indexes_root.name == "indexes"
-    assert layout.indexes_root.parts[-5] == "ledgerwerk"
+    assert "ledgerwerk" in layout.indexes_root.parts
     assert layout.checkout_id.startswith("proj-")
     assert layout.validation_report is not None
     assert layout.validation_report.valid is True
@@ -147,7 +150,8 @@ def test_user_data_storage(tmp_path: Path, isolated_user_roots: None) -> None:
     proj.mkdir()
     _write_schema3_manifest(proj, data_storage="user-data")
     layout = _load_layout(proj)
-    assert str(layout.data_root).startswith(str(tmp_path / "data" / "ledgerwerk"))
+    assert "ledgerwerk" in layout.data_root.parts
+    assert layout.data_root.is_relative_to(tmp_path)
 
 
 def test_cache_indexes_mount(tmp_path: Path, isolated_user_roots: None) -> None:

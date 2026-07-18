@@ -136,10 +136,9 @@ class TestPhase2ConfigLayout:
     def test_init_human_output_mentions_config_and_dir(self, tmp_path: Path) -> None:
         result = runner.invoke(app, ["--cwd", str(tmp_path), "init"])
         assert result.exit_code == 0, result.stdout
-        assert (
-            "initialized releaseledger in .ledger/releaseledger/data" in result.stdout
-        )
-        assert "wrote .ledger/ledger.toml" in result.stdout
+        normalized = result.stdout.replace("\\\\", "/")
+        assert "initialized releaseledger in .ledger/releaseledger/data" in normalized
+        assert "wrote .ledger/ledger.toml" in normalized
 
     def test_init_refuses_overwrite_without_force(self, tmp_path: Path) -> None:
         _init_project(tmp_path)
@@ -205,7 +204,11 @@ class TestPhase2ConfigLayout:
         assert payload["ok"] is True
         assert payload["command"] == "init"
         assert payload["result_type"] == "project_init"
-        assert payload["result"]["data_root"].endswith(".ledger/releaseledger/data")
+        assert (
+            Path(payload["result"]["data_root"])
+            .as_posix()
+            .endswith(".ledger/releaseledger/data")
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,9 @@ from releaseledger.storage import paths
 def isolated_user_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    # Windows platformdirs ignores XDG vars; override the actual env vars.
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
 
 
 def _init(tmp_path: Path) -> Path:
@@ -32,7 +35,7 @@ def test_initialize_project_creates_schema3_layout(
     assert (proj / ".ledger" / "ledger.toml").is_file()
     assert (proj / ".ledger" / "releaseledger" / "config.toml").is_file()
     assert result["config_version"] == 2
-    assert result["data_root"].endswith(".ledger/releaseledger/data")
+    assert Path(result["data_root"]).as_posix().endswith(".ledger/releaseledger/data")
     assert "indexes" in result["indexes_root"]
 
 
