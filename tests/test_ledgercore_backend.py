@@ -131,7 +131,9 @@ def test_external_storage_with_root(tmp_path: Path, isolated_user_roots: None) -
     proj.mkdir()
     external = tmp_path / "ledger"
     external.mkdir()
-    (external / ".ledger-store.toml").write_text("")
+    (external / ".ledger-store.toml").write_text(
+        'schema_version = 1\nkind = "ledgerwerk-store"\n'
+    )
     _write_schema3_manifest(proj, data_storage="external", external_root="../ledger")
     layout = _load_layout(proj)
     assert layout.data_storage == "external"

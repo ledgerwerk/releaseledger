@@ -540,7 +540,9 @@ def load_releaseledger_ledger_layout(
         if data_mount.storage == "external" and data_mount.external_root:
             try:
                 validate_external_store(
-                    Path(os.path.expanduser(data_mount.external_root)),
+                    (
+                        project_root / os.path.expanduser(data_mount.external_root)
+                    ).resolve(),
                     allow_legacy=True,
                 )
             except StorageBindingError as exc:
