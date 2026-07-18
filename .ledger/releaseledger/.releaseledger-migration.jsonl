@@ -1,0 +1,6 @@
+{"phase": "staging", "migration_id": "7fda504e-1ba7-4e65-8161-2d351409e3c1", "legacy_data_root": "/home/nahrstaedt/src/odoo17/releaseledger/.releaseledger", "target_data_root": "/home/nahrstaedt/src/odoo17/releaseledger/.ledger/releaseledger/data"}
+{"phase": "ledgercore-executing", "migration_id": "7fda504e-1ba7-4e65-8161-2d351409e3c1"}
+{"phase": "canonical-activated", "migration_id": "7fda504e-1ba7-4e65-8161-2d351409e3c1"}
+{"phase": "indexes-rebuilt", "migration_id": "7fda504e-1ba7-4e65-8161-2d351409e3c1"}
+{"phase": "domain-verified", "migration_id": "7fda504e-1ba7-4e65-8161-2d351409e3c1"}
+{"phase": "complete", "migration_id": "7fda504e-1ba7-4e65-8161-2d351409e3c1"}

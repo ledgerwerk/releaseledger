@@ -1,0 +1,120 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: 0.3.1
+git_base_ref: v0.3.0
+git_base_sha: 74af7915464dccbc42cad39c10f2423e7cd7ccaf
+git_head_ref: HEAD
+git_head_sha: 200ede51c55086126ae7ea33d9e2004da6ded1c0
+git_range: 74af7915464dccbc42cad39c10f2423e7cd7ccaf..200ede51c55086126ae7ea33d9e2004da6ded1c0
+commit_count: 3
+rows:
+  - sha: efa0d2401d66242e20ede1ec5bfef43e8e601798
+    source_ref: git:efa0d2401d66242e20ede1ec5bfef43e8e601798
+    short_sha: efa0d24
+    changed_paths:
+      - .releaseledger/ledgers/main/events/events.jsonl
+      - .releaseledger/ledgers/main/indexes/entries.json
+      - .releaseledger/ledgers/main/indexes/releases.json
+      - .releaseledger/ledgers/main/releases/0.3.0/release.md
+      - ARCHITECTURE.md
+    stats:
+      files_changed: 0
+      insertions: 257
+      deletions: 249
+    inspected: true
+    inspected_paths:
+      - CHANGELOG.md
+      - ARCHITECTURE.md
+      - .releaseledger/ledgers/main/events/events.jsonl
+      - .releaseledger/ledgers/main/indexes/entries.json
+      - .releaseledger/ledgers/main/indexes/releases.json
+      - .releaseledger/ledgers/main/releases/0.3.0/release.md
+    observed_behavior:
+      Documentation-only changes to CHANGELOG.md and ARCHITECTURE.md
+      for v0.3.0 release metadata; no user-facing behavior change
+    public_impact: none
+    decision: internal
+    evidence_subject: "doc: update changelog"
+    target_entry_id: entry-0006
+  - sha: ffe9d5578a84fb171f22b2ad385e502f178a176d
+    source_ref: git:ffe9d5578a84fb171f22b2ad385e502f178a176d
+    short_sha: ffe9d55
+    changed_paths:
+      - .archledger/profiles/arc42/sections/content-0008.md
+      - .archledger/profiles/arc42/sections/content-0009.md
+      - .archledger/profiles/arc42/sections/content-0010.md
+      - .taskledger.toml
+      - ARCHITECTURE.md
+      - README.md
+      - docs/changelog.rst
+      - docs/commands.rst
+      - docs/concepts.rst
+      - releaseledger/api/audit.py
+      - releaseledger/api/changelog.py
+      - releaseledger/cli.py
+      - releaseledger/domain/audit.py
+      - releaseledger/services/audit.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/review.py
+      - releaseledger/storage/store.py
+      - skills/releaseledger/SKILL.md
+      - tests/test_changelog_full_build.py
+      - tests/test_commit_audit.py
+      - tests/test_commit_audit_cli.py
+      - tests/test_git_review.py
+    stats:
+      files_changed: 0
+      insertions: 3609
+      deletions: 37
+    inspected: true
+    inspected_paths:
+      - releaseledger/domain/audit.py
+      - releaseledger/services/audit.py
+      - releaseledger/api/audit.py
+      - releaseledger/cli.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/api/changelog.py
+      - releaseledger/services/review.py
+      - releaseledger/storage/store.py
+    observed_behavior:
+      Added commit audit sheet domain model, service layer with create/update/render/validate/sync,
+      public API re-exports, CLI audit subcommands (init/show/update/validate/sync),
+      full changelog rebuild via build --all, entry add-many --guard-commit-subjects,
+      review --require-audit-sheet, and comprehensive test coverage
+    public_impact: public
+    decision: accepted
+    evidence_subject: "feat: per commit workshets and better build command"
+    target_entry_id: entry-0001
+  - sha: 200ede51c55086126ae7ea33d9e2004da6ded1c0
+    source_ref: git:200ede51c55086126ae7ea33d9e2004da6ded1c0
+    short_sha: 200ede5
+    changed_paths:
+      - pyproject.toml
+      - releaseledger/domain/audit.py
+      - releaseledger/services/audit.py
+      - tests/test_changelog_full_build.py
+      - tests/test_commit_audit.py
+      - tests/test_commit_audit_cli.py
+    stats:
+      files_changed: 0
+      insertions: 86
+      deletions: 115
+    inspected: true
+    inspected_paths:
+      - pyproject.toml
+      - releaseledger/domain/audit.py
+      - releaseledger/services/audit.py
+      - tests/test_changelog_full_build.py
+      - tests/test_commit_audit.py
+      - tests/test_commit_audit_cli.py
+    observed_behavior:
+      Project URLs migrated to ledgerwerk GitHub organization; code
+      formatting and lint fixes applied by pre-commit hooks to audit domain, services,
+      and test modules
+    public_impact: internal
+    decision: grouped
+    evidence_subject: "chore: pre-commit"
+    target_entry_id: entry-0005

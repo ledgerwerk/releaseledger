@@ -1,0 +1,170 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 4
+release_version: 0.3.4
+git_base_ref: v0.3.3
+git_base_sha: e05e25e5c49d6efc118dd4bac7134d80e90dcb7d
+git_head_ref: HEAD
+git_head_sha: 9f64538a27b5bdd309444c5670a60ded1502d0c4
+git_range: e05e25e5c49d6efc118dd4bac7134d80e90dcb7d..9f64538a27b5bdd309444c5670a60ded1502d0c4
+commit_count: 4
+rows:
+  - sha: 37c5af72e73e7f71864072c15a9e09e7410781ca
+    source_ref: git:37c5af72e73e7f71864072c15a9e09e7410781ca
+    short_sha: 37c5af7
+    changed_paths:
+      - .releaseledger/ledgers/main/events/events.jsonl
+      - .releaseledger/ledgers/main/indexes/entries.json
+      - .releaseledger/ledgers/main/indexes/releases.json
+      - .releaseledger/ledgers/main/releases/0.3.3/entries/entry-0001.md
+      - .releaseledger/ledgers/main/releases/0.3.3/entries/entry-0002.md
+      - .releaseledger/ledgers/main/releases/0.3.3/entries/entry-0003.md
+      - .releaseledger/ledgers/main/releases/0.3.3/release.md
+      - CHANGELOG.md
+    stats:
+      files_changed: 0
+      insertions: 209
+      deletions: 0
+    inspected: true
+    inspected_paths:
+      - .releaseledger/ledgers/main/releases/0.3.3/entries/entry-0001.md
+      - .releaseledger/ledgers/main/releases/0.3.3/entries/entry-0002.md
+      - .releaseledger/ledgers/main/releases/0.3.3/entries/entry-0003.md
+      - .releaseledger/ledgers/main/releases/0.3.3/release.md
+      - CHANGELOG.md
+    observed_behavior:
+      Backfilled v0.3.3 release entries and CHANGELOG.md section; ledger
+      bookkeeping for the prior release.
+    public_impact: internal
+    decision: internal
+    evidence_subject: "doc: update changelog"
+    target_entry_id: entry-0002
+    notes:
+      No user-facing change; the commit ships entries and indexes for the v0.3.3
+      release that is already tagged.
+  - sha: e1ed352bb1276209ed0a52fd1295139fc04f5f5d
+    source_ref: git:e1ed352bb1276209ed0a52fd1295139fc04f5f5d
+    short_sha: e1ed352
+    changed_paths:
+      - .taskledger.toml
+      - README.md
+      - docs/changelog.md
+      - docs/commands.md
+      - docs/concepts.md
+      - docs/quickstart.md
+      - releaseledger/cli.py
+      - releaseledger/services/audit.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/entries.py
+      - releaseledger/services/entry_lint.py
+      - releaseledger/services/git_sources.py
+      - releaseledger/services/releases.py
+      - releaseledger/services/review.py
+      - releaseledger/storage/store.py
+      - skills/releaseledger/SKILL.md
+      - tests/test_commit_audit.py
+      - tests/test_commit_audit_cli.py
+      - tests/test_entry_atomicity.py
+      - tests/test_git_cli.py
+      - tests/test_git_review.py
+      - tests/test_release_review.py
+      - tests/test_releaseledger_skill_protocol.py
+    stats:
+      files_changed: 0
+      insertions: 2661
+      deletions: 518
+    inspected: true
+    inspected_paths:
+      - releaseledger/cli.py
+      - releaseledger/services/audit.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/entries.py
+      - releaseledger/services/entry_lint.py
+      - releaseledger/services/git_sources.py
+      - releaseledger/services/releases.py
+      - releaseledger/services/review.py
+      - releaseledger/storage/store.py
+      - README.md
+      - docs/changelog.md
+      - docs/commands.md
+      - docs/concepts.md
+      - docs/quickstart.md
+      - skills/releaseledger/SKILL.md
+    observed_behavior:
+      Introduced release prepare and release check commands, split
+      audit validation into evidence and complete phases, added release snapshot drift
+      detection, added entry batch duplicate detection and coverage projection, and
+      rewrote the releaseledger skill with the new workflow.
+    public_impact: public
+    decision: grouped
+    evidence_subject: "feat: improve commands and skill"
+    target_entry_id: entry-0001
+    notes:
+      Source of the new user-facing release prepare and release check commands
+      and the audit phase split; grouped into multiple user-facing entries.
+  - sha: 803098570c7407aaf84cd8f8a5e4f93f1e331da0
+    source_ref: git:803098570c7407aaf84cd8f8a5e4f93f1e331da0
+    short_sha: "8030985"
+    changed_paths:
+      - tests/test_removed_features.py
+    stats:
+      files_changed: 0
+      insertions: 6
+      deletions: 2
+    inspected: true
+    inspected_paths:
+      - tests/test_removed_features.py
+    observed_behavior:
+      Updated tests/test_removed_features.py to expect the additional
+      no_accepted_entries warning emitted by the refactored entry lint.
+    public_impact: internal
+    decision: internal
+    evidence_subject: "fix: fix unit test"
+    target_entry_id: entry-0003
+    notes:
+      Test-only update that aligns with the entry lint refactor in e1ed352; no
+      user-visible behavior change.
+  - sha: 9f64538a27b5bdd309444c5670a60ded1502d0c4
+    source_ref: git:9f64538a27b5bdd309444c5670a60ded1502d0c4
+    short_sha: 9f64538
+    changed_paths:
+      - releaseledger/cli.py
+      - releaseledger/services/audit.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/entries.py
+      - releaseledger/services/entry_lint.py
+      - releaseledger/services/git_sources.py
+      - releaseledger/services/releases.py
+      - releaseledger/services/review.py
+      - releaseledger/storage/config.py
+      - releaseledger/storage/store.py
+      - tests/test_commit_audit_cli.py
+      - tests/test_entry_atomicity.py
+      - tests/test_release_review.py
+      - tests/test_releaseledger_skill_protocol.py
+    stats:
+      files_changed: 0
+      insertions: 322
+      deletions: 187
+    inspected: true
+    inspected_paths:
+      - releaseledger/cli.py
+      - releaseledger/services/audit.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/entries.py
+      - releaseledger/services/entry_lint.py
+      - releaseledger/services/git_sources.py
+      - releaseledger/services/releases.py
+      - releaseledger/services/review.py
+      - releaseledger/storage/config.py
+      - releaseledger/storage/store.py
+    observed_behavior:
+      Resolved mypy findings and pre-commit formatting across the releaseledger
+      services and tests after the e1ed352 refactor.
+    public_impact: internal
+    decision: internal
+    evidence_subject: "chore: fix mypy and pre-commit"
+    target_entry_id: entry-0004
+    notes: Type-checking and style cleanup; no public API or behavior change.

@@ -1,0 +1,4 @@
+schema_version = 3
+
+[ledgers.releaseledger.mounts.data]
+storage = "project"
