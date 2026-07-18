@@ -11,7 +11,9 @@ from releaseledger.storage.paths import ensure_canonical_project
 from releaseledger.storage.store import load_entries, load_release
 
 
-def test_delete_rejected_entry_updates_release_and_supports_dry_run(tmp_path: Path) -> None:
+def test_delete_rejected_entry_updates_release_and_supports_dry_run(
+    tmp_path: Path,
+) -> None:
     ensure_canonical_project(tmp_path)
     create_release(tmp_path, version="1.0.0")
     add_release_entry(

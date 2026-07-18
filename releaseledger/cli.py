@@ -678,13 +678,15 @@ def release_reconcile_command(
     ctx: typer.Context,
     strict: Annotated[
         bool,
-        typer.Option("--strict", help="Exit non-zero when reconciliation finds problems."),
+        typer.Option(
+            "--strict", help="Exit non-zero when reconciliation finds problems."
+        ),
     ] = False,
     target_file: Annotated[
         Path | None,
         typer.Option("--target-file", help="CHANGELOG file to inspect."),
     ] = None,
- ) -> None:
+) -> None:
     """Compare release records with Git tags and changelog headings."""
     state = cli_state_from_context(ctx)
 
@@ -952,7 +954,7 @@ def release_chain_check_command(
         bool,
         typer.Option("--strict", help="Exit non-zero when chain health fails."),
     ] = False,
- ) -> None:
+) -> None:
     """Report problems in the release predecessor chain."""
     state = cli_state_from_context(ctx)
 
@@ -1229,7 +1231,7 @@ def entry_delete_command(
         typer.Option("--detach-audit", help="Detach audit rows targeting the entry."),
     ] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
- ) -> None:
+) -> None:
     """Delete a release entry with lifecycle and audit safety checks."""
     state = cli_state_from_context(ctx)
 

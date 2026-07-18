@@ -42,12 +42,12 @@ rebuilds the **complete** target file from ledger state:
 - Manual Unreleased content (without `<!-- releaseledger:unreleased-start`
   markers) is always preserved by default.
 
-
 ## Provenance and canceled releases
 
 `source_refs` identifies the one coverage owner for a commit or other coverable change identity. `sources` records supporting provenance for additional entries describing the same commit. Supporting entries render as normal bullets and are not orphans, while duplicate `source_refs` ownership is rejected with remediation to move the reference to `sources`.
 
 A full build excludes canceled releases. A single-release build rejects a canceled version unless `--include-canceled` is explicitly used for archival/debug output.
+
 ## Group modes
 
 Entry kinds are grouped for rendering. The mode is set by

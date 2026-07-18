@@ -126,9 +126,13 @@ def _validate_date(value: str, field_name: str) -> str:
 def _predecessor_key(
     version: str | None,
     released_at: str | None,
- ) -> tuple[str, tuple[int, int, int] | None, str]:
+) -> tuple[str, tuple[int, int, int] | None, str]:
     """Return the legacy deterministic key used for display ordering."""
-    return (released_at or "", parse_release_version_tuple(version or ""), version or "")
+    return (
+        released_at or "",
+        parse_release_version_tuple(version or ""),
+        version or "",
+    )
 
 
 def _compare_release_order(
@@ -136,7 +140,7 @@ def _compare_release_order(
     predecessor_released_at: str | None,
     record_version: str,
     record_released_at: str | None,
- ) -> tuple[int | None, str]:
+) -> tuple[int | None, str]:
     """Compare two release records using a meaningful shared ordering basis."""
     if predecessor_released_at and record_released_at:
         if predecessor_released_at != record_released_at:
@@ -169,7 +173,7 @@ def _compare_release_order(
 def _is_strictly_newer(
     candidate_key: tuple[str, tuple[int, int, int] | None, str],
     reference_key: tuple[str, tuple[int, int, int] | None, str],
- ) -> bool:
+) -> bool:
     """Compatibility helper for callers using the old tuple key."""
     cand_date, cand_semver, cand_ver = candidate_key
     ref_date, ref_semver, ref_ver = reference_key
@@ -956,7 +960,7 @@ def cancel_release(
     remove_changelog_section: bool = False,
     ignore_missing_section: bool = False,
     dry_run: bool = False,
- ) -> dict[str, object]:
+) -> dict[str, object]:
     """Cancel an unshipped release without leaving invalid successor links."""
     existing = load_release(workspace_root, version)
     if existing.status == "canceled":
@@ -1000,7 +1004,11 @@ def cancel_release(
         else:
             successor_target = existing.previous_version
             target_record = next(
-                (r for r in list_releases(workspace_root) if r.version == successor_target),
+                (
+                    r
+                    for r in list_releases(workspace_root)
+                    if r.version == successor_target
+                ),
                 None,
             )
             if target_record is None or target_record.status == "canceled":
@@ -1051,7 +1059,8 @@ def cancel_release(
         )
         changelog_result = {
             "target_file": str(changelog_target),
-            "section_removed": find_release_section(changelog_before, version) is not None,
+            "section_removed": find_release_section(changelog_before, version)
+            is not None,
             "updated": not dry_run,
         }
     canceled = replace(
@@ -1084,7 +1093,9 @@ def cancel_release(
             versioning=bump_versioning(successor.versioning),
         )
         save_release(workspace_root, updated_successor, overwrite=True)
-        record_revisions[f"release:{successor.version}"] = updated_successor.versioning.revision
+        record_revisions[f"release:{successor.version}"] = (
+            updated_successor.versioning.revision
+        )
     if changelog_target is not None and changelog_updated is not None:
         ledgercore.ensure_dir(changelog_target.parent)
         ledgercore.atomic_write_text(changelog_target, changelog_updated)
@@ -1264,7 +1275,7 @@ def reconcile_releases(
     workspace_root: Path,
     *,
     changelog_file: Path | None = None,
- ) -> dict[str, object]:
+) -> dict[str, object]:
     """Compare release records, Git tags, and changelog headings read-only."""
     records = list_releases(workspace_root)
     by_version = {record.version: record for record in records}
@@ -1310,7 +1321,9 @@ def reconcile_releases(
         if heading.lower() == "unreleased":
             continue
         line_end = changelog_text.find("\n", match.start())
-        line = changelog_text[match.start() : line_end if line_end >= 0 else len(changelog_text)]
+        line = changelog_text[
+            match.start() : line_end if line_end >= 0 else len(changelog_text)
+        ]
         headings.setdefault(heading, []).append(line)
     problems: list[dict[str, object]] = []
     for version, tags in sorted(tags_by_version.items()):
@@ -1325,27 +1338,49 @@ def reconcile_releases(
     for version in sorted(headings):
         if version not in by_version:
             problems.append(
-                {"kind": "changelog_without_release", "version": version, "target_file": str(target)}
+                {
+                    "kind": "changelog_without_release",
+                    "version": version,
+                    "target_file": str(target),
+                }
             )
     for record in records:
         tags = tags_by_version.get(record.version, [])
         has_heading = bool(headings.get(record.version))
         if record.status in {"planned", "draft", "candidate"} and tags:
             problems.append(
-                {"kind": "planned_with_tag", "version": record.version, "status": record.status, "tags": tags}
+                {
+                    "kind": "planned_with_tag",
+                    "version": record.version,
+                    "status": record.status,
+                    "tags": tags,
+                }
             )
         if record.status == "released":
             if not tags and git_result.returncode == 0:
-                problems.append({"kind": "release_without_tag", "version": record.version})
+                problems.append(
+                    {"kind": "release_without_tag", "version": record.version}
+                )
             if record.released_at is None:
-                problems.append({"kind": "released_without_date", "version": record.version})
+                problems.append(
+                    {"kind": "released_without_date", "version": record.version}
+                )
             if target.is_file() and not has_heading:
-                problems.append({"kind": "released_without_changelog", "version": record.version})
+                problems.append(
+                    {"kind": "released_without_changelog", "version": record.version}
+                )
         if record.status == "canceled":
             if has_heading:
-                problems.append({"kind": "canceled_with_changelog", "version": record.version})
+                problems.append(
+                    {"kind": "canceled_with_changelog", "version": record.version}
+                )
             if any(r.previous_version == record.version for r in records):
-                problems.append({"kind": "canceled_with_successor_reference", "version": record.version})
+                problems.append(
+                    {
+                        "kind": "canceled_with_successor_reference",
+                        "version": record.version,
+                    }
+                )
         if has_heading and record.released_at:
             heading = headings[record.version][0]
             heading_date = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", heading)
@@ -1395,7 +1430,9 @@ def reconcile_releases(
         "problem_count": len(problems),
         "problems": problems,
         "release_versions": sorted(by_version),
-        "tags": {version: sorted(tags) for version, tags in sorted(tags_by_version.items())},
+        "tags": {
+            version: sorted(tags) for version, tags in sorted(tags_by_version.items())
+        },
         "tag_dates": dict(sorted(tag_dates.items())),
         "changelog_file": str(target),
         "changelog_versions": sorted(headings),
@@ -1406,7 +1443,7 @@ def check_release_chain(
     workspace_root: Path,
     *,
     allow_canceled_predecessors: bool = False,
- ) -> dict[str, object]:
+) -> dict[str, object]:
     """Inspect release predecessor links and return deterministic health data."""
     releases = list_releases(workspace_root)
     by_version = {record.version: record for record in releases}

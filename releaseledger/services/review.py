@@ -506,13 +506,12 @@ def build_release_review(
     }
     if git_block is not None:
         checks["git_coverage_ok"] = git_coverage_ok
-    ok = coverage_ok and lint_ok and (
-        not strict
-        or (
-            changelog_ok
-            and release_state_ok
-            and chain_ok
-            and reconciliation_ok
+    ok = (
+        coverage_ok
+        and lint_ok
+        and (
+            not strict
+            or (changelog_ok and release_state_ok and chain_ok and reconciliation_ok)
         )
     )
     if strict and git_block is not None:
@@ -535,9 +534,13 @@ def build_release_review(
             f" but status={release.status}."
         )
     if not chain_ok:
-        recommendations.append("Repair the release predecessor chain before finalization.")
+        recommendations.append(
+            "Repair the release predecessor chain before finalization."
+        )
     if not reconciliation_ok:
-        recommendations.append("Run release reconcile and resolve release/tag/changelog mismatches.")
+        recommendations.append(
+            "Run release reconcile and resolve release/tag/changelog mismatches."
+        )
 
     result: dict[str, object] = {
         "kind": "release_review",

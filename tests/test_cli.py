@@ -109,38 +109,44 @@ class TestPhase2ConfigLayout:
         result = runner.invoke(app, ["--cwd", str(tmp_path), "init"])
         assert result.exit_code == 0, result.stdout
         assert (tmp_path / ".ledger" / "releaseledger" / "config.toml").is_file()
-        releases = tmp_path / ".releaseledger" / "ledgers" / "main" / "releases"
-        events = tmp_path / ".releaseledger" / "ledgers" / "main" / "events"
-        indexes = tmp_path / ".releaseledger" / "ledgers" / "main" / "indexes"
-        assert releases.is_dir()
-        assert events.is_dir()
-        assert indexes.is_dir()
+        from releaseledger.storage.paths import resolve_project_paths
+
+        paths = resolve_project_paths(tmp_path)
+        assert paths.releases_dir.is_dir()
+        assert paths.events_dir.is_dir()
+        assert paths.indexes_dir.is_dir()
 
     def test_init_creates_empty_json_indexes(self, tmp_path: Path) -> None:
         _init_project(tmp_path)
-        indexes = tmp_path / ".releaseledger" / "ledgers" / "main" / "indexes"
-        assert json.loads((indexes / "releases.json").read_text()) == []
-        assert json.loads((indexes / "entries.json").read_text()) == []
+        from releaseledger.storage.paths import resolve_project_paths
+
+        paths = resolve_project_paths(tmp_path)
+        assert json.loads(paths.releases_index_path.read_text()) == []
+        assert json.loads(paths.entries_index_path.read_text()) == []
 
     def test_init_writes_canonical_config_keys(self, tmp_path: Path) -> None:
         _init_project(tmp_path)
         text = (tmp_path / ".ledger" / "releaseledger" / "config.toml").read_text()
-        assert 'releaseledger_dir = ".releaseledger"' in text
         assert "config_version = 2" in text
-        assert "[ledger]" in text
         assert "[release]" in text
+        assert "[changelog]" in text
+        assert "[git]" in text
+        assert 'ledger_ref = "main"' in text
 
     def test_init_human_output_mentions_config_and_dir(self, tmp_path: Path) -> None:
         result = runner.invoke(app, ["--cwd", str(tmp_path), "init"])
         assert result.exit_code == 0, result.stdout
-        assert "initialized releaseledger in .releaseledger" in result.stdout
+        assert (
+            "initialized releaseledger in .ledger/releaseledger/data" in result.stdout
+        )
         assert "wrote .ledger/ledger.toml" in result.stdout
 
     def test_init_refuses_overwrite_without_force(self, tmp_path: Path) -> None:
         _init_project(tmp_path)
         result = runner.invoke(app, ["--cwd", str(tmp_path), "init"])
-        assert result.exit_code != 0
-        assert "already exists" in _human_error(result)
+        # Schema-3 init is idempotent: re-running returns a summary, not an error.
+        assert result.exit_code == 0, result.stdout
+        assert "initialized releaseledger in" in result.stdout
 
     def test_init_force_overwrites_config(self, tmp_path: Path) -> None:
         _init_project(tmp_path)
@@ -152,26 +158,17 @@ class TestPhase2ConfigLayout:
             app,
             ["--cwd", str(tmp_path), "init", "--releaseledger-dir", ".custom-rl"],
         )
-        assert result.exit_code == 0, result.stdout
-        assert (tmp_path / ".custom-rl" / "ledgers" / "main" / "releases").is_dir()
-        text = (tmp_path / ".ledger" / "releaseledger" / "config.toml").read_text()
-        assert 'releaseledger_dir = ".custom-rl"' in text
+        assert result.exit_code != 0
+        assert "no longer supported" in _human_error(result)
 
     def test_subdirectory_discovers_root(self, tmp_path: Path) -> None:
         _init_project(tmp_path)
         subdir = tmp_path / "src" / "deep"
         subdir.mkdir(parents=True)
-        # A read-only-ish command from a subdir must resolve the same root by
-        # checking that require_project finds the config via the locator.
-        from releaseledger.storage.paths import (
-            discover_workspace_root,
-            find_project_config,
-        )
+        from releaseledger.storage.paths import resolve_project_paths
 
-        config = find_project_config(subdir)
-        assert config is not None
-        assert config.parent == tmp_path.resolve() or config.parent == tmp_path
-        assert discover_workspace_root(subdir).resolve() == tmp_path.resolve()
+        paths = resolve_project_paths(subdir)
+        assert paths.project_root.resolve() == tmp_path.resolve()
 
     def test_require_project_errors_when_uninitialized(self, tmp_path: Path) -> None:
         from releaseledger.errors import LaunchError
@@ -182,8 +179,10 @@ class TestPhase2ConfigLayout:
         assert exc_info.value.code == "NOT_FOUND"
 
     def test_unknown_config_keys_rejected(self, tmp_path: Path) -> None:
+        _init_project(tmp_path)
+        # Corrupt the config with an unknown key.
         (tmp_path / ".ledger" / "releaseledger" / "config.toml").write_text(
-            'bogus_key = true\nreleaseledger_dir = ".releaseledger"\n'
+            "bogus_key = true\n"
         )
         from releaseledger.errors import LaunchError
         from releaseledger.storage.paths import require_project
@@ -199,14 +198,14 @@ class TestPhase2ConfigLayout:
             ["--cwd", str(tmp_path), "init", "--releaseledger-dir", "../escape"],
         )
         assert result.exit_code != 0
-        assert "escapes" in _human_error(result)
+        assert "no longer supported" in _human_error(result)
 
     def test_init_json_envelope(self, tmp_path: Path) -> None:
         payload = _json(runner.invoke(app, ["--cwd", str(tmp_path), "--json", "init"]))
         assert payload["ok"] is True
         assert payload["command"] == "init"
         assert payload["result_type"] == "project_init"
-        assert payload["result"]["releaseledger_dir"].endswith(".releaseledger")
+        assert payload["result"]["data_root"].endswith(".ledger/releaseledger/data")
 
 
 # ---------------------------------------------------------------------------
@@ -219,19 +218,14 @@ class TestPhase3Releases:
         _init_project(tmp_path)
         result = _run(tmp_path, "release", "tag", "1.2.0", "--note", "MVP")
         assert result.exit_code == 0, result.stdout
-        path = (
-            tmp_path
-            / ".releaseledger"
-            / "ledgers"
-            / "main"
-            / "releases"
-            / "1.2.0"
-            / "release.md"
-        )
-        assert path.is_file()
+        from releaseledger.storage.paths import resolve_project_paths
+
+        paths = resolve_project_paths(tmp_path)
+        release_file = paths.releases_dir / "1.2.0" / "release.md"
+        assert release_file.is_file()
         import ledgercore
 
-        metadata, body = ledgercore.read_front_matter_document(path)
+        metadata, body = ledgercore.read_front_matter_document(release_file)
         assert metadata["object_type"] == "release"
         assert metadata["version"] == "1.2.0"
         assert metadata["status"] == "released"

@@ -19,7 +19,9 @@ def test_reconcile_reports_tag_and_changelog_mismatches(
         released_at="2026-01-01",
     )
     create_release(tmp_path, version="0.2.0", status="planned")
-    (tmp_path / "CHANGELOG.md").write_text("## [0.1.0] - 2026-01-01\n## [0.3.0] - Unreleased\n")
+    (tmp_path / "CHANGELOG.md").write_text(
+        "## [0.1.0] - 2026-01-01\n## [0.3.0] - Unreleased\n"
+    )
 
     def fake_run(args, **kwargs):
         if args[-2:] == ["tag", "--list"]:

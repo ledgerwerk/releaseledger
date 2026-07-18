@@ -124,7 +124,7 @@ def emit_error(
     json_output: bool,
     human: str | None = None,
     result: dict[str, object] | None = None,
- ) -> None:
+) -> None:
     """Render an error payload as JSON (stdout) or a human line (stderr)."""
     if json_output:
         payload: dict[str, object] = {

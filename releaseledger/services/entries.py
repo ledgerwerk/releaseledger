@@ -329,9 +329,7 @@ def add_release_entry(
         breaking=breaking,
         internal=internal,
     )
-    duplicate_issues = _duplicate_batch_issues(
-        existing=entries, proposed=[record]
-    )
+    duplicate_issues = _duplicate_batch_issues(existing=entries, proposed=[record])
     if duplicate_issues:
         raise LaunchError(
             str(duplicate_issues[0]["message"]),
@@ -870,6 +868,7 @@ def list_release_entries(
     load_release(workspace_root, release_version)
     return [entry.to_dict() for entry in load_entries(workspace_root, release_version)]
 
+
 def delete_release_entry(
     workspace_root: Path,
     *,
@@ -879,7 +878,7 @@ def delete_release_entry(
     force_accepted: bool = False,
     detach_audit: bool = False,
     dry_run: bool = False,
- ) -> dict[str, object]:
+) -> dict[str, object]:
     """Delete one entry through the full release lifecycle."""
     if not isinstance(reason, str) or not reason.strip():
         raise LaunchError(
@@ -970,9 +969,7 @@ def delete_release_entry(
             f"release:{release.version}": updated_release.versioning.revision,
             f"entry:{release.version}/{entry.entry_id}": entry.versioning.revision,
             **(
-                {
-                    f"audit:{release.version}": detached_sheet.versioning.revision
-                }
+                {f"audit:{release.version}": detached_sheet.versioning.revision}
                 if detached_sheet is not None and detached_sheet is not audit_sheet
                 else {}
             ),
