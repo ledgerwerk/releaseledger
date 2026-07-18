@@ -328,6 +328,43 @@ def _build_review_recommendations(
     return recommendations
 
 
+def _compute_coverage(
+    expected_refs: list[str],
+    entries: list[ReleaseEntryRecord],
+    *,
+    include_internal: bool,
+    git_block: dict[str, object] | None = None,
+    git_ref_map: dict[str, object] | None = None,
+) -> list[dict[str, object]]:
+    """Build coverage rows from expected refs and entries."""
+    by_ref: dict[str, list[ReleaseEntryRecord]] = {}
+    for entry in entries:
+        for ref in entry.source_refs:
+            by_ref.setdefault(ref, []).append(entry)
+
+    coverage: list[dict[str, object]] = []
+    for ref in expected_refs:
+        matching = by_ref.get(ref, [])
+        label, breakdown = classify_source_ref(
+            ref, matching, include_internal=include_internal
+        )
+        row: dict[str, object] = {
+            "source_ref": ref,
+            "status": label,
+            **breakdown,
+        }
+        if git_block is not None:
+            cand_obj = git_ref_map.get(ref) if git_ref_map is not None else None
+            if ref.startswith("git:") and cand_obj is not None:
+                row["provider"] = "git"
+                row["summary"] = getattr(cand_obj, "subject", None)
+                row["paths"] = list(getattr(cand_obj, "paths", ()))
+            elif ref.startswith("git:"):
+                row["provider"] = "git"
+        coverage.append(row)
+    return coverage
+
+
 def build_release_review(
     workspace_root: Path,
     *,
@@ -394,37 +431,14 @@ def build_release_review(
         include_merges=include_merges,
     )
 
-    # 3. Index entries by source_ref for coverage classification.
-    by_ref: dict[str, list[ReleaseEntryRecord]] = {}
-    for entry in entries:
-        for ref in entry.source_refs:
-            by_ref.setdefault(ref, []).append(entry)
-        # boundary_ref coverage may be expressed without an explicit source_ref
-        # on the entry; entries without any source_ref are still indexed under
-        # their own fingerprint-free keys elsewhere (orphans). Coverage uses the
-        # explicit refs only.
-
-    coverage: list[dict[str, object]] = []
-    for ref in expected_refs:
-        matching = by_ref.get(ref, [])
-        label, breakdown = classify_source_ref(
-            ref, matching, include_internal=include_internal
-        )
-        row: dict[str, object] = {
-            "source_ref": ref,
-            "status": label,
-            **breakdown,
-        }
-        # Enrich git-derived rows with provider and commit metadata.
-        if git_block is not None:
-            cand_obj = git_ref_map.get(ref)
-            if ref.startswith("git:") and cand_obj is not None:
-                row["provider"] = "git"
-                row["summary"] = getattr(cand_obj, "subject", None)
-                row["paths"] = list(getattr(cand_obj, "paths", ()))
-            elif ref.startswith("git:"):
-                row["provider"] = "git"
-        coverage.append(row)
+    # 3. Coverage classification.
+    coverage = _compute_coverage(
+        expected_refs,
+        entries,
+        include_internal=include_internal,
+        git_block=git_block,
+        git_ref_map=git_ref_map,
+    )
 
     # 4. Entry counts over all recorded entries (independent of include scope).
     entry_counts: dict[str, object] = {

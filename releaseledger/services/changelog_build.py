@@ -1146,6 +1146,71 @@ def _strict_git_range_coverage(
     return warnings, len(hidden_internal_refs)
 
 
+def _run_strict_build_checks(
+    workspace_root: Path,
+    *,
+    version: str,
+    release: ReleaseRecord,
+    statuses: tuple[str, ...],
+    selected: list[ReleaseEntryRecord],
+    all_entries: list[ReleaseEntryRecord],
+    include_internal: bool,
+    allow_empty: bool,
+) -> tuple[list[str], int]:
+    """Run strict-mode validation checks for build_changelog_file.
+
+    Returns (warnings, hidden_internal_commit_count). Raises LaunchError on
+    violations.
+    """
+    strict_warnings: list[str] = []
+    lint = lint_release_entries(
+        workspace_root,
+        release_version=version,
+        strict=False,
+        include_statuses=statuses,
+    )
+    summary = lint["summary"]
+    assert isinstance(summary, dict)
+    if int(summary["errors"]) > 0:
+        raise LaunchError(
+            "Strict build blocked by entry lint errors.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
+    if not selected and not allow_empty:
+        raise LaunchError(
+            "Strict build requires at least one included entry; "
+            "pass --allow-empty to override.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
+    release_refs = set(release.source_refs)
+    if release.boundary_ref:
+        release_refs.add(release.boundary_ref)
+    entry_refs = {ref for entry in selected for ref in entry.source_refs}
+    uncovered = sorted(release_refs - entry_refs)
+    if uncovered and not allow_empty:
+        raise LaunchError(
+            "Strict build has release source refs not referenced by entries: "
+            + ", ".join(uncovered),
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
+    if int(summary["warnings"]) > 0:
+        strict_warnings.append(f"Entry lint reported {summary['warnings']} warning(s).")
+    git_warnings, hidden_internal_commit_count = _strict_git_range_coverage(
+        workspace_root,
+        release=release,
+        entries=selected,
+        all_entries=all_entries,
+        include_internal=include_internal,
+        allow_empty=allow_empty,
+        statuses=statuses,
+    )
+    strict_warnings.extend(git_warnings)
+    return strict_warnings, hidden_internal_commit_count
+
+
 def build_changelog_file(
     workspace_root: Path,
     *,
@@ -1178,7 +1243,8 @@ def build_changelog_file(
     release = load_release(workspace_root, version)
     if release.status == "canceled" and not include_canceled:
         raise LaunchError(
-            f"Release {version} is canceled and cannot be rendered as an active release section.",
+            f"Release {version} is canceled and cannot be rendered "
+            "as an active release section.",
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
             remediation=[
@@ -1196,53 +1262,16 @@ def build_changelog_file(
     strict_warnings: list[str] = []
     hidden_internal_commit_count = 0
     if strict:
-        lint = lint_release_entries(
+        strict_warnings, hidden_internal_commit_count = _run_strict_build_checks(
             workspace_root,
-            release_version=version,
-            strict=False,
-            include_statuses=statuses,
-        )
-        summary = lint["summary"]
-        assert isinstance(summary, dict)
-        if int(summary["errors"]) > 0:
-            raise LaunchError(
-                "Strict build blocked by entry lint errors.",
-                code=CODE_VALIDATION_ERROR,
-                exit_code=2,
-            )
-        if not selected and not allow_empty:
-            raise LaunchError(
-                "Strict build requires at least one included entry; "
-                "pass --allow-empty to override.",
-                code=CODE_VALIDATION_ERROR,
-                exit_code=2,
-            )
-        release_refs = set(release.source_refs)
-        if release.boundary_ref:
-            release_refs.add(release.boundary_ref)
-        entry_refs = {ref for entry in selected for ref in entry.source_refs}
-        uncovered = sorted(release_refs - entry_refs)
-        if uncovered and not allow_empty:
-            raise LaunchError(
-                "Strict build has release source refs not referenced by entries: "
-                + ", ".join(uncovered),
-                code=CODE_VALIDATION_ERROR,
-                exit_code=2,
-            )
-        if int(summary["warnings"]) > 0:
-            strict_warnings.append(
-                f"Entry lint reported {summary['warnings']} warning(s)."
-            )
-        git_warnings, hidden_internal_commit_count = _strict_git_range_coverage(
-            workspace_root,
+            version=version,
             release=release,
-            entries=selected,
+            statuses=statuses,
+            selected=selected,
             all_entries=all_entries,
             include_internal=include_internal,
             allow_empty=allow_empty,
-            statuses=statuses,
         )
-        strict_warnings.extend(git_warnings)
 
     # In Keep a Changelog mode with strict, require a date for released sections
     is_kac = config.changelog_standard == "keepachangelog-1.1.0"

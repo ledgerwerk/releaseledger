@@ -1271,14 +1271,14 @@ def rename_release(
     return payload
 
 
-def reconcile_releases(
+def _load_git_tags(
     workspace_root: Path,
-    *,
-    changelog_file: Path | None = None,
-) -> dict[str, object]:
-    """Compare release records, Git tags, and changelog headings read-only."""
-    records = list_releases(workspace_root)
-    by_version = {record.version: record for record in records}
+) -> tuple[dict[str, list[str]], dict[str, str], subprocess.CompletedProcess[str]]:
+    """Load git tags and their dates for the workspace.
+
+    Returns (tags_by_version, tag_dates, git_result).
+
+    """
     git_result = subprocess.run(
         ["git", "-C", str(workspace_root), "tag", "--list"],
         check=False,
@@ -1305,14 +1305,14 @@ def reconcile_releases(
         )
         if tag_result.returncode == 0 and tag_result.stdout.strip():
             tag_dates[tag] = tag_result.stdout.strip()
-    paths = resolve_project_paths(workspace_root)
-    target = (
-        Path(changelog_file)
-        if changelog_file is not None
-        else workspace_root / paths.config.changelog_output
-    )
-    if not target.is_absolute():
-        target = workspace_root / target
+    return tags_by_version, tag_dates, git_result
+
+
+def _parse_changelog_headings(target: Path) -> dict[str, list[str]]:
+    """Extract version headings from a changelog file.
+
+    Returns a dict mapping version strings to the heading lines.
+    """
     changelog_text = target.read_text(encoding="utf-8") if target.is_file() else ""
     heading_re = re.compile(r"^##\s+\[?\s*([^\]\s]+)", re.MULTILINE)
     headings: dict[str, list[str]] = {}
@@ -1325,25 +1325,22 @@ def reconcile_releases(
             match.start() : line_end if line_end >= 0 else len(changelog_text)
         ]
         headings.setdefault(heading, []).append(line)
+    return headings
+
+
+def _check_release_record_problems(
+    records: list[ReleaseRecord],
+    tags_by_version: dict[str, list[str]],
+    headings: dict[str, list[str]],
+    target: Path,
+    tag_dates: dict[str, str],
+    git_result: subprocess.CompletedProcess[str],
+) -> list[dict[str, object]]:
+    """Check each release record for tag/heading/date problems.
+
+    Returns a list of problem dicts.
+    """
     problems: list[dict[str, object]] = []
-    for version, tags in sorted(tags_by_version.items()):
-        if len(tags) > 1:
-            problems.append(
-                {"kind": "ambiguous_tag_version", "version": version, "tags": tags}
-            )
-        if version not in by_version:
-            problems.append(
-                {"kind": "tag_without_release", "version": version, "tags": tags}
-            )
-    for version in sorted(headings):
-        if version not in by_version:
-            problems.append(
-                {
-                    "kind": "changelog_without_release",
-                    "version": version,
-                    "target_file": str(target),
-                }
-            )
     for record in records:
         tags = tags_by_version.get(record.version, [])
         has_heading = bool(headings.get(record.version))
@@ -1367,12 +1364,18 @@ def reconcile_releases(
                 )
             if target.is_file() and not has_heading:
                 problems.append(
-                    {"kind": "released_without_changelog", "version": record.version}
+                    {
+                        "kind": "released_without_changelog",
+                        "version": record.version,
+                    }
                 )
         if record.status == "canceled":
             if has_heading:
                 problems.append(
-                    {"kind": "canceled_with_changelog", "version": record.version}
+                    {
+                        "kind": "canceled_with_changelog",
+                        "version": record.version,
+                    }
                 )
             if any(r.previous_version == record.version for r in records):
                 problems.append(
@@ -1405,6 +1408,57 @@ def reconcile_releases(
                         "changelog_date": heading_date.group(1),
                     }
                 )
+    return problems
+
+
+def reconcile_releases(
+    workspace_root: Path,
+    *,
+    changelog_file: Path | None = None,
+) -> dict[str, object]:
+    """Compare release records, Git tags, and changelog headings read-only."""
+    records = list_releases(workspace_root)
+    by_version = {record.version: record for record in records}
+    tags_by_version, tag_dates, git_result = _load_git_tags(workspace_root)
+    paths = resolve_project_paths(workspace_root)
+    target = (
+        Path(changelog_file)
+        if changelog_file is not None
+        else workspace_root / paths.config.changelog_output
+    )
+    if not target.is_absolute():
+        target = workspace_root / target
+    headings = _parse_changelog_headings(target)
+
+    problems: list[dict[str, object]] = []
+    for version, tags in sorted(tags_by_version.items()):
+        if len(tags) > 1:
+            problems.append(
+                {"kind": "ambiguous_tag_version", "version": version, "tags": tags}
+            )
+        if version not in by_version:
+            problems.append(
+                {"kind": "tag_without_release", "version": version, "tags": tags}
+            )
+    for version in sorted(headings):
+        if version not in by_version:
+            problems.append(
+                {
+                    "kind": "changelog_without_release",
+                    "version": version,
+                    "target_file": str(target),
+                }
+            )
+    problems.extend(
+        _check_release_record_problems(
+            records,
+            tags_by_version,
+            headings,
+            target,
+            tag_dates,
+            git_result,
+        )
+    )
     released = sorted(
         (record for record in records if record.status == "released"),
         key=lambda record: (
@@ -1506,7 +1560,8 @@ def check_release_chain(
                     "record_status": record.status,
                     "predecessor_status": predecessor.status,
                     "comparison_basis": basis,
-                    "detail": "Release order cannot be established from dates or semantic versions.",
+                    "detail": "Release order cannot be established from dates"
+                    " or semantic versions.",
                 }
             )
         elif comparison > 0:
