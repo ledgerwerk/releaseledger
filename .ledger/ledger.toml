@@ -9,4 +9,3 @@ storage = "project"
 
 [ledgers.releaseledger.mounts.indexes]
 storage = "cache"
-
