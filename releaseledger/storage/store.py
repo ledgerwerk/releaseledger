@@ -143,8 +143,8 @@ def _entries_dir(paths: ProjectPaths, version: str) -> Path:
     return release_dir(paths, version) / "entries"
 
 
-def _resolve(workspace_root: Path) -> ProjectPaths:
-    return resolve_project_paths(workspace_root)
+def _resolve(workspace_root: Path, ledger_ref: str | None = None) -> ProjectPaths:
+    return resolve_project_paths(workspace_root, ledger_ref=ledger_ref)
 
 
 def ensure_release_bundle(paths: ProjectPaths, version: str) -> Path:
@@ -160,9 +160,10 @@ def save_release(
     release: ReleaseRecord,
     *,
     overwrite: bool = False,
+    ledger_ref: str | None = None,
 ) -> ReleaseRecord:
     """Persist a release record as ``release.md`` (note becomes the body)."""
-    paths = _resolve(workspace_root)
+    paths = _resolve(workspace_root, ledger_ref=ledger_ref)
     version = validate_release_version(release.version)
     target = release_markdown_path(paths, version)
     if target.is_file() and not overwrite:
@@ -196,9 +197,11 @@ def save_release(
     return release
 
 
-def load_release(workspace_root: Path, version: str) -> ReleaseRecord:
+def load_release(
+    workspace_root: Path, version: str, ledger_ref: str | None = None
+) -> ReleaseRecord:
     """Load and validate a release record for ``version``."""
-    paths = _resolve(workspace_root)
+    paths = _resolve(workspace_root, ledger_ref=ledger_ref)
     safe_version = validate_release_version(version)
     target = release_markdown_path(paths, safe_version)
     if not target.is_file():
@@ -262,9 +265,11 @@ def next_entry_id(workspace_root: Path, release_version: str) -> str:
     return ledgercore.next_prefixed_id("entry", existing)
 
 
-def save_entry(workspace_root: Path, entry: ReleaseEntryRecord) -> ReleaseEntryRecord:
+def save_entry(
+    workspace_root: Path, entry: ReleaseEntryRecord, ledger_ref: str | None = None
+) -> ReleaseEntryRecord:
     """Persist an entry record as ``entry-NNNN.md`` inside its release bundle."""
-    paths = _resolve(workspace_root)
+    paths = _resolve(workspace_root, ledger_ref=ledger_ref)
     validate_release_version(entry.release_version)
     bundle = release_dir(paths, entry.release_version)
     if not bundle.is_dir():
@@ -299,14 +304,19 @@ def save_entry(workspace_root: Path, entry: ReleaseEntryRecord) -> ReleaseEntryR
     return entry
 
 
-def delete_entry(workspace_root: Path, release_version: str, entry_id: str) -> None:
+def delete_entry(
+    workspace_root: Path,
+    release_version: str,
+    entry_id: str,
+    ledger_ref: str | None = None,
+) -> None:
     """Delete an entry file if it exists; used to roll back partial writes.
 
     Safe to call when no file is present. Does not touch the release record or
     indexes; callers perform rollback immediately after a failed release save,
     before the entry was counted or indexed.
     """
-    paths = _resolve(workspace_root)
+    paths = _resolve(workspace_root, ledger_ref=ledger_ref)
     safe_version = validate_release_version(release_version)
     target = _entries_dir(paths, safe_version) / f"{entry_id}.md"
     if target.is_file():
@@ -314,10 +324,9 @@ def delete_entry(workspace_root: Path, release_version: str, entry_id: str) -> N
 
 
 def load_entries(
-    workspace_root: Path, release_version: str
+    workspace_root: Path, release_version: str, ledger_ref: str | None = None
 ) -> list[ReleaseEntryRecord]:
-    """Return all entries for a release, sorted by order then entry_id."""
-    paths = _resolve(workspace_root)
+    paths = _resolve(workspace_root, ledger_ref=ledger_ref)
     safe_version = validate_release_version(release_version)
     entries_dir = _entries_dir(paths, safe_version)
     if not entries_dir.is_dir():
@@ -461,9 +470,9 @@ def _entry_index_row(entry: ReleaseEntryRecord) -> dict[str, object]:
     return row
 
 
-def rebuild_indexes(workspace_root: Path) -> None:
+def rebuild_indexes(workspace_root: Path, ledger_ref: str | None = None) -> None:
     """Rebuild ``releases.json`` and ``entries.json`` from on-disk records."""
-    paths = _resolve(workspace_root)
+    paths = _resolve(workspace_root, ledger_ref=ledger_ref)
     rebuild_indexes_for_paths(paths)
 
 

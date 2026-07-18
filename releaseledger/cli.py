@@ -50,7 +50,6 @@ from releaseledger.services.changelog_build import (
     build_full_changelog_file,
 )
 from releaseledger.services.config import (
-    config_set_releaseledger_dir,
     config_show,
     storage_where,
 )
@@ -3169,20 +3168,19 @@ def config_set_command(
         )
         emit_error(command="config.set", error=err, json_output=state.json_output)
         raise typer.Exit(launch_error_exit_code(err)) from err
-
-    def produce() -> CommandResult:
-        result = config_set_releaseledger_dir(
-            state.cwd, value, external_dir=external_dir
+    else:
+        err = LaunchError(
+            f"Unrecognized config key: {key!r}. ",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+            remediation=[
+                "Valid keys include: ledger_ref, ledger_code, "
+                "default_status, changelog_output, etc. "
+                "Use `releaseledger config show` to see current values."
+            ],
         )
-        human = f"set {key}: {result.get('before', '')} -> {result.get('after', '')}"
-        return result, [], human
-
-    run_command(
-        command="config.set",
-        result_type="config_set",
-        json_output=state.json_output,
-        produce=produce,
-    )
+        emit_error(command="config.set", error=err, json_output=state.json_output)
+        raise typer.Exit(launch_error_exit_code(err)) from err
 
 
 # ---------------------------------------------------------------------------

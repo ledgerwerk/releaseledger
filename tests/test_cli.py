@@ -425,16 +425,10 @@ class TestPhase4Entries:
         )
         assert result.exit_code == 0, result.stdout
         assert "added entry entry-0001 to release 1.2.0" in result.stdout
-        entry_path = (
-            tmp_path
-            / ".releaseledger"
-            / "ledgers"
-            / "main"
-            / "releases"
-            / "1.2.0"
-            / "entries"
-            / "entry-0001.md"
-        )
+        from releaseledger.storage.paths import resolve_project_paths
+
+        paths = resolve_project_paths(tmp_path)
+        entry_path = paths.releases_dir / "1.2.0" / "entries" / "entry-0001.md"
         assert entry_path.is_file()
         show = _json(_jrun(tmp_path, "release", "show", "1.2.0"))
         assert show["result"]["release"]["entry_count"] == 1
@@ -753,19 +747,19 @@ class TestPhase7Build:
                 "{{ entry.summary }}\\n{% endfor %}\\n\\n{% endfor %}"
             )
         lines = [
-            "config_version = 1",
-            'releaseledger_dir = ".releaseledger"',
+            "config_version = 2",
             'ledger_ref = "main"',
             'ledger_parent_ref = ""',
-            "ledger_next_entry_number = 1",
             'ledger_branch_guard = "off"',
+            "",
             "[ledger]",
             'code = "rl"',
-            'name = "releaseledger"',
+            "",
             "[release]",
             'default_changelog = "CHANGELOG.md"',
             'default_status = "planned"',
             "allow_dirty_worktree = true",
+            "",
             "[changelog]",
             'output = "CHANGELOG.md"',
             "trim = true",
@@ -1011,14 +1005,23 @@ class TestPhase7Build:
 
 class TestPhase6EventsIndexes:
     @staticmethod
+    def _project_paths(tmp_path: Path):
+        from releaseledger.storage.paths import resolve_project_paths
+
+        return resolve_project_paths(tmp_path)
+
+    @staticmethod
     def _events_path(tmp_path: Path) -> Path:
-        return (
-            tmp_path / ".releaseledger" / "ledgers" / "main" / "events" / "events.jsonl"
-        )
+        return TestPhase6EventsIndexes._project_paths(tmp_path).events_path
 
     @staticmethod
     def _index_path(tmp_path: Path, name: str) -> Path:
-        return tmp_path / ".releaseledger" / "ledgers" / "main" / "indexes" / name
+        paths = TestPhase6EventsIndexes._project_paths(tmp_path)
+        if name == "releases.json":
+            return paths.releases_index_path
+        if name == "entries.json":
+            return paths.entries_index_path
+        return paths.indexes_dir / name
 
     @staticmethod
     def _read_jsonl(path: Path) -> list[dict]:
@@ -1137,14 +1140,12 @@ class TestPhase8StorageWhere:
         _init_project(tmp_path)
         result = _run(tmp_path, "storage", "where")
         assert result.exit_code == 0, result.stdout
-        assert "Workspace:" in result.stdout
-        assert "Config:" in result.stdout
-        assert "Storage:" in result.stdout
-        assert "Ledger: main" in result.stdout
-        assert "Inside workspace: yes" in result.stdout
-        assert "Source: canonical" in result.stdout
-        assert "Layout: ok" in result.stdout
-        assert "Indexes: ok" in result.stdout
+        assert "Project root:" in result.stdout
+        assert "Tool config:" in result.stdout
+        assert "Data root:" in result.stdout
+        assert "Active ledger: main" in result.stdout
+        assert "Data source: manifest" in result.stdout
+        assert "Layout valid: True" in result.stdout
 
     def test_storage_where_json_mode(self, tmp_path: Path) -> None:
         _init_project(tmp_path)
@@ -1155,11 +1156,10 @@ class TestPhase8StorageWhere:
         r = payload["result"]
         assert r["kind"] == "storage_location"
         assert str(tmp_path.resolve()) in str(r["workspace_root"])
-        assert r["ledger_ref"] == "main"
+        assert r["active_ledger_ref"] == "main"
         assert r["inside_workspace"] is True
-        assert r["source"] == "dotfile"
-        assert r["layout_exists"] is True
-        assert r["indexes_exist"] is True
+        assert r["data_source"] == "manifest"
+        assert r["layout_valid"] is True
 
     def test_storage_where_from_subdirectory(self, tmp_path: Path) -> None:
         _init_project(tmp_path)
@@ -1168,40 +1168,34 @@ class TestPhase8StorageWhere:
         payload = _json(_jrun(tmp_path, "--cwd", str(subdir), "storage", "where"))
         r = payload["result"]
         assert str(tmp_path.resolve()) in str(r["workspace_root"])
-        assert r["inside_workspace"] is True
-        assert r["layout_exists"] is True
+        assert r["layout_valid"] is True
 
     def test_storage_where_read_only(self, tmp_path: Path) -> None:
-        """storage where must not mutate .releaseledger or .releaseledger.toml."""
+        """storage where must not mutate the config or data directory."""
         _init_project(tmp_path)
         toml_before = (
             tmp_path / ".ledger" / "releaseledger" / "config.toml"
         ).read_text()
-        layout_before = {p.name for p in (tmp_path / ".releaseledger").rglob("*")}
         _run(tmp_path, "storage", "where")
         assert (
             tmp_path / ".ledger" / "releaseledger" / "config.toml"
         ).read_text() == toml_before
-        layout_after = {p.name for p in (tmp_path / ".releaseledger").rglob("*")}
-        assert layout_after == layout_before
 
     def test_storage_where_uninitialized(self, tmp_path: Path) -> None:
         """Without a config, storage where still succeeds with defaults."""
         result = _run(tmp_path, "storage", "where")
         assert result.exit_code == 0, result.stdout
-        assert "Source: default" in result.stdout
-        assert "Layout: missing" in result.stdout
+        assert "Layout valid: False" in result.stdout
+        assert "uninitialized" in result.stdout
 
-    def test_storage_where_with_custom_releaseledger_dir(self, tmp_path: Path) -> None:
+    def test_storage_where_rejects_custom_dir(self, tmp_path: Path) -> None:
+        """--releaseledger-dir is no longer supported."""
         result = runner.invoke(
             app,
             ["--cwd", str(tmp_path), "init", "--releaseledger-dir", ".custom-rl"],
         )
-        assert result.exit_code == 0, result.stdout
-        payload = _json(_jrun(tmp_path, "storage", "where"))
-        r = payload["result"]
-        assert "custom-rl" in str(r["releaseledger_dir"])
-        assert r["inside_workspace"] is True
+        assert result.exit_code != 0
+        assert "no longer supported" in _human_error(result).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -1330,14 +1324,12 @@ class TestPhase9ExternalPolicy:
 
 class TestPhase10ConfigCommands:
     def test_config_show_default(self, tmp_path: Path) -> None:
-        """config show reports workspace, config path, storage, policy, ledger ref."""
+        """config show reports project, config path, ledger ref."""
         _init_project(tmp_path)
         result = _run(tmp_path, "config", "show")
         assert result.exit_code == 0, result.stdout
-        assert "Workspace:" in result.stdout
-        assert "Config:" in result.stdout
-        assert "Storage:" in result.stdout
-        assert "Policy: workspace" in result.stdout
+        assert "Project:" in result.stdout
+        assert "Config path:" in result.stdout
         assert "Ledger ref: main" in result.stdout
 
     def test_config_show_json_mode(self, tmp_path: Path) -> None:
@@ -1423,11 +1415,11 @@ class TestPhase10ConfigCommands:
         assert "no longer supported" in _human_error(result).lower()
 
     def test_config_set_rejects_unknown_key(self, tmp_path: Path) -> None:
-        """Only releaseledger_dir is supported; other keys are rejected."""
+        """Setting an unknown config key is rejected."""
         _init_project(tmp_path)
         result = _run(tmp_path, "config", "set", "bogus_key", "value")
         assert result.exit_code != 0
-        assert "unsupported" in _human_error(result).lower()
+        assert "Unrecognized" in _human_error(result)
 
     def test_config_set_atomicity(self, tmp_path: Path) -> None:
         """config set releaseledger_dir returns migration error."""
@@ -1462,16 +1454,10 @@ class TestPhase11EntrySources:
         assert result.exit_code == 0, result.stdout
         import ledgercore
 
-        entry_path = (
-            tmp_path
-            / ".releaseledger"
-            / "ledgers"
-            / "main"
-            / "releases"
-            / "1.0.0"
-            / "entries"
-            / "entry-0001.md"
-        )
+        from releaseledger.storage.paths import resolve_project_paths
+
+        paths = resolve_project_paths(tmp_path)
+        entry_path = paths.releases_dir / "1.0.0" / "entries" / "entry-0001.md"
         meta, _ = ledgercore.read_front_matter_document(entry_path)
         assert "sources" in meta
         assert meta["sources"] == ["taskledger:task-0001"]
@@ -1497,16 +1483,10 @@ class TestPhase11EntrySources:
         assert result.exit_code == 0, result.stdout
         import ledgercore
 
-        entry_path = (
-            tmp_path
-            / ".releaseledger"
-            / "ledgers"
-            / "main"
-            / "releases"
-            / "1.0.0"
-            / "entries"
-            / "entry-0001.md"
-        )
+        from releaseledger.storage.paths import resolve_project_paths
+
+        paths = resolve_project_paths(tmp_path)
+        entry_path = paths.releases_dir / "1.0.0" / "entries" / "entry-0001.md"
         meta, _ = ledgercore.read_front_matter_document(entry_path)
         assert meta["sources"] == ["taskledger:task-0001", "github:pr-42"]
 

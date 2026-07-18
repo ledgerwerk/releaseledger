@@ -39,9 +39,10 @@ def append_event(
     entry_id: str | None = None,
     record_revisions: dict[str, int] | None = None,
     data: dict[str, object] | None = None,
+    ledger_ref: str | None = None,
 ) -> ReleaseEvent:
     """Append a new event and return it. Assigns the next ``event-NNNN`` id."""
-    paths = resolve_project_paths(workspace_root)
+    paths = resolve_project_paths(workspace_root, ledger_ref=ledger_ref)
     existing = load_events(workspace_root)
     event_id = ledgercore.next_prefixed_id("event", [e.event_id for e in existing])
     record = ReleaseEvent(

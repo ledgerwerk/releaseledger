@@ -64,15 +64,10 @@ def _create_release(tmp_path: Path, version: str = "0.5.0") -> None:
 
 
 def _entry_files(tmp_path: Path, version: str = "0.5.0") -> list[Path]:
-    entries_dir = (
-        tmp_path
-        / ".releaseledger"
-        / "ledgers"
-        / "main"
-        / "releases"
-        / version
-        / "entries"
-    )
+    from releaseledger.storage.paths import resolve_project_paths
+
+    paths = resolve_project_paths(tmp_path)
+    entries_dir = paths.releases_dir / version / "entries"
     if not entries_dir.is_dir():
         return []
     return sorted(entries_dir.glob("entry-*.md"))

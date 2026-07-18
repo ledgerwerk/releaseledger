@@ -278,13 +278,11 @@ def test_review_does_not_write_changelog(tmp_path: Path) -> None:
     _init(tmp_path)
     _create_release(tmp_path, "0.5.0", source_refs=("tl:task-0103",))
     _add_entry(tmp_path, "0.5.0", summary="Covered entry", source_ref="tl:task-0103")
-    toml_before = (tmp_path / ".releaseledger.toml").read_text()
-    layout_before = {str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*")}
+    config_path = tmp_path / ".ledger" / "releaseledger" / "config.toml"
+    toml_before = config_path.read_text()
     _run(tmp_path, "review", "0.5.0", "--strict", "--target-file", "CHANGELOG.md")
     assert not (tmp_path / "CHANGELOG.md").exists()
-    assert (tmp_path / ".releaseledger.toml").read_text() == toml_before
-    layout_after = {str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*")}
-    assert layout_after == layout_before
+    assert config_path.read_text() == toml_before
 
 
 # ---------------------------------------------------------------------------

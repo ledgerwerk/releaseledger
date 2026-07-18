@@ -149,9 +149,11 @@ def test_indexes_include_new_source_and_status_fields(tmp_path: Path) -> None:
 
     rebuild_indexes(tmp_path)
 
-    root = tmp_path / ".releaseledger" / "ledgers" / "main" / "indexes"
-    releases = json.loads((root / "releases.json").read_text())
-    entries = json.loads((root / "entries.json").read_text())
+    from releaseledger.storage.paths import resolve_project_paths
+
+    paths = resolve_project_paths(tmp_path)
+    releases = json.loads(paths.releases_index_path.read_text())
+    entries = json.loads(paths.entries_index_path.read_text())
     assert releases[0]["boundary_ref"] == "tl:task-0105"
     assert releases[0]["source_refs"] == ["tl:task-0103"]
     assert releases[0]["source_count"] == 3
@@ -426,15 +428,10 @@ def test_entry_lint_warns_without_accepted_entries(tmp_path: Path) -> None:
 def test_entry_lint_reports_malformed_entry_files(tmp_path: Path) -> None:
     assert _run(tmp_path, "init").exit_code == 0
     assert _run(tmp_path, "release", "create", "1.0.0").exit_code == 0
-    entries_dir = (
-        tmp_path
-        / ".releaseledger"
-        / "ledgers"
-        / "main"
-        / "releases"
-        / "1.0.0"
-        / "entries"
-    )
+    from releaseledger.storage.paths import resolve_project_paths
+
+    rpaths = resolve_project_paths(tmp_path)
+    entries_dir = rpaths.releases_dir / "1.0.0" / "entries"
     base = {
         "schema_version": 2,
         "versioning": {"schema_version": 1, "revision": 1},
@@ -561,8 +558,8 @@ def test_changelog_and_build_filter_statuses_and_render_quality(
         tmp_path, "build", "1.0.0", "--dry-run", "--format", "json"
     )
     section = default_build["result"]["section"]
-    # In keepachangelog mode, quality entries map to Changed group
-    assert "### Changed" in section
+    # In extended mode (default), quality entries have their own heading
+    assert "### Quality" in section
     assert "Improved accepted checks" in section
     assert "Changed draft behavior" not in section
     draft_build = _json_run(

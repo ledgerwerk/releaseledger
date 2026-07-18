@@ -276,6 +276,7 @@ def branch_merge(
             summary=str(entry_dict.get("summary", "")),
             source_refs=tuple(entry_dict.get("source_refs", [])),  # type: ignore[arg-type]
             status=str(entry_dict.get("status", "accepted")),
+            ledger_ref=into_ref,
         )
         entry_result = result.get("entry", {})
         entry_obj = entry_result if isinstance(entry_result, dict) else {}

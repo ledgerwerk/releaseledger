@@ -182,10 +182,13 @@ def _payload(
     kind: str = "release_entry",
     events: list[str] | None = None,
     written: bool = True,
+    ledger_ref: str | None = None,
 ) -> dict[str, object]:
     result: dict[str, object] = {
         "kind": kind,
-        "ledger_ref": resolve_project_paths(workspace_root).ledger_ref,
+        "ledger_ref": resolve_project_paths(
+            workspace_root, ledger_ref=ledger_ref
+        ).ledger_ref,
         "release_version": release_version,
         "entry": record.to_dict(),
         "written": written,
@@ -308,9 +311,10 @@ def add_release_entry(
     breaking: bool = False,
     internal: bool = False,
     dry_run: bool = False,
+    ledger_ref: str | None = None,
 ) -> dict[str, object]:
-    release = load_release(workspace_root, release_version)
-    entries = load_entries(workspace_root, release_version)
+    release = load_release(workspace_root, release_version, ledger_ref=ledger_ref)
+    entries = load_entries(workspace_root, release_version, ledger_ref=ledger_ref)
     record = _candidate(
         entry_id=next_entry_id_from(entries),
         release_version=release.version,
@@ -349,7 +353,7 @@ def add_release_entry(
             kind="release_entry_preview",
             written=False,
         )
-    save_entry(workspace_root, record)
+    save_entry(workspace_root, record, ledger_ref=ledger_ref)
     updated_release = replace(
         release,
         entry_count=len(entries) + 1,
@@ -360,12 +364,15 @@ def add_release_entry(
             workspace_root,
             updated_release,
             overwrite=True,
+            ledger_ref=ledger_ref,
         )
     except LaunchError:
         # Roll back the orphan entry file so a stale release revision
         # cannot leave a partial write: no entry-*.md and entry_count
         # is never bumped.
-        delete_entry(workspace_root, release.version, record.entry_id)
+        delete_entry(
+            workspace_root, release.version, record.entry_id, ledger_ref=ledger_ref
+        )
         raise
     event = append_event(
         workspace_root,
@@ -377,9 +384,16 @@ def add_release_entry(
             f"entry:{release.version}/{record.entry_id}": record.versioning.revision,
         },
         data={"kind": record.kind, "status": record.status},
+        ledger_ref=ledger_ref,
     )
-    rebuild_indexes(workspace_root)
-    return _payload(workspace_root, release.version, record, events=[event.event_id])
+    rebuild_indexes(workspace_root, ledger_ref=ledger_ref)
+    return _payload(
+        workspace_root,
+        release.version,
+        record,
+        events=[event.event_id],
+        ledger_ref=ledger_ref,
+    )
 
 
 def _find_entry(
