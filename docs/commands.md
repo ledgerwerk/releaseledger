@@ -53,6 +53,8 @@ releaseledger release cancel VERSION [--reason TEXT]
                                     [--target-file PATH]
                                     [--remove-changelog-section]
                                     [--ignore-missing]
+                                    [--rewrite-successors]
+                                    [--successor-previous VERSION] [--dry-run]
 releaseledger release rename OLD_VERSION NEW_VERSION [--previous VERSION]
                                                       [--title TEXT]
                                                       [--released-at YYYY-MM-DD]
@@ -63,6 +65,8 @@ releaseledger release rename OLD_VERSION NEW_VERSION [--previous VERSION]
                                                       [--replace-existing-section]
 releaseledger release chain check
 releaseledger release chain repair [--dry-run] [--apply]
+releaseledger release chain check [--strict]
+releaseledger release reconcile [--strict] [--target-file PATH]
 releaseledger release list
 releaseledger release show VERSION
 ```
@@ -86,6 +90,8 @@ releaseledger entry add-many VERSION --file FILE [--dry-run] [--strict]
                                     [--guard-commit-subjects]
                                     [--sync-audit]
 releaseledger entry update VERSION ENTRY_ID [entry metadata options]
+releaseledger entry delete VERSION ENTRY_ID --reason TEXT [--dry-run]
+                                    [--force-accepted] [--detach-audit]
 releaseledger entry show VERSION ENTRY_ID
 releaseledger entry import VERSION --file FILE [--replace]
                                    [--source-ledger LEDGER]
@@ -101,6 +107,9 @@ releaseledger entry prompt VERSION [--source-ref REF]...
 returns the full per-entry `issues` and `entries` payload, **including on
 failure**; the command still exits non-zero. `--strict` fails on warnings.
 `entry add-many --dry-run` and `entry add-many` now share the same pre-write
+`entry add-many --dry-run --json` preserves the complete `result` payload on
+validation failure, including proposed entries, lint findings, coverage projection,
+and stable issue codes. Human mode prints one actionable row per issue.
 validation path, so strict dry-run results match write-mode gating.
 
 ## Batch file format
@@ -153,6 +162,8 @@ releaseledger build [VERSION] [--all] [--target-file PATH]
                             [--include-internal]
                             [--include-status STATUS]... [--strict]
                             [--dry-run] [--allow-empty]
+Single-release builds reject canceled releases unless `--include-canceled` is
+passed for archival/debug rendering. Full builds always exclude canceled releases.
 ```
 
 `build` with no `VERSION` (or `--all`) is a full rebuild. `build VERSION`
@@ -168,6 +179,9 @@ excludes that release from the normal release sections.
 before the final build. Manual Unreleased content is preserved by default;
 generated folded Unreleased content is automatically removed once the folded
 release is finalized.
+
+`release reconcile --strict` is read-only and compares release records, Git tags,
+and changelog headings before finalization.
 
 ## Review commands
 

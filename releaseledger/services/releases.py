@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import json
 import re
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -75,6 +76,7 @@ from releaseledger.storage.store import (
 
 __all__ = [
     "cancel_release",
+    "reconcile_releases",
     "check_release_chain",
     "create_release",
     "finalize_release",
@@ -124,42 +126,58 @@ def _validate_date(value: str, field_name: str) -> str:
 def _predecessor_key(
     version: str | None,
     released_at: str | None,
-) -> tuple[str, tuple[int, int, int] | None, str]:
-    """Comparable key for ordering releases as potential predecessors.
+ ) -> tuple[str, tuple[int, int, int] | None, str]:
+    """Return the legacy deterministic key used for display ordering."""
+    return (released_at or "", parse_release_version_tuple(version or ""), version or "")
 
-    Order: released_at (date string) ascending, then parseable semantic
-    version ascending, then the raw version string. Non-parseable versions
-    sort as ``None`` so they compare conservatively rather than misleadingly.
-    """
-    return (
-        released_at or "",
-        parse_release_version_tuple(version or ""),
-        version or "",
-    )
+
+def _compare_release_order(
+    predecessor_version: str,
+    predecessor_released_at: str | None,
+    record_version: str,
+    record_released_at: str | None,
+ ) -> tuple[int | None, str]:
+    """Compare two release records using a meaningful shared ordering basis."""
+    if predecessor_released_at and record_released_at:
+        if predecessor_released_at != record_released_at:
+            return (
+                1 if predecessor_released_at > record_released_at else -1,
+                "release_date",
+            )
+        predecessor_semver = parse_release_version_tuple(predecessor_version)
+        record_semver = parse_release_version_tuple(record_version)
+        if predecessor_semver is not None and record_semver is not None:
+            if predecessor_semver == record_semver:
+                return 0, "release_date+semantic_version"
+            return (
+                1 if predecessor_semver > record_semver else -1,
+                "release_date+semantic_version",
+            )
+        return None, "ambiguous_previous_order"
+    predecessor_semver = parse_release_version_tuple(predecessor_version)
+    record_semver = parse_release_version_tuple(record_version)
+    if predecessor_semver is not None and record_semver is not None:
+        if predecessor_semver == record_semver:
+            return 0, "semantic_version"
+        return (
+            1 if predecessor_semver > record_semver else -1,
+            "semantic_version",
+        )
+    return None, "ambiguous_previous_order"
 
 
 def _is_strictly_newer(
     candidate_key: tuple[str, tuple[int, int, int] | None, str],
     reference_key: tuple[str, tuple[int, int, int] | None, str],
-) -> bool:
-    """Return True when ``candidate_key`` orders strictly after ``reference_key``.
-
-    Comparison is conservative when semantic versions are unavailable: a
-    ``None`` semver tuple compares as *not* newer than a real tuple so a
-    non-standard version is never treated as a future predecessor of a real
-    semantic version.
-    """
+ ) -> bool:
+    """Compatibility helper for callers using the old tuple key."""
     cand_date, cand_semver, cand_ver = candidate_key
     ref_date, ref_semver, ref_ver = reference_key
     if cand_date != ref_date:
         return cand_date > ref_date
     if cand_semver is not None and ref_semver is not None:
-        if cand_semver != ref_semver:
-            return cand_semver > ref_semver
-    elif cand_semver is None or ref_semver is None:
-        # Semver unavailable on at least one side: do not treat as newer.
-        return False
-    return cand_ver > ref_ver
+        return cand_semver > ref_semver
+    return bool(cand_semver is None and ref_semver is None and cand_ver > ref_ver)
 
 
 def _infer_previous_version(
@@ -180,31 +198,38 @@ def _infer_previous_version(
     released = [r for r in list_releases(workspace_root) if r.status == "released"]
     if not released:
         return None, warnings
-    reference_key = _predecessor_key(candidate_version, candidate_released_at)
     eligible: list[ReleaseRecord] = []
+    ambiguity_seen = False
     for record in released:
         if candidate_version is not None and record.version == candidate_version:
-            continue  # never infer the candidate as its own predecessor
-        record_key = _predecessor_key(record.version, record.released_at)
-        if _is_strictly_newer(record_key, reference_key):
-            continue  # record is a future release; cannot be a predecessor
+            continue
+        comparison, _basis = _compare_release_order(
+            record.version,
+            record.released_at,
+            candidate_version or "",
+            candidate_released_at,
+        )
+        if comparison is None:
+            ambiguity_seen = True
+            continue
+        if comparison > 0:
+            continue
         eligible.append(record)
     if not eligible:
-        return None, warnings
-    eligible.sort(key=lambda r: _predecessor_key(r.version, r.released_at))
-    chosen = eligible[-1]
-    # Ambiguity: top eligible releases share a date but lack semver ordering.
-    if len(eligible) > 1:
-        top_key = _predecessor_key(chosen.version, chosen.released_at)
-        runner_up_key = _predecessor_key(eligible[-2].version, eligible[-2].released_at)
-        if top_key[0] == runner_up_key[0] and (
-            top_key[1] is None or runner_up_key[1] is None
-        ):
+        if ambiguity_seen:
             warnings.append(
-                "Previous-version inference is ambiguous for same-date releases;"
-                " pass --previous to set it explicitly."
+                "Previous-version inference is ambiguous; pass --previous to "
+                "set it explicitly."
             )
-    return chosen.version, warnings
+        return None, warnings
+    eligible.sort(
+        key=lambda r: (
+            parse_release_version_tuple(r.version) is None,
+            parse_release_version_tuple(r.version) or (),
+            r.version,
+        )
+    )
+    return eligible[-1].version, warnings
 
 
 def _validate_source_metadata(
@@ -925,17 +950,14 @@ def cancel_release(
     reason: str | None = None,
     superseded_by: str | None = None,
     force_released_unshipped: bool = False,
+    rewrite_successors: bool = False,
+    successor_previous_version: Any = UNSET,
     target_file: Path | None = None,
     remove_changelog_section: bool = False,
     ignore_missing_section: bool = False,
-) -> dict[str, object]:
-    """Mark a release as canceled (never shipped).
-
-    Refuses to cancel a ``released`` record unless ``force_released_unshipped``
-    is set, because ``released`` implies the release shipped. Canceled releases
-    are excluded from previous-version inference and from default changelog
-    builds, but remain visible in ``release list`` as an audit tombstone.
-    """
+    dry_run: bool = False,
+ ) -> dict[str, object]:
+    """Cancel an unshipped release without leaving invalid successor links."""
     existing = load_release(workspace_root, version)
     if existing.status == "canceled":
         raise LaunchError(
@@ -945,49 +967,150 @@ def cancel_release(
         )
     if existing.status == "released" and not force_released_unshipped:
         raise LaunchError(
-            f"Release {version} is 'released'; canceling a shipped release"
-            " requires --force-released-unshipped.",
+            f"Release {version} is 'released'; canceling a shipped release "
+            "requires --force-released-unshipped.",
             code=CODE_USAGE_ERROR,
             exit_code=2,
             remediation=[
                 "Use release rename if the version number was wrong but it did ship.",
-                "Pass --force-released-unshipped if it was recorded as released"
-                " but never actually shipped.",
+                "Pass --force-released-unshipped if it was recorded as released "
+                "but never actually shipped.",
             ],
         )
     if superseded_by is not None:
         validate_release_version(superseded_by)
-    updated = replace(
+    successors = [
+        record
+        for record in list_releases(workspace_root)
+        if record.previous_version == version and record.version != version
+    ]
+    if successors and not rewrite_successors:
+        raise LaunchError(
+            f"{len(successors)} release(s) reference {version} as their "
+            "previous_version; pass --rewrite-successors to update them or "
+            "correct them first.",
+            code=CODE_CONFLICT,
+            exit_code=2,
+            data={"successors": sorted(record.version for record in successors)},
+        )
+    if successors:
+        successor_target: str | None
+        if successor_previous_version is not UNSET:
+            successor_target = successor_previous_version
+        else:
+            successor_target = existing.previous_version
+            target_record = next(
+                (r for r in list_releases(workspace_root) if r.version == successor_target),
+                None,
+            )
+            if target_record is None or target_record.status == "canceled":
+                successor_target = None
+        if successor_target == version:
+            raise LaunchError(
+                "Successor previous_version cannot point to the canceled release.",
+                code=CODE_CONFLICT,
+                exit_code=2,
+            )
+        if successor_target is not None:
+            successor_target = validate_release_version(str(successor_target))
+            target_record = load_release(workspace_root, successor_target)
+            if target_record.status == "canceled":
+                raise LaunchError(
+                    f"Successor previous release {successor_target} is canceled.",
+                    code=CODE_CONFLICT,
+                    exit_code=2,
+                )
+        if successor_target is None and rewrite_successors:
+            raise LaunchError(
+                "Successor rewrite requires --successor-previous when the "
+                "canceled release has no valid predecessor.",
+                code=CODE_CONFLICT,
+                exit_code=2,
+            )
+    else:
+        successor_target = None
+    changelog_result: dict[str, object] | None = None
+    changelog_target: Path | None = None
+    changelog_updated: str | None = None
+    changelog_before: str | None = None
+    if remove_changelog_section:
+        if target_file is None:
+            raise LaunchError(
+                "--remove-changelog-section requires --target-file.",
+                code=CODE_USAGE_ERROR,
+                exit_code=2,
+            )
+        changelog_target = _resolve_changelog_target(workspace_root, target_file)
+        changelog_before = (
+            changelog_target.read_text(encoding="utf-8")
+            if changelog_target.is_file()
+            else ""
+        )
+        changelog_updated = remove_release_section(
+            changelog_before, version, ignore_missing=ignore_missing_section
+        )
+        changelog_result = {
+            "target_file": str(changelog_target),
+            "section_removed": find_release_section(changelog_before, version) is not None,
+            "updated": not dry_run,
+        }
+    canceled = replace(
         existing,
         status="canceled",
         cancel_reason=reason,
         superseded_by=superseded_by,
         versioning=bump_versioning(existing.versioning),
     )
-    save_release(workspace_root, updated, overwrite=True)
+    successor_changes = [
+        {"version": successor.version, "from": version, "to": successor_target}
+        for successor in successors
+    ]
+    if dry_run:
+        return {
+            "kind": "release_cancel",
+            "release": canceled.to_dict(),
+            "successor_changes": successor_changes,
+            "rewrote_successors": bool(successors),
+            "changelog": changelog_result,
+            "dry_run": True,
+            "written": False,
+        }
+    record_revisions = {f"release:{version}": canceled.versioning.revision}
+    save_release(workspace_root, canceled, overwrite=True)
+    for successor in successors:
+        updated_successor = replace(
+            successor,
+            previous_version=successor_target,
+            versioning=bump_versioning(successor.versioning),
+        )
+        save_release(workspace_root, updated_successor, overwrite=True)
+        record_revisions[f"release:{successor.version}"] = updated_successor.versioning.revision
+    if changelog_target is not None and changelog_updated is not None:
+        ledgercore.ensure_dir(changelog_target.parent)
+        ledgercore.atomic_write_text(changelog_target, changelog_updated)
     event = append_event(
         workspace_root,
         event=EVENT_RELEASE_CANCELED,
         release_version=version,
-        record_revisions={f"release:{version}": updated.versioning.revision},
+        record_revisions=record_revisions,
         data={
             "reason": reason,
             "previous_status": existing.status,
             "superseded_by": superseded_by,
             "force_released_unshipped": bool(force_released_unshipped),
+            "rewrote_successors": bool(successors),
+            "successor_versions": [successor.version for successor in successors],
+            "successor_previous_version": successor_target,
+            "changelog_section_removed": bool(
+                changelog_result and changelog_result.get("section_removed")
+            ),
         },
     )
     rebuild_indexes(workspace_root)
-    payload = _release_payload(workspace_root, updated, event.event_id)
-    if target_file is not None and remove_changelog_section:
-        changelog_result = _rewrite_changelog_section(
-            _resolve_changelog_target(workspace_root, target_file),
-            version,
-            None,
-            mode="remove",
-            ignore_missing=ignore_missing_section,
-        )
-        payload["changelog"] = changelog_result
+    payload = _release_payload(workspace_root, canceled, event.event_id)
+    payload["successor_changes"] = successor_changes
+    payload["rewrote_successors"] = bool(successors)
+    payload["changelog"] = changelog_result
     return payload
 
 
@@ -1137,18 +1260,154 @@ def rename_release(
     return payload
 
 
+def reconcile_releases(
+    workspace_root: Path,
+    *,
+    changelog_file: Path | None = None,
+ ) -> dict[str, object]:
+    """Compare release records, Git tags, and changelog headings read-only."""
+    records = list_releases(workspace_root)
+    by_version = {record.version: record for record in records}
+    git_result = subprocess.run(
+        ["git", "-C", str(workspace_root), "tag", "--list"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    raw_tags = [line.strip() for line in git_result.stdout.splitlines() if line.strip()]
+    tags_by_version: dict[str, list[str]] = {}
+    for tag in raw_tags:
+        normalized = tag[1:] if tag.startswith("v") else tag
+        if parse_release_version_tuple(normalized) is None:
+            continue
+        tags_by_version.setdefault(normalized, []).append(tag)
+    tag_dates: dict[str, str] = {}
+    for tag in raw_tags:
+        normalized = tag[1:] if tag.startswith("v") else tag
+        if normalized not in tags_by_version:
+            continue
+        tag_result = subprocess.run(
+            ["git", "-C", str(workspace_root), "log", "-1", "--format=%cs", tag],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if tag_result.returncode == 0 and tag_result.stdout.strip():
+            tag_dates[tag] = tag_result.stdout.strip()
+    paths = resolve_project_paths(workspace_root)
+    target = (
+        Path(changelog_file)
+        if changelog_file is not None
+        else workspace_root / paths.config.changelog_output
+    )
+    if not target.is_absolute():
+        target = workspace_root / target
+    changelog_text = target.read_text(encoding="utf-8") if target.is_file() else ""
+    heading_re = re.compile(r"^##\s+\[?\s*([^\]\s]+)", re.MULTILINE)
+    headings: dict[str, list[str]] = {}
+    for match in heading_re.finditer(changelog_text):
+        heading = match.group(1)
+        if heading.lower() == "unreleased":
+            continue
+        line_end = changelog_text.find("\n", match.start())
+        line = changelog_text[match.start() : line_end if line_end >= 0 else len(changelog_text)]
+        headings.setdefault(heading, []).append(line)
+    problems: list[dict[str, object]] = []
+    for version, tags in sorted(tags_by_version.items()):
+        if len(tags) > 1:
+            problems.append(
+                {"kind": "ambiguous_tag_version", "version": version, "tags": tags}
+            )
+        if version not in by_version:
+            problems.append(
+                {"kind": "tag_without_release", "version": version, "tags": tags}
+            )
+    for version in sorted(headings):
+        if version not in by_version:
+            problems.append(
+                {"kind": "changelog_without_release", "version": version, "target_file": str(target)}
+            )
+    for record in records:
+        tags = tags_by_version.get(record.version, [])
+        has_heading = bool(headings.get(record.version))
+        if record.status in {"planned", "draft", "candidate"} and tags:
+            problems.append(
+                {"kind": "planned_with_tag", "version": record.version, "status": record.status, "tags": tags}
+            )
+        if record.status == "released":
+            if not tags and git_result.returncode == 0:
+                problems.append({"kind": "release_without_tag", "version": record.version})
+            if record.released_at is None:
+                problems.append({"kind": "released_without_date", "version": record.version})
+            if target.is_file() and not has_heading:
+                problems.append({"kind": "released_without_changelog", "version": record.version})
+        if record.status == "canceled":
+            if has_heading:
+                problems.append({"kind": "canceled_with_changelog", "version": record.version})
+            if any(r.previous_version == record.version for r in records):
+                problems.append({"kind": "canceled_with_successor_reference", "version": record.version})
+        if has_heading and record.released_at:
+            heading = headings[record.version][0]
+            heading_date = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", heading)
+            for tag in tags:
+                tag_date = tag_dates.get(tag)
+                if tag_date and heading_date and tag_date != heading_date.group(1):
+                    problems.append(
+                        {
+                            "kind": "tag_changelog_date_mismatch",
+                            "version": record.version,
+                            "tag": tag,
+                            "tag_date": tag_date,
+                            "changelog_date": heading_date.group(1),
+                        }
+                    )
+            if heading_date and heading_date.group(1) != record.released_at:
+                problems.append(
+                    {
+                        "kind": "release_changelog_date_mismatch",
+                        "version": record.version,
+                        "release_date": record.released_at,
+                        "changelog_date": heading_date.group(1),
+                    }
+                )
+    released = sorted(
+        (record for record in records if record.status == "released"),
+        key=lambda record: (
+            parse_release_version_tuple(record.version) is None,
+            parse_release_version_tuple(record.version) or (),
+            record.version,
+        ),
+    )
+    for index, record in enumerate(released):
+        if index and record.previous_version != released[index - 1].version:
+            problems.append(
+                {
+                    "kind": "noncanonical_previous",
+                    "version": record.version,
+                    "previous_version": record.previous_version,
+                    "expected_previous": released[index - 1].version,
+                }
+            )
+    problems.sort(key=lambda item: (str(item.get("kind")), str(item.get("version"))))
+    return {
+        "kind": "release_reconcile",
+        "ok": not problems,
+        "problem_count": len(problems),
+        "problems": problems,
+        "release_versions": sorted(by_version),
+        "tags": {version: sorted(tags) for version, tags in sorted(tags_by_version.items())},
+        "tag_dates": dict(sorted(tag_dates.items())),
+        "changelog_file": str(target),
+        "changelog_versions": sorted(headings),
+    }
+
+
 def check_release_chain(
     workspace_root: Path,
     *,
     allow_canceled_predecessors: bool = False,
-) -> dict[str, object]:
-    """Inspect the release predecessor chain and report problems.
-
-    Reported problem kinds: ``missing_previous``, ``self_previous``,
-    ``future_previous``, ``canceled_previous``, ``root_has_previous``. Returns
-    a deterministic ``release_chain_check`` payload; ``ok`` is True when no
-    problems were found.
-    """
+ ) -> dict[str, object]:
+    """Inspect release predecessor links and return deterministic health data."""
     releases = list_releases(workspace_root)
     by_version = {record.version: record for record in releases}
     problems: list[dict[str, object]] = []
@@ -1162,38 +1421,66 @@ def check_release_chain(
                     "kind": "self_previous",
                     "version": record.version,
                     "previous_version": prev,
+                    "record_status": record.status,
+                    "predecessor_status": record.status,
+                    "comparison_basis": "none",
                     "detail": "Release points to itself as its previous_version.",
                 }
             )
             continue
-        if prev not in by_version:
+        predecessor = by_version.get(prev)
+        if predecessor is None:
             problems.append(
                 {
                     "kind": "missing_previous",
                     "version": record.version,
                     "previous_version": prev,
+                    "record_status": record.status,
+                    "predecessor_status": None,
+                    "comparison_basis": "none",
                     "detail": f"previous_version {prev!r} has no matching release.",
                 }
             )
             continue
-        predecessor = by_version[prev]
         if predecessor.status == "canceled" and not allow_canceled_predecessors:
             problems.append(
                 {
                     "kind": "canceled_previous",
                     "version": record.version,
                     "previous_version": prev,
+                    "record_status": record.status,
+                    "predecessor_status": predecessor.status,
+                    "comparison_basis": "status",
                     "detail": "previous_version points at a canceled release.",
                 }
             )
-        pred_key = _predecessor_key(predecessor.version, predecessor.released_at)
-        record_key = _predecessor_key(record.version, record.released_at)
-        if _is_strictly_newer(pred_key, record_key):
+        comparison, basis = _compare_release_order(
+            predecessor.version,
+            predecessor.released_at,
+            record.version,
+            record.released_at,
+        )
+        if comparison is None:
+            problems.append(
+                {
+                    "kind": "ambiguous_previous_order",
+                    "version": record.version,
+                    "previous_version": prev,
+                    "record_status": record.status,
+                    "predecessor_status": predecessor.status,
+                    "comparison_basis": basis,
+                    "detail": "Release order cannot be established from dates or semantic versions.",
+                }
+            )
+        elif comparison > 0:
             problems.append(
                 {
                     "kind": "future_previous",
                     "version": record.version,
                     "previous_version": prev,
+                    "record_status": record.status,
+                    "predecessor_status": predecessor.status,
+                    "comparison_basis": basis,
                     "detail": "previous_version points at a newer release.",
                 }
             )
@@ -1206,11 +1493,15 @@ def check_release_chain(
             key=lambda r: (parse_release_version_tuple(r.version), r.version),
         )
         if root.previous_version is not None:
+            predecessor = by_version.get(root.previous_version)
             problems.append(
                 {
                     "kind": "root_has_previous",
                     "version": root.version,
                     "previous_version": root.previous_version,
+                    "record_status": root.status,
+                    "predecessor_status": predecessor.status if predecessor else None,
+                    "comparison_basis": "semantic_version",
                     "detail": "Earliest semantic release should have no predecessor.",
                 }
             )
@@ -1240,8 +1531,25 @@ def repair_release_chain(
     indexes.
     """
     releases = list_releases(workspace_root)
-    chain = [r for r in releases if r.status != "canceled"]
-    chain.sort(key=lambda r: _predecessor_key(r.version, r.released_at))
+    released = [r for r in releases if r.status == "released"]
+    active = [r for r in releases if r.status not in {"released", "canceled"}]
+    released.sort(
+        key=lambda r: (
+            r.released_at is None,
+            r.released_at or "",
+            parse_release_version_tuple(r.version) is None,
+            parse_release_version_tuple(r.version) or (),
+            r.version,
+        )
+    )
+    active.sort(
+        key=lambda r: (
+            parse_release_version_tuple(r.version) is None,
+            parse_release_version_tuple(r.version) or (),
+            r.version,
+        )
+    )
+    chain = [*released, *active]
     changes: list[dict[str, object]] = []
     for index, record in enumerate(chain):
         expected = chain[index - 1].version if index > 0 else None

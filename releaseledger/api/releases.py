@@ -8,6 +8,7 @@ from releaseledger.services.releases import (
     create_release,
     finalize_release,
     list_release_records,
+    reconcile_releases,
     rename_release,
     repair_release_chain,
     show_release,
@@ -18,6 +19,7 @@ from releaseledger.services.releases import (
 __all__ = [
     "cancel_release",
     "check_release_chain",
+    "reconcile_releases",
     "create_release",
     "finalize_release",
     "list_release_records",

@@ -29,6 +29,7 @@ EVENT_ENTRY_ADDED = "entry.added"
 EVENT_ENTRY_UPDATED = "entry.updated"
 EVENT_ENTRY_IMPORTED = "entry.imported"
 EVENT_ENTRY_BATCH_ADDED = "entry.batch_added"
+EVENT_ENTRY_DELETED = "entry.deleted"
 
 
 @dataclass(slots=True, frozen=True)

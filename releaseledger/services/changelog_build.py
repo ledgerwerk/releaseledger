@@ -1157,6 +1157,7 @@ def build_changelog_file(
     template_name: str = "default",
     dry_run: bool = False,
     replace_existing: bool = False,
+    include_canceled: bool = False,
     include_statuses: tuple[str, ...] = ("accepted",),
     strict: bool = False,
     allow_empty: bool = False,
@@ -1175,6 +1176,16 @@ def build_changelog_file(
         workspace_root=workspace_root, config=config, target_file=target_file
     )
     release = load_release(workspace_root, version)
+    if release.status == "canceled" and not include_canceled:
+        raise LaunchError(
+            f"Release {version} is canceled and cannot be rendered as an active release section.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+            remediation=[
+                "Use `build --all` to rebuild active releases, or pass "
+                "--include-canceled for archival/debug rendering."
+            ],
+        )
     statuses = tuple(normalize_entry_status(value) for value in include_statuses)
     all_entries = load_entries(workspace_root, version)
     selected = [

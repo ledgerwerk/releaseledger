@@ -123,7 +123,8 @@ def emit_error(
     error: ReleaseledgerError,
     json_output: bool,
     human: str | None = None,
-) -> None:
+    result: dict[str, object] | None = None,
+ ) -> None:
     """Render an error payload as JSON (stdout) or a human line (stderr)."""
     if json_output:
         payload: dict[str, object] = {
@@ -131,8 +132,20 @@ def emit_error(
             "command": command,
             "error": to_error_payload(error),
         }
+        if result is None:
+            embedded = error.data.get("result")
+            if isinstance(embedded, dict):
+                result = embedded
+        if result is not None:
+            payload["result_type"] = str(
+                result.get("kind", result.get("result_type", "command_result"))
+            )
+            payload["result"] = result
         typer.echo(render_json(payload))
         return
+    if human is None:
+        embedded_human = error.data.get("human")
+        human = embedded_human if isinstance(embedded_human, str) else None
     message = human if human is not None else error.message
     typer.echo(message, err=True)
 
@@ -182,7 +195,13 @@ def run_command(
             workspace_root, json_output=json_output, command=command
         )
     try:
-        result, events, human = produce()
+        if mutating and workspace_root is not None:
+            from releaseledger.storage.locking import acquire_write_lock
+
+            with acquire_write_lock(workspace_root):
+                result, events, human = produce()
+        else:
+            result, events, human = produce()
     except ReleaseledgerError as exc:
         emit_error(command=command, error=exc, json_output=json_output)
         raise typer.Exit(launch_error_exit_code(exc)) from exc

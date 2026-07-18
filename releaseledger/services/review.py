@@ -28,6 +28,7 @@ from releaseledger.services.git_sources import (
     release_snapshot_drift_report,
     resolve_release_snapshot,
 )
+from releaseledger.services.releases import check_release_chain, reconcile_releases
 from releaseledger.storage.store import load_entries, load_release
 
 __all__ = [
@@ -340,6 +341,7 @@ def build_release_review(
     git_head: str | None = None,
     include_merges: str = "nontrivial",
     require_audit_sheet: bool = False,
+    include_history_health: bool = False,
 ) -> dict[str, object]:
     """Build a deterministic, read-only release review for ``version``.
 
@@ -459,6 +461,18 @@ def build_release_review(
         include_statuses=statuses,
     )
     lint_summary = _lint_summary(lint_result)
+    if include_history_health:
+        chain_block = check_release_chain(workspace_root)
+        reconciliation_block = reconcile_releases(
+            workspace_root, changelog_file=target_file
+        )
+    else:
+        chain_block = {"kind": "release_chain_check", "ok": True, "skipped": True}
+        reconciliation_block = {
+            "kind": "release_reconcile",
+            "ok": True,
+            "skipped": True,
+        }
 
     # 7. Changelog dry-run. Try a strict dry-run when requested so the review
     #    reports exactly what `build --strict` would reject; fall back to a
@@ -480,17 +494,27 @@ def build_release_review(
 
     git_coverage_ok, git_missing_count = _compute_git_coverage(coverage, git_block)
     release_state_ok = not (release.released_at and release.status != "released")
+    chain_ok = bool(chain_block.get("ok", False))
+    reconciliation_ok = bool(reconciliation_block.get("ok", False))
     checks: dict[str, object] = {
         "coverage_ok": coverage_ok,
         "lint_ok": lint_ok,
         "changelog_ok": changelog_ok,
         "release_state_ok": release_state_ok,
+        "chain_ok": chain_ok,
+        "reconciliation_ok": reconciliation_ok,
     }
     if git_block is not None:
         checks["git_coverage_ok"] = git_coverage_ok
-    # `ok` aggregates coverage + lint always, plus changelog and git only in
-    # strict mode.
-    ok = coverage_ok and lint_ok and (not strict or (changelog_ok and release_state_ok))
+    ok = coverage_ok and lint_ok and (
+        not strict
+        or (
+            changelog_ok
+            and release_state_ok
+            and chain_ok
+            and reconciliation_ok
+        )
+    )
     if strict and git_block is not None:
         ok = ok and git_coverage_ok
 
@@ -510,6 +534,10 @@ def build_release_review(
             f"{release.version} has released_at={release.released_at}"
             f" but status={release.status}."
         )
+    if not chain_ok:
+        recommendations.append("Repair the release predecessor chain before finalization.")
+    if not reconciliation_ok:
+        recommendations.append("Run release reconcile and resolve release/tag/changelog mismatches.")
 
     result: dict[str, object] = {
         "kind": "release_review",
@@ -526,6 +554,8 @@ def build_release_review(
         "include_internal": bool(include_internal),
         "include_statuses": list(statuses),
         "recommendations": recommendations,
+        "chain": chain_block,
+        "reconciliation": reconciliation_block,
     }
     if git_block is not None:
         result["git"] = git_block

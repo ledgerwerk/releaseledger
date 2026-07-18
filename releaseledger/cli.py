@@ -57,6 +57,7 @@ from releaseledger.services.config import (
 from releaseledger.services.entries import (
     add_many_release_entries,
     add_release_entry,
+    delete_release_entry,
     import_release_entry_file,
     list_release_entries,
     load_entry_batch_file,
@@ -86,6 +87,7 @@ from releaseledger.services.releases import (
     finalize_release,
     list_release_records,
     prepare_release,
+    reconcile_releases,
     remove_changelog_section,
     rename_changelog_section,
     rename_release,
@@ -671,6 +673,51 @@ def release_show_command(
     )
 
 
+@release_app.command("reconcile")
+def release_reconcile_command(
+    ctx: typer.Context,
+    strict: Annotated[
+        bool,
+        typer.Option("--strict", help="Exit non-zero when reconciliation finds problems."),
+    ] = False,
+    target_file: Annotated[
+        Path | None,
+        typer.Option("--target-file", help="CHANGELOG file to inspect."),
+    ] = None,
+ ) -> None:
+    """Compare release records with Git tags and changelog headings."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        result = reconcile_releases(
+            _paths(ctx).workspace_root, changelog_file=target_file
+        )
+        problems = result.get("problems", [])
+        lines = ["RECONCILIATION PROBLEMS"] if problems else ["RECONCILIATION OK"]
+        if isinstance(problems, list):
+            for problem in problems:
+                if isinstance(problem, dict):
+                    lines.append(
+                        f"{problem.get('kind')}  {problem.get('version', '')}".rstrip()
+                    )
+        human = "\\n".join(lines)
+        if strict and not bool(result.get("ok")):
+            raise ReleaseledgerError(
+                "Release state reconciliation failed.",
+                code="VALIDATION_ERROR",
+                exit_code=2,
+                data={"result": result, "human": human},
+            )
+        return result, [], human
+
+    run_command(
+        command="release.reconcile",
+        result_type="release_reconcile",
+        json_output=state.json_output,
+        produce=produce,
+    )
+
+
 @release_app.command("check")
 def release_check_command(
     ctx: typer.Context,
@@ -709,6 +756,7 @@ def release_check_command(
             strict=strict,
             git=True,
             require_audit_sheet=require_audit_sheet,
+            include_history_health=True,
         )
     except ReleaseledgerError as exc:
         emit_error(command="release.check", error=exc, json_output=state.json_output)
@@ -759,6 +807,21 @@ def release_cancel_command(
         bool,
         typer.Option("--ignore-missing", help="Skip a missing changelog section."),
     ] = False,
+    rewrite_successors: Annotated[
+        bool,
+        typer.Option(
+            "--rewrite-successors",
+            help="Rewrite direct successors to a safe predecessor.",
+        ),
+    ] = False,
+    successor_previous_version: Annotated[
+        str | None,
+        typer.Option("--successor-previous", help="New predecessor for successors."),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Preview cancellation without writing."),
+    ] = False,
 ) -> None:
     """Mark a release as canceled (never shipped)."""
     state = cli_state_from_context(ctx)
@@ -770,6 +833,13 @@ def release_cancel_command(
             reason=reason,
             superseded_by=superseded_by,
             force_released_unshipped=force_released_unshipped,
+            rewrite_successors=rewrite_successors,
+            successor_previous_version=(
+                successor_previous_version
+                if successor_previous_version is not None
+                else UNSET
+            ),
+            dry_run=dry_run,
             target_file=target_file,
             remove_changelog_section=remove_changelog_section,
             ignore_missing_section=ignore_missing_section,
@@ -781,6 +851,8 @@ def release_cancel_command(
         result_type="release",
         json_output=state.json_output,
         produce=produce,
+        workspace_root=_paths(ctx).workspace_root,
+        mutating=not dry_run,
     )
 
 
@@ -874,7 +946,13 @@ release_app.add_typer(chain_app, name="chain")
 
 
 @chain_app.command("check")
-def release_chain_check_command(ctx: typer.Context) -> None:
+def release_chain_check_command(
+    ctx: typer.Context,
+    strict: Annotated[
+        bool,
+        typer.Option("--strict", help="Exit non-zero when chain health fails."),
+    ] = False,
+ ) -> None:
     """Report problems in the release predecessor chain."""
     state = cli_state_from_context(ctx)
 
@@ -892,6 +970,13 @@ def release_chain_check_command(ctx: typer.Context) -> None:
             human = "\n".join(lines)
         else:
             human = "CHAIN OK"
+        if strict and not bool(result.get("ok")):
+            raise ReleaseledgerError(
+                "Release chain check failed.",
+                code="VALIDATION_ERROR",
+                exit_code=2,
+                data={"result": result, "human": human},
+            )
         return result, [], human
 
     run_command(
@@ -1129,6 +1214,48 @@ def entry_update_command(
     )
 
 
+@entry_app.command("delete")
+def entry_delete_command(
+    ctx: typer.Context,
+    version: Annotated[str, typer.Argument()],
+    entry_id: Annotated[str, typer.Argument()],
+    reason: Annotated[str, typer.Option("--reason", help="Why the entry is deleted.")],
+    force_accepted: Annotated[
+        bool,
+        typer.Option("--force-accepted", help="Allow deletion of accepted entries."),
+    ] = False,
+    detach_audit: Annotated[
+        bool,
+        typer.Option("--detach-audit", help="Detach audit rows targeting the entry."),
+    ] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+ ) -> None:
+    """Delete a release entry with lifecycle and audit safety checks."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        result = delete_release_entry(
+            _paths(ctx).workspace_root,
+            release_version=version,
+            entry_id=entry_id,
+            reason=reason,
+            force_accepted=force_accepted,
+            detach_audit=detach_audit,
+            dry_run=dry_run,
+        )
+        action = "previewed deletion of" if dry_run else "deleted"
+        return result, _event_ids(result), f"{action} entry {entry_id}"
+
+    run_command(
+        command="entry.delete",
+        result_type="release_entry_delete",
+        json_output=state.json_output,
+        produce=produce,
+        workspace_root=_paths(ctx).workspace_root,
+        mutating=not dry_run,
+    )
+
+
 @entry_app.command("import")
 def entry_import_command(
     ctx: typer.Context,
@@ -1230,6 +1357,16 @@ def entry_add_many_command(
                 f" and {warnings} warning(s).",
                 code="VALIDATION_ERROR",
                 exit_code=2,
+                data={
+                    "result": result,
+                    "human": (
+                        f"Entry batch validation failed with {len(issues)} issue(s) "
+                        f"and {warnings} warning(s).\n"
+                        + _render_lint_issues(
+                            [issue for issue in issues if isinstance(issue, dict)]
+                        )
+                    ),
+                },
             )
         action = "previewed" if dry_run else "added"
         return (
@@ -1244,7 +1381,7 @@ def entry_add_many_command(
         json_output=state.json_output,
         produce=produce,
         workspace_root=_paths(ctx).workspace_root,
-        mutating=True,
+        mutating=not dry_run,
     )
 
 
@@ -1814,6 +1951,13 @@ def build_command(
             help="Replace an existing section for VERSION (single-section only).",
         ),
     ] = False,
+    include_canceled: Annotated[
+        bool,
+        typer.Option(
+            "--include-canceled",
+            help="Allow single-release archival/debug rendering of canceled releases.",
+        ),
+    ] = False,
     all_releases: Annotated[
         bool,
         typer.Option("--all", help="Rebuild the full changelog file."),
@@ -1921,6 +2065,7 @@ def build_command(
                 template_name=template,
                 dry_run=dry_run,
                 replace_existing=replace_existing,
+                include_canceled=include_canceled,
                 include_statuses=tuple(include_statuses or ("accepted",)),
                 strict=strict,
                 allow_empty=allow_empty,

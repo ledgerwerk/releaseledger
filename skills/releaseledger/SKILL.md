@@ -580,3 +580,25 @@ from releaseledger.api.config import load_project_locator, render_default_releas
 ```
 
 Do not couple external code to internal storage paths or private service functions unless the user explicitly requests package development work.
+
+## Release-boundary recovery protocol
+
+Never use the newest local tag as a release boundary until shipment is confirmed. If a tagged release was never shipped, audit from the last actually shipped tag and keep the unshipped tag as a canceled tombstone.
+
+Before finalization, run the read-only gate sequence:
+
+```text
+releaseledger release reconcile --strict
+releaseledger release chain check --strict
+releaseledger release show VERSION
+releaseledger git range VERSION
+releaseledger audit validate VERSION --phase complete --strict
+releaseledger release check VERSION --strict
+releaseledger build --all --dry-run --strict
+```
+
+`release reconcile` compares release records, Git tags, and changelog headings. It never writes historical state and reports `tag_without_release`, `changelog_without_release`, `planned_with_tag`, and related mismatches.
+
+`source_refs` is the single coverage-owner surface for a commit or other coverable identity. Use `sources` for supporting provenance when several changelog bullets describe one commit. `entry add-many --dry-run --json` exposes `result.issues` without writing. Do not create a real entry to probe validation. Remove accidental draft or rejected probes with `entry delete VERSION ENTRY_ID --reason TEXT`; accepted entries require an explicit force flag.
+
+Canceling a release with direct successors requires `--rewrite-successors` and either a valid prior predecessor or `--successor-previous VERSION`. Use `--dry-run` before mutation. A single-release build rejects canceled releases unless `--include-canceled` is explicitly requested for archival/debug output.

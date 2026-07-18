@@ -17,6 +17,7 @@ from releaseledger.domain.entry import (
 from releaseledger.domain.event import (
     EVENT_ENTRY_ADDED,
     EVENT_ENTRY_BATCH_ADDED,
+    EVENT_ENTRY_DELETED,
     EVENT_ENTRY_IMPORTED,
     EVENT_ENTRY_UPDATED,
 )
@@ -53,6 +54,7 @@ __all__ = [
     "list_release_entries",
     "load_entry_batch_file",
     "show_release_entry",
+    "delete_release_entry",
     "update_release_entry",
 ]
 
@@ -259,7 +261,11 @@ def _duplicate_batch_issues(
                         "severity": "error",
                         "field": "source_refs",
                         "code": "duplicate_source_ref",
-                        "message": f"Source ref {ref} is already covered by {owner}.",
+                        "message": (
+                            f"Source ref {ref} is already the coverage identity of "
+                            f"{owner}. For another changelog bullet from the same "
+                            "commit, place the ref in `sources`, not `source_refs`."
+                        ),
                     }
                 )
             else:
@@ -323,6 +329,20 @@ def add_release_entry(
         breaking=breaking,
         internal=internal,
     )
+    duplicate_issues = _duplicate_batch_issues(
+        existing=entries, proposed=[record]
+    )
+    if duplicate_issues:
+        raise LaunchError(
+            str(duplicate_issues[0]["message"]),
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+            data={"issues": duplicate_issues, "entry": record.to_dict()},
+            remediation=[
+                "Use `sources` for supporting provenance when another entry "
+                "already owns the commit in `source_refs`."
+            ],
+        )
     if dry_run:
         return _payload(
             workspace_root,
@@ -721,6 +741,7 @@ def add_many_release_entries(
                     "entry_id": entry_id,
                     "field": field,
                     "severity": "error",
+                    "code": exc.code.lower(),
                     "message": exc.message,
                 }
             )
@@ -848,3 +869,121 @@ def list_release_entries(
 ) -> list[dict[str, object]]:
     load_release(workspace_root, release_version)
     return [entry.to_dict() for entry in load_entries(workspace_root, release_version)]
+
+def delete_release_entry(
+    workspace_root: Path,
+    *,
+    release_version: str,
+    entry_id: str,
+    reason: str,
+    force_accepted: bool = False,
+    detach_audit: bool = False,
+    dry_run: bool = False,
+ ) -> dict[str, object]:
+    """Delete one entry through the full release lifecycle."""
+    if not isinstance(reason, str) or not reason.strip():
+        raise LaunchError(
+            "Entry deletion requires a non-empty reason.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
+    release = load_release(workspace_root, release_version)
+    entry = _find_entry(workspace_root, release.version, entry_id)
+    if entry.status == "accepted" and not force_accepted:
+        raise LaunchError(
+            f"Accepted entry {entry_id} requires --force-accepted to delete.",
+            code=CODE_CONFLICT,
+            exit_code=2,
+        )
+    audit_sheet = load_commit_audit_sheet(workspace_root, release.version)
+    affected_rows: list[dict[str, object]] = []
+    detached_sheet = audit_sheet
+    if audit_sheet is not None:
+        targeted = [
+            row
+            for row in audit_sheet.rows
+            if row.target_entry_id == entry_id
+            or row.target_entry_key in {entry_id, f"{release.version}/{entry_id}"}
+        ]
+        affected_rows = [
+            {
+                "sha": row.sha,
+                "target_entry_key": row.target_entry_key,
+                "target_entry_id": row.target_entry_id,
+                "decision": row.decision,
+            }
+            for row in targeted
+        ]
+        if targeted and not detach_audit:
+            raise LaunchError(
+                f"Entry {entry_id} is targeted by {len(targeted)} audit row(s); "
+                "pass --detach-audit to clear those targets.",
+                code=CODE_CONFLICT,
+                exit_code=2,
+                data={"audit_rows": affected_rows},
+            )
+        if targeted and detach_audit:
+            detached_rows = tuple(
+                replace(
+                    row,
+                    target_entry_key=None,
+                    target_entry_id=None,
+                    decision="needs_review",
+                )
+                if row in targeted
+                else row
+                for row in audit_sheet.rows
+            )
+            detached_sheet = replace(
+                audit_sheet,
+                rows=detached_rows,
+                versioning=bump_versioning(audit_sheet.versioning),
+            )
+    updated_release = replace(
+        release,
+        entry_count=max(0, release.entry_count - 1),
+        versioning=bump_versioning(release.versioning),
+    )
+    result: dict[str, object] = {
+        "kind": "release_entry_delete",
+        "release_version": release.version,
+        "entry": entry.to_dict(),
+        "release": updated_release.to_dict(),
+        "deleted": True,
+        "written": not dry_run,
+        "dry_run": dry_run,
+        "audit_rows": affected_rows,
+        "detached_audit": bool(affected_rows and detach_audit),
+    }
+    if dry_run:
+        return result
+    delete_entry(workspace_root, release.version, entry.entry_id)
+    save_release(workspace_root, updated_release, overwrite=True)
+    if detached_sheet is not None and detached_sheet is not audit_sheet:
+        save_commit_audit_sheet(workspace_root, detached_sheet, overwrite=True)
+    event = append_event(
+        workspace_root,
+        event=EVENT_ENTRY_DELETED,
+        release_version=release.version,
+        entry_id=entry.entry_id,
+        record_revisions={
+            f"release:{release.version}": updated_release.versioning.revision,
+            f"entry:{release.version}/{entry.entry_id}": entry.versioning.revision,
+            **(
+                {
+                    f"audit:{release.version}": detached_sheet.versioning.revision
+                }
+                if detached_sheet is not None and detached_sheet is not audit_sheet
+                else {}
+            ),
+        },
+        data={
+            "reason": reason.strip(),
+            "force_accepted": bool(force_accepted),
+            "detach_audit": bool(detach_audit),
+            "affected_audit_rows": [row["sha"] for row in affected_rows],
+        },
+    )
+    rebuild_indexes(workspace_root)
+    result["events"] = [event.event_id]
+    return result
