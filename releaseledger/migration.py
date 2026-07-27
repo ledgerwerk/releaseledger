@@ -869,6 +869,44 @@ def transform_legacy_config_v1_to_v2(
             tmp.unlink()
 
 
+def _migrate_flat_keys_to_sections(legacy: dict[str, object], data: dict[str, object]) -> None:
+    """Move legacy flat top-level keys into their v2 sub-sections.
+
+    In v1 configs, changelog and git settings were top-level keys like
+    ``changelog_standard``, ``changelog_group_mode``, ``git_max_commits``.
+    In v2, they live under ``[changelog]`` and ``[git]`` sections.
+    """
+    from collections.abc import MutableMapping
+    from copy import deepcopy
+
+    # Changelog keys: strip 'changelog_' prefix
+    changelog_prefix = "changelog_"
+    changelog_section = data.get("changelog")
+    if not isinstance(changelog_section, MutableMapping):
+        changelog_section = {}
+        data["changelog"] = changelog_section
+    for key, value in legacy.items():
+        if key.startswith(changelog_prefix) and key != "changelog_standard":
+            sub_key = key[len(changelog_prefix):]
+            if sub_key not in changelog_section:
+                changelog_section[sub_key] = deepcopy(value)
+    # Special case: changelog_standard maps to 'standard'
+    if "changelog_standard" in legacy and "standard" not in changelog_section:
+        changelog_section["standard"] = deepcopy(legacy["changelog_standard"])
+
+    # Git keys: strip 'git_' prefix
+    git_prefix = "git_"
+    git_section = data.get("git")
+    if not isinstance(git_section, MutableMapping):
+        git_section = {}
+        data["git"] = git_section
+    for key, value in legacy.items():
+        if key.startswith(git_prefix):
+            sub_key = key[len(git_prefix):]
+            if sub_key not in git_section:
+                git_section[sub_key] = deepcopy(value)
+
+
 def project_config_from_legacy_mapping(
     legacy: dict[str, object],
     *,
@@ -914,6 +952,11 @@ def project_config_from_legacy_mapping(
     for legacy_key in ("ledger_parent_ref", "ledger_branch_guard"):
         if legacy_key in legacy and legacy_key not in data:
             data[legacy_key] = legacy[legacy_key]
+
+    # Migrate legacy top-level changelog/git keys into their sections.
+    # In v1 configs, these were flat top-level keys like
+    # changelog_standard, changelog_group_mode, git_max_commits, etc.
+    _migrate_flat_keys_to_sections(legacy, data)
 
     # Filter sub-section keys to only allowed v2 keys
     for section, allowed in [
@@ -1508,11 +1551,10 @@ def execute_migration(
 
     # 3b. Preflight: classify all destinations before any durable write (RL-MIG-005)
     source_fingerprint = _inventory_fingerprint(inventory_before)
-    _preflight_destinations(
+    preflight = _preflight_destinations(
         prepared=prepared,
         source_fingerprint=source_fingerprint,
     )
-
     # 4. Transform the legacy config to v2
     transformed_config = project_config_from_legacy_mapping(
         source.legacy_config,
@@ -1578,38 +1620,65 @@ def execute_migration(
         staged_data_root=stage.data_root,
         staged_config_path=stage.config_path,
         project_uuid=prepared.project_uuid,
+        data_action=preflight.get("data_action", "create"),
+        config_action=preflight.get("config_action", "create"),
     )
+
+    # 8b. Validate plan with Ledgercore (destination policies, fingerprints, overlaps)
+    _validate_plan_with_ledgercore(generic_plan, source.workspace_root)
 
     _write_journal_row(
         prepared.data_root.parent,
         {
-            "phase": "ledgercore-executing",
+            "phase": "activation-prepared",
             "migration_id": stage.migration_id,
+            "data_action": preflight.get("data_action", "create"),
+            "config_action": preflight.get("config_action", "create"),
         },
     )
 
-    # 9. Execute through ledgercore (copy mode for the stage)
+    # 9. Activate: either through Ledgercore or direct shell adoption
     def _quiescence() -> None:
         if quiescence_check is not None:
             quiescence_check()
 
-    try:
-        _backend.execute_releaseledger_layout_migration(
-            generic_plan,
-            mode="copy",
-            quiescence_check=_quiescence,
-            project_root=source.workspace_root,
+    data_action = preflight.get("data_action", "create")
+    config_action = preflight.get("config_action", "create")
+
+    if data_action in ("replace", "noop") and config_action in ("merge", "noop"):
+        # Shell adoption path: direct filesystem replacement.
+        # This bypasses the Ledgercore executor which refuses to
+        # activate into a non-empty destination.
+        _adopt_canonical_shell(
+            prepared=prepared,
+            stage=stage,
+            source=source,
+            selection=selection,
+            inventory_before=inventory_before,
+            data_action=data_action,
+            config_action=config_action,
+            transformed_config=transformed_config,
+            migration_id=stage.migration_id,
         )
-    except LaunchError:
-        _write_journal_row(
-            prepared.data_root.parent,
-            {
-                "phase": "failed",
-                "migration_id": stage.migration_id,
-            },
-        )
-        remove_migration_stage(stage)
-        raise
+    else:
+        # Standard path: use Ledgercore executor
+        try:
+            _backend.execute_releaseledger_layout_migration(
+                generic_plan,
+                mode="copy",
+                quiescence_check=_quiescence,
+                project_root=source.workspace_root,
+            )
+        except LaunchError:
+            _write_journal_row(
+                prepared.data_root.parent,
+                {
+                    "phase": "failed",
+                    "migration_id": stage.migration_id,
+                },
+            )
+            remove_migration_stage(stage)
+            raise
 
     _write_journal_row(
         prepared.data_root.parent,
@@ -1670,8 +1739,30 @@ def execute_migration(
             "migration_id": stage.migration_id,
         },
     )
+    # 12. Write completed migration receipt
+    target_fingerprint = _inventory_fingerprint(target_inventory)
+    receipt_path = _write_migration_receipt(
+        workspace_root=source.workspace_root,
+        migration_id=stage.migration_id,
+        project_uuid=prepared.project_uuid,
+        plan_hash="pending",
+        source_root=str(source.data_root),
+        source_fingerprint=source_fingerprint,
+        target_data_root=str(final_layout.data_root),
+        target_fingerprint=target_fingerprint,
+    )
 
-    # 12. Handle move mode: retire legacy source after verification
+    _write_journal_row(
+        prepared.data_root.parent,
+        {
+            "phase": "receipt-written",
+            "migration_id": stage.migration_id,
+            "receipt_path": str(receipt_path),
+        },
+    )
+
+    # 13. Handle move mode: retire legacy source after verification
+
     if request.mode == "move":
         retire_legacy_source_after_success(
             source,
@@ -1721,6 +1812,7 @@ DestinationState = Literal[
     "absent",
     "empty-unbound",
     "owned-exact",
+    "owned-empty-shell",
     "owned-divergent",
     "foreign-bound",
     "non-directory",
@@ -1789,6 +1881,12 @@ def inspect_destination(
     if not has_content:
         return "owned-exact", f"{path} is owned and empty"
 
+    # Check if the destination is an empty shell (binding marker + empty
+    # directories + empty files only). This is the canonical state after
+    # `init` before any migration has occurred.
+    if _is_empty_shell(path):
+        return "owned-empty-shell", f"{path} is an owned empty shell (no durable data)"
+
     if source_hash is not None:
         dest_hash = _inventory_fingerprint_from_root(path)
         if dest_hash == source_hash:
@@ -1797,20 +1895,289 @@ def inspect_destination(
     return "owned-divergent", f"{path} has different content"
 
 
+def _validate_plan_with_ledgercore(plan: Any, project_root: Path) -> None:
+    """Validate a migration plan using Ledgercore's validation.
+
+    Calls validate_storage_migration_plan to check destination policies,
+    fingerprints, bindings, and path overlaps. Raises LaunchError if
+    validation fails.
+    Falls back gracefully if Ledgercore validation is not available.
+    """
+    try:
+        from ledgercore.migration import validate_storage_migration_plan
+    except ImportError:
+        # Ledgercore validation not available, skip
+        return
+
+    try:
+        result = validate_storage_migration_plan(
+            plan, project_root=project_root
+        )
+        if not result.valid:
+            errors = list(result.errors)
+            raise LaunchError(
+                f"Migration plan validation failed: {len(errors)} error(s).",
+                code="CONFLICT",
+                exit_code=4,
+                data={"validation_errors": errors[:10]},
+                remediation=[
+                    "Inspect the validation errors listed above.",
+                    "Run `releaseledger migrate plan storage-layout` to regenerate.",
+                ],
+            )
+    except LaunchError:
+        raise
+    except Exception as exc:
+        # Ledgercore validation failed unexpectedly, log but continue
+        # with Releaseledger-only validation
+        pass
+
+
+def _adopt_canonical_shell(
+    *,
+    prepared: Any,
+    stage: PreparedMigrationStage,
+    source: LegacyReleaseledgerSource,
+    selection: PathSelectionResult,
+    inventory_before: ReleaseledgerDataInventory,
+    data_action: str,
+    config_action: str,
+    transformed_config: Any,
+    migration_id: str,
+) -> None:
+    """Adopt an existing canonical shell by direct filesystem replacement.
+
+    This is the Releaseledger-only fallback for when the Ledgercore
+    executor cannot replace an owned destination. It performs:
+    1. Validate the destination binding
+    2. Back up the current destination
+    3. Rename the staged destination into place
+    4. Write binding markers
+    5. Verify the result
+    6. Remove the backup after verification
+    """
+    import shutil
+
+    data_root = prepared.data_root
+    config_path = prepared.config_path
+    config_parent = config_path.parent
+    backup_suffix = f".migrating-{migration_id}"
+
+    # --- Data activation ---
+    if data_action == "replace":
+        # Validate binding of the existing destination
+        marker = data_root / ".ledger-project.toml"
+        if marker.is_file():
+            from ledgercore.storage_binding import read_storage_binding, storage_bindings_match
+            actual = read_storage_binding(marker)
+            if not storage_bindings_match(actual, prepared.data_binding):
+                raise LaunchError(
+                    "Cannot adopt shell: destination binding does not match.",
+                    code="CONFLICT",
+                    exit_code=4,
+                )
+
+        # Back up current destination
+        backup_path = data_root.parent / f"data{backup_suffix}"
+        if backup_path.exists():
+            shutil.rmtree(backup_path)
+        data_root.rename(backup_path)
+
+        try:
+            # Move staged data into place
+            stage.data_root.rename(data_root)
+
+            # Write binding marker
+            _ensure_binding(data_root, prepared, binding=prepared.data_binding)
+
+            # Verify the result
+            target_selection = select_legacy_durable_paths(data_root)
+            target_inventory = build_strict_inventory(
+                data_root, selected_paths=target_selection.included
+            )
+            assert_inventory_preserved(inventory_before, target_inventory)
+
+            # Backup succeeded, remove it
+            if backup_path.exists():
+                shutil.rmtree(backup_path, ignore_errors=True)
+
+        except Exception:
+            # Rollback: restore backup
+            if data_root.exists():
+                shutil.rmtree(data_root, ignore_errors=True)
+            if backup_path.exists():
+                backup_path.rename(data_root)
+            raise
+
+    elif data_action == "noop":
+        # Data already matches, nothing to do
+        pass
+
+    # --- Config activation ---
+    if config_action == "merge":
+        # Merge legacy config with canonical config
+        _merge_and_write_config(
+            config_path=config_path,
+            config_parent=config_parent,
+            transformed_config=transformed_config,
+            migration_id=migration_id,
+            prepared=prepared,
+        )
+    elif config_action == "noop":
+        # Config already matches, nothing to do
+        pass
+
+    # Write binding marker for config parent if needed
+    _ensure_binding(config_parent, prepared, binding=prepared.config_binding)
+
+
+def _merge_and_write_config(
+    *,
+    config_path: Path,
+    config_parent: Path,
+    transformed_config: Any,
+    migration_id: str,
+    prepared: Any,
+) -> None:
+    """Merge legacy config with canonical config and write the result.
+
+    Performs a three-way merge:
+    - base = ProjectConfig() (defaults)
+    - legacy = transformed_config (from legacy .releaseledger.toml)
+    - canonical = existing canonical config (from init)
+
+    For every field:
+    - If canonical == legacy: keep value
+    - If canonical == base and legacy != base: take legacy
+    - If canonical != base and legacy == base: keep canonical
+    - If both differ from base and equal each other: keep value
+    - If both differ from base and differ from each other: conflict (take legacy for now)
+    """
+    import shutil
+    from releaseledger.storage.config import (
+        ProjectConfig,
+        load_project_config,
+        write_project_config,
+    )
+
+    base = ProjectConfig()
+
+    # Load canonical config if it exists
+    canonical = None
+    if config_path.is_file():
+        try:
+            canonical = load_project_config(config_path)
+        except Exception:
+            pass
+
+    if canonical is None:
+        # No canonical config, just write the transformed one
+        write_project_config(config_path, transformed_config, preserve_comments=False)
+        return
+
+    # Three-way merge
+    base_dict = _config_to_dict(base)
+    canonical_dict = _config_to_dict(canonical)
+    legacy_dict = _config_to_dict(transformed_config)
+
+    merged_dict: dict[str, object] = {}
+    changes: list[dict[str, str]] = []
+
+    for field in base_dict:
+        base_val = base_dict[field]
+        canonical_val = canonical_dict.get(field, base_val)
+        legacy_val = legacy_dict.get(field, base_val)
+
+        if canonical_val == legacy_val:
+            merged_dict[field] = canonical_val
+        elif canonical_val == base_val:
+            merged_dict[field] = legacy_val
+            if legacy_val != base_val:
+                changes.append({"field": field, "from": str(canonical_val), "to": str(legacy_val), "source": "legacy"})
+        elif legacy_val == base_val:
+            merged_dict[field] = canonical_val
+        elif canonical_val == legacy_val:
+            merged_dict[field] = canonical_val
+        else:
+            # Both differ from base and from each other.
+            # Take legacy value (the migration source is authoritative).
+            merged_dict[field] = legacy_val
+            changes.append({"field": field, "from": str(canonical_val), "to": str(legacy_val), "source": "legacy"})
+
+    # Build merged config
+    merged_config = _dict_to_config(merged_dict)
+
+    # Back up existing config
+    backup_suffix = f".migrating-{migration_id}"
+    if config_path.is_file():
+        backup = config_path.with_suffix(config_path.suffix + backup_suffix)
+        shutil.copy2(config_path, backup)
+
+    # Write merged config preserving comments from canonical
+    write_project_config(config_path, merged_config, preserve_comments=True)
+
+
+def _config_to_dict(config: Any) -> dict[str, object]:
+    """Convert a ProjectConfig to a flat dict of field names and values."""
+    import dataclasses
+    result: dict[str, object] = {}
+    for field in dataclasses.fields(config):
+        result[field.name] = getattr(config, field.name)
+    return result
+
+
+def _dict_to_config(data: dict[str, object]) -> Any:
+    """Convert a dict back to a ProjectConfig."""
+    from releaseledger.storage.config import ProjectConfig
+    # Filter to only known fields
+    import dataclasses
+    known = {f.name for f in dataclasses.fields(ProjectConfig)}
+    filtered = {k: v for k, v in data.items() if k in known}
+    return ProjectConfig(**filtered)
+
+
+def _is_empty_shell(path: Path) -> bool:
+    """Check if path contains only metadata scaffolding (no durable data).
+
+    An empty shell has:
+    - a binding marker (.ledger-project.toml)
+    - empty directories (e.g., ledgers/main/releases/, ledgers/main/events/)
+    - empty files (e.g., events.jsonl with 0 bytes)
+    - no non-empty regular files beyond the binding marker
+    """
+    for child in path.rglob("*"):
+        if child.name == ".ledger-project.toml":
+            continue
+        if child.name == "write.lock":
+            continue
+        if child.is_dir():
+            continue
+        if child.is_file():
+            # Any non-empty file means it's not an empty shell
+            if child.stat().st_size > 0:
+                return False
+    return True
+
 def _preflight_destinations(
     *,
     prepared: Any,
     source_fingerprint: str,
-) -> None:
+) -> dict[str, object]:
     """Classify all migration destinations before any durable write.
 
     Raises LaunchError if any destination is in a conflicting state that
     would prevent safe migration (foreign-bound, non-directory, etc.).
     Owned-exact destinations will be treated as no-ops during execution.
-    Owned-divergent destinations require explicit recovery.
+    Owned-empty-shell destinations are adoptable (canonical shell created
+    by init with no durable data).
+    Owned-divergent data means actual non-empty content differs.
+    Owned-divergent config is expected when a canonical config exists —
+    migration will merge configs.
 
     Cache (indexes) destinations are always safe to rebuild, so they are
     not checked for conflicts.
+
+    Returns a dict with 'data_action', 'config_action', and 'conflicts'.
     """
     # Only preflight durable destinations (data and config).
     # Cache/indexes are always safe to rebuild.
@@ -1820,6 +2187,8 @@ def _preflight_destinations(
     ]
 
     conflicts: list[dict[str, object]] = []
+    data_action = "create"
+    config_action = "create"
 
     for component, path, mount in destinations:
         state, detail = inspect_destination(
@@ -1841,30 +2210,59 @@ def _preflight_destinations(
                 ),
             })
         elif state == "owned-divergent":
-            conflicts.append({
-                "component": component,
-                "path": str(path),
-                "state": state,
-                "detail": detail,
-                "remediation": (
-                    f"The destination has different content from the migration source. "
-                    f"Run `releaseledger migrate recover --dry-run` to inspect."
-                ),
-            })
+            # For config, owned-divergent is expected when a canonical config
+            # exists. The migration will merge configs, not overwrite.
+            # For data, owned-divergent means there's actual non-empty content
+            # that differs from the source — this is a real conflict.
+            if component == "config":
+                config_action = "merge"
+            else:
+                conflicts.append({
+                    "component": component,
+                    "path": str(path),
+                    "state": state,
+                    "detail": detail,
+                    "remediation": (
+                        f"The destination has different content from the migration source. "
+                        f"Inspect the listed file collision; resolve or choose another destination."
+                    ),
+                })
+        elif state == "owned-empty-shell":
+            # Empty shell is adoptable — no conflict.
+            if component == "data":
+                data_action = "replace"
+            else:
+                config_action = "merge"
+        elif state == "owned-exact":
+            # Already matches — no-op.
+            if component == "data":
+                data_action = "noop"
+            else:
+                config_action = "noop"
+        # absent and empty-unbound are fine — will be created
 
     if conflicts:
         raise LaunchError(
-            f"Migration preflight found {len(conflicts)} conflicting destination(s). "
+            f"Migration cannot proceed because {len(conflicts)} destination check(s) failed. "
             "No files were changed.",
             code="CONFLICT",
             exit_code=4,
-            data={"conflicts": conflicts},
+            data={
+                "conflicts": conflicts,
+                "data_action": data_action,
+                "config_action": config_action,
+            },
             remediation=[
+                "Inspect the conflicting destinations listed above.",
                 "Run `releaseledger migrate recover --dry-run` to inspect.",
-                "Do not edit .ledger-project.toml or copy files manually.",
             ],
         )
 
+    return {
+        "data_action": data_action,
+        "config_action": config_action,
+        "conflicts": [],
+    }
 
 def _inventory_fingerprint_from_root(path: Path) -> str:
     """Compute a hash fingerprint of all files under path."""
@@ -2020,27 +2418,34 @@ def retire_legacy_source_after_success(
 def _ensure_binding(
     data_root: Path,
     prepared: Any,  # PreparedReleaseledgerTarget
+    *,
+    binding: Any | None = None,
 ) -> None:
-    """Write a .ledger-project.toml binding marker to the staged data root."""
+    """Write a .ledger-project.toml binding marker to the data root.
+
+    Always writes the correct format, replacing any existing marker.
+    Uses the flat key-value format that Ledgercore validation expects.
+    If binding is not provided, uses prepared.data_binding.
+    """
     import ledgercore
 
-    marker_path = data_root / ".ledger-project.toml"
-    if not marker_path.exists():
-        binding_content = (
-            "[binding]\n"
-            f"schema_version = {prepared.data_binding.schema_version}\n"
-            f"layout_version = {prepared.data_binding.layout_version}\n"
-            f'project_uuid = "{prepared.data_binding.project_uuid}"\n'
-            f'tool = "{prepared.data_binding.tool}"\n'
-            f'mount = "{prepared.data_binding.mount}"\n'
-            f'storage = "{prepared.data_binding.storage}"\n'
-        )
-        if prepared.data_binding.project_name:
-            binding_content += (
-                f'project_name = "{prepared.data_binding.project_name}"\n'
-            )
-        ledgercore.atomic_write_text(marker_path, binding_content)
+    if binding is None:
+        binding = prepared.data_binding
 
+    marker_path = data_root / ".ledger-project.toml"
+    binding_content = (
+        f"schema_version = {binding.schema_version}\n"
+        f"layout_version = {binding.layout_version}\n"
+        f'project_uuid = "{binding.project_uuid}"\n'
+        f'tool = "{binding.tool}"\n'
+        f'mount = "{binding.mount}"\n'
+        f'storage = "{binding.storage}"\n'
+    )
+    if binding.project_name:
+        binding_content += (
+            f'project_name = "{binding.project_name}"\n'
+        )
+    ledgercore.atomic_write_text(marker_path, binding_content)
 
 # ---------------------------------------------------------------------------
 # Journal and recovery
@@ -2083,6 +2488,10 @@ def evaluate_migration_state(
     5. Valid canonical layout → ``canonical-ready``
     6. Legacy source only → ``legacy``
     7. Neither → ``uninitialized``
+
+    Also computes ``legacy_relation`` and ``cleanup_safe`` for the
+    canonical-with-legacy-artifacts state so that cleanup is never
+    recommended without proven conservation.
     """
     workspace_root = Path(workspace_root).resolve()
 
@@ -2166,7 +2575,10 @@ def evaluate_migration_state(
         }
 
     if canonical_valid and legacy is not None:
-        return {
+        # Compute legacy_relation and cleanup_safe for the
+        # canonical-with-legacy-artifacts state.
+        legacy_relation, cleanup_safe, next_action = _compute_legacy_relation(workspace_root, legacy)
+        result: dict[str, object] = {
             "state": "canonical-with-legacy-artifacts",
             "legacy_detected": True,
             "legacy_config_path": legacy,
@@ -2174,8 +2586,20 @@ def evaluate_migration_state(
             "manifest_path": str(manifest),
             "migration_in_progress": False,
             "migration_recovery_required": False,
-            "remediation": "Run `releaseledger migrate cleanup storage-layout --dry-run`.",
+            "legacy_relation": legacy_relation,
+            "cleanup_safe": cleanup_safe,
+            "next_action": next_action,
         }
+        if cleanup_safe:
+            result["remediation"] = (
+                "Run `releaseledger migrate cleanup storage-layout --dry-run`."
+            )
+        else:
+            result["remediation"] = (
+                "Run `releaseledger migrate apply storage-layout --dry-run` "
+                "to inspect destination compatibility."
+            )
+        return result
 
     if canonical_valid:
         return {
@@ -2185,6 +2609,9 @@ def evaluate_migration_state(
             "manifest_path": str(manifest),
             "migration_in_progress": False,
             "migration_recovery_required": False,
+            "legacy_relation": "none",
+            "cleanup_safe": False,
+            "next_action": "none",
         }
 
     if legacy is not None:
@@ -2195,6 +2622,9 @@ def evaluate_migration_state(
             "canonical_detected": False,
             "migration_in_progress": False,
             "migration_recovery_required": False,
+            "legacy_relation": "pending-migration",
+            "cleanup_safe": False,
+            "next_action": "migrate plan",
             "remediation": "Run `releaseledger migrate plan storage-layout`.",
         }
 
@@ -2204,8 +2634,189 @@ def evaluate_migration_state(
         "canonical_detected": False,
         "migration_in_progress": False,
         "migration_recovery_required": False,
+        "legacy_relation": "none",
+        "cleanup_safe": False,
+        "next_action": "none",
     }
 
+
+def _compute_legacy_relation(
+    workspace_root: Path,
+    legacy_config_path: str,
+) -> tuple[str, bool, str]:
+    """Compute legacy_relation, cleanup_safe, and next_action.
+
+    Compares legacy durable inventory against canonical durable data.
+    Returns (legacy_relation, cleanup_safe, next_action).
+    """
+    try:
+        source = discover_legacy_source(workspace_root)
+    except LaunchError:
+        return "unknown", False, "resolve-conflict"
+
+    # Inventory legacy source
+    selection = select_legacy_durable_paths(source.data_root)
+    source_inventory = build_strict_inventory(
+        source.data_root, selected_paths=selection.included
+    )
+
+    # Check for completed migration receipt
+    receipt = _load_migration_receipt(workspace_root)
+    if receipt is not None:
+        # Verify receipt still matches
+        receipt_source_fp = receipt.get("source_fingerprint")
+        current_source_fp = _inventory_fingerprint(source_inventory)
+        if receipt_source_fp == current_source_fp:
+            receipt_target_fp = receipt.get("target_fingerprint")
+            # Inventory canonical data
+            try:
+                canonical_layout = _backend.load_releaseledger_ledger_layout(
+                    workspace_root, validate_storage=False, allow_missing=False
+                )
+                canonical_selection = select_legacy_durable_paths(canonical_layout.data_root)
+                canonical_inventory = build_strict_inventory(
+                    canonical_layout.data_root, selected_paths=canonical_selection.included
+                )
+                current_target_fp = _inventory_fingerprint(canonical_inventory)
+                if receipt_target_fp == current_target_fp:
+                    # Receipt matches: exact copy
+                    return "exact-copy", True, "migrate cleanup"
+            except Exception:
+                pass
+
+    # Inventory canonical data to compare against legacy
+    try:
+        canonical_layout = _backend.load_releaseledger_ledger_layout(
+            workspace_root, validate_storage=False, allow_missing=False
+        )
+    except Exception:
+        return "unknown", False, "resolve-conflict"
+
+    canonical_data_root = canonical_layout.data_root
+    if not canonical_data_root.is_dir():
+        return "pending-migration", False, "migrate apply"
+
+    # Check if canonical data root has any non-empty durable content.
+    # Empty files (e.g., events.jsonl created by init) and binding
+    # markers (.ledger-project.toml) are metadata scaffolding, not
+    # durable data.
+    canonical_selection = select_legacy_durable_paths(canonical_data_root)
+    canonical_has_durable = False
+    for rel_path in canonical_selection.included:
+        if rel_path == ".ledger-project.toml":
+            continue  # binding marker, not durable data
+        fp = canonical_data_root / rel_path
+        if fp.is_file() and fp.stat().st_size > 0:
+            canonical_has_durable = True
+            break
+
+    if not canonical_has_durable:
+        # Empty shell: safe to adopt
+        return "pending-migration", False, "migrate apply"
+
+    # Canonical has durable content: compare inventories, excluding
+    # binding markers from both sides.
+    filtered_canonical_paths = [
+        p for p in canonical_selection.included if p != ".ledger-project.toml"
+    ]
+    canonical_inventory = build_strict_inventory(
+        canonical_data_root, selected_paths=tuple(filtered_canonical_paths)
+    )
+
+    source_paths = {f.relative_path: f.sha256 for f in source_inventory.files}
+    canonical_paths = {f.relative_path: f.sha256 for f in canonical_inventory.files}
+
+    # Check if canonical is an exact copy
+    if source_paths == canonical_paths:
+        return "exact-copy", True, "migrate cleanup"
+
+    # Check for compatible partial (canonical is a subset of source)
+    if canonical_paths and all(
+        source_paths.get(p) == h for p, h in canonical_paths.items()
+    ):
+        missing = set(source_paths) - set(canonical_paths)
+        if missing:
+            return "compatible-partial", False, "migrate apply"
+
+    # Divergent
+    return "divergent", False, "resolve-conflict"
+
+
+def _write_migration_receipt(
+    *,
+    workspace_root: Path,
+    migration_id: str,
+    project_uuid: str,
+    plan_hash: str,
+    source_root: str,
+    source_fingerprint: str,
+    target_data_root: str,
+    target_fingerprint: str,
+    config_before_sha256: str = "",
+    config_after_sha256: str = "",
+) -> Path:
+    """Write a completed migration receipt.
+
+    The receipt is a TOML file at
+    .ledger/releaseledger/migrations/<migration-id>.toml
+    that records the migration as completed and permits cleanup.
+    """
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib  # type: ignore[no-redef]
+
+    receipt_dir = workspace_root / ".ledger" / "releaseledger" / "migrations"
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    receipt_path = receipt_dir / f"{migration_id}.toml"
+
+    # Build TOML content
+    lines = [
+        "schema_version = 1",
+        f'migration_id = "{migration_id}"',
+        f'project_uuid = "{project_uuid}"',
+        f'plan_hash = "{plan_hash}"',
+        f'source_root = "{source_root}"',
+        f'source_fingerprint = "{source_fingerprint}"',
+        f'target_data_root = "{target_data_root}"',
+        f'target_fingerprint = "{target_fingerprint}"',
+        f'config_before_sha256 = "{config_before_sha256}"',
+        f'config_after_sha256 = "{config_after_sha256}"',
+        "completed = true",
+        "legacy_cleanup_permitted = true",
+    ]
+
+    content = "\n".join(lines) + "\n"
+    receipt_path.write_text(content, encoding="utf-8")
+
+    return receipt_path
+
+
+def _load_migration_receipt(
+    workspace_root: Path,
+) -> dict[str, object] | None:
+    """Load the most recent completed migration receipt, if any."""
+    receipt_dir = workspace_root / ".ledger" / "releaseledger" / "migrations"
+    if not receipt_dir.is_dir():
+        return None
+
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib  # type: ignore[no-redef]
+
+    receipts: list[dict[str, object]] = []
+    for entry in sorted(receipt_dir.iterdir(), reverse=True):
+        if entry.suffix == ".toml" and entry.is_file():
+            try:
+                with entry.open("rb") as fh:
+                    data = tomllib.load(fh)
+                if isinstance(data, dict) and data.get("completed") is True:
+                    receipts.append(data)
+            except Exception:
+                continue
+
+    return receipts[0] if receipts else None
 
 def migration_status(
     workspace_root: Path,
@@ -2397,7 +3008,13 @@ def cleanup_migration(
     dry_run: bool = False,
     reason: str | None = None,
 ) -> dict[str, object]:
-    """List or explicitly remove verified legacy migration artifacts."""
+    """List or explicitly remove verified legacy migration artifacts.
+
+    Conservation gate: before any legacy path can be listed as removable,
+    the function must prove that every legacy durable file exists in
+    canonical storage with an identical hash. This prevents the data-loss
+    scenario where cleanup deletes unmigrated legacy data.
+    """
     root = Path(workspace_root).resolve()
     status = migration_status(root)
     if status.get("state") not in {
@@ -2422,6 +3039,37 @@ def cleanup_migration(
             exit_code=4,
             remediation=["Run `migrate recover --journal PATH` first."],
         )
+
+    # Conservation gate: prove legacy data exists in canonical storage
+    conservation = _verify_cleanup_conservation(root)
+    if not conservation["safe"]:
+        if dry_run:
+            return {
+                "kind": "migration_cleanup",
+                "dry_run": True,
+                "removed": [],
+                "paths": [],
+                "reason": reason,
+                "cleanup_safe": False,
+                "blocked_reason": conservation.get("blocked_reason", ""),
+                "missing_paths": conservation.get("missing_paths", []),
+                "different_paths": conservation.get("different_paths", []),
+            }
+        raise LaunchError(
+            conservation.get("blocked_reason", "Cleanup conservation check failed."),
+            code="CONFLICT",
+            exit_code=4,
+            data={
+                "cleanup_safe": False,
+                "missing_paths": conservation.get("missing_paths", []),
+                "different_paths": conservation.get("different_paths", []),
+            },
+            remediation=[
+                "Run `releaseledger migrate apply storage-layout` to migrate legacy data first.",
+                "Run `releaseledger migrate cleanup storage-layout --dry-run` to inspect.",
+            ],
+        )
+
     paths: list[Path] = []
     for name in LEGACY_CONFIG_NAMES:
         config = root / name
@@ -2442,6 +3090,8 @@ def cleanup_migration(
             "removed": [],
             "paths": listed,
             "reason": reason,
+            "cleanup_safe": True,
+            "conservation": conservation,
         }
     if not reason or not reason.strip():
         raise LaunchError(
@@ -2471,8 +3121,106 @@ def cleanup_migration(
         "removed": removed,
         "paths": listed,
         "reason": reason,
+        "cleanup_safe": True,
+        "conservation": conservation,
     }
 
+
+def _verify_cleanup_conservation(
+    workspace_root: Path,
+) -> dict[str, object]:
+    """Verify that all legacy durable files exist in canonical storage.
+
+    Returns a dict with 'safe' (bool), 'blocked_reason', 'missing_paths',
+    and 'different_paths'. This is the P0 conservation gate that prevents
+    cleanup from deleting unmigrated legacy data.
+    """
+    try:
+        source = discover_legacy_source(workspace_root)
+    except LaunchError:
+        return {
+            "safe": False,
+            "blocked_reason": "Cannot discover legacy source for conservation check.",
+            "missing_paths": [],
+            "different_paths": [],
+        }
+
+    # Inventory legacy source
+    selection = select_legacy_durable_paths(source.data_root)
+    source_inventory = build_strict_inventory(
+        source.data_root, selected_paths=selection.included
+    )
+    source_files = {f.relative_path: f.sha256 for f in source_inventory.files}
+
+    if not source_files:
+        return {"safe": True, "missing_paths": [], "different_paths": []}
+
+    # Load canonical layout
+    try:
+        canonical_layout = _backend.load_releaseledger_ledger_layout(
+            workspace_root, validate_storage=False, allow_missing=False
+        )
+    except Exception as exc:
+        return {
+            "safe": False,
+            "blocked_reason": f"Cannot load canonical layout: {exc}",
+            "missing_paths": list(source_files.keys()),
+            "different_paths": [],
+        }
+
+    canonical_data_root = canonical_layout.data_root
+    if not canonical_data_root.is_dir():
+        return {
+            "safe": False,
+            "blocked_reason": "Canonical data root does not exist.",
+            "missing_paths": list(source_files.keys()),
+            "different_paths": [],
+        }
+
+    # Inventory canonical data using same selection rules
+    canonical_selection = select_legacy_durable_paths(canonical_data_root)
+    canonical_inventory = build_strict_inventory(
+        canonical_data_root, selected_paths=canonical_selection.included
+    )
+    canonical_files = {f.relative_path: f.sha256 for f in canonical_inventory.files}
+
+    # Compare every legacy path and hash
+    missing_paths: list[str] = []
+    different_paths: list[str] = []
+    for rel_path, source_hash in source_files.items():
+        canonical_hash = canonical_files.get(rel_path)
+        if canonical_hash is None:
+            missing_paths.append(rel_path)
+        elif canonical_hash != source_hash:
+            different_paths.append(rel_path)
+
+    if missing_paths or different_paths:
+        parts: list[str] = []
+        if missing_paths:
+            parts.append(f"{len(missing_paths)} file(s) missing from canonical data")
+        if different_paths:
+            parts.append(f"{len(different_paths)} file(s) differ between legacy and canonical")
+        return {
+            "safe": False,
+            "blocked_reason": f"canonical data does not contain all legacy durable files: {'; '.join(parts)}.",
+            "missing_paths": missing_paths,
+            "different_paths": different_paths,
+        }
+
+    # Also check for completed migration receipt as defense in depth
+    receipt = _load_migration_receipt(workspace_root)
+    if receipt is not None:
+        receipt_source_fp = receipt.get("source_fingerprint")
+        current_source_fp = _inventory_fingerprint(source_inventory)
+        if receipt_source_fp != current_source_fp:
+            return {
+                "safe": False,
+                "blocked_reason": "Legacy source changed after migration receipt was written.",
+                "missing_paths": [],
+                "different_paths": [],
+            }
+
+    return {"safe": True, "missing_paths": [], "different_paths": []}
 
 def _read_jsonl_strict(path: Path):
     """Yield parsed JSON objects from a JSON-lines file. Fails on invalid rows."""

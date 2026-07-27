@@ -29,7 +29,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from ledgercore.errors import (
     LedgerCoreError,
@@ -1028,6 +1028,10 @@ def build_releaseledger_legacy_migration_plan(
     staged_config_path: Path,
     project_uuid: str,
     migration_id: str | None = None,
+    data_action: str = "create",
+    config_action: str = "create",
+    expected_data_fingerprint: str | None = None,
+    expected_config_fingerprint: str | None = None,
 ) -> Any:
     """Build an immutable StorageMigrationPlan from a staged legacy source.
 
@@ -1036,6 +1040,11 @@ def build_releaseledger_legacy_migration_plan(
     canonical target. The plan is built manually (not via the generic
     planner) so the source is always the stage, never the current
     canonical data mount.
+
+    When data_action is "replace" (owned-empty-shell), sets
+    destination_policy="replace-owned" and passes the expected fingerprint.
+    When data_action is "noop" (owned-exact), sets
+    destination_policy="noop-if-exact".
 
     If migration_id is provided, it is used as-is (for shared ID across
     all layers). Otherwise a new UUID is generated.
@@ -1047,11 +1056,44 @@ def build_releaseledger_legacy_migration_plan(
     if migration_id is None:
         migration_id = str(uuid.uuid4())
 
+    # Determine destination policies based on preflight analysis
+    data_policy = "create-only"
+    config_policy = "create-only"
+
+    if data_action == "replace":
+        data_policy = "replace-owned"
+    elif data_action == "noop":
+        data_policy = "noop-if-exact"
+
+    if config_action == "merge":
+        config_policy = "replace-owned"
+    elif config_action == "noop":
+        config_policy = "noop-if-exact"
+
+    # Compute expected destination fingerprints if not provided
+    # Fall back to create-only if destination doesn't exist
+    if expected_data_fingerprint is None and data_policy != "create-only":
+        expected_data_fingerprint = _compute_destination_fingerprint(
+            prepared_target.data_root
+        )
+        if expected_data_fingerprint is None and data_policy == "replace-owned":
+            data_policy = "create-only"
+    if expected_config_fingerprint is None and config_policy != "create-only":
+        expected_config_fingerprint = _compute_config_fingerprint(
+            prepared_target.config_path
+        )
+        if expected_config_fingerprint is None and config_policy == "replace-owned":
+            config_policy = "create-only"
+
     # Execution order: indexes (rebuild, non-durable) → data (durable copy) → config (durable copy).
     # Config must NOT be first — a failure after config but before data leaves
     # a config artifact that blocks retry.
 
     # Indexes item: rebuild at destination (safe, cache-only, first)
+    # Use replace-owned only if destination exists and is owned,
+    # otherwise use create-only
+    indexes_fp = _compute_destination_fingerprint(prepared_target.indexes_root)
+    indexes_policy = "replace-owned" if indexes_fp else "create-only"
     indexes_item = StorageMigrationItem(
         component="mount",
         tool_name=TOOL_NAME,
@@ -1061,6 +1103,8 @@ def build_releaseledger_legacy_migration_plan(
         source_binding=prepared_target.data_binding,
         destination_binding=prepared_target.indexes_binding,
         strategy="rebuild",  # type: ignore[arg-type]
+        destination_policy=cast(Literal["create-only", "replace-owned", "noop-if-exact"], indexes_policy),
+        expected_destination_fingerprint=indexes_fp,
     )
 
     # Data item: copy staged data to canonical data mount (durable, second)
@@ -1073,6 +1117,8 @@ def build_releaseledger_legacy_migration_plan(
         source_binding=prepared_target.data_binding,
         destination_binding=prepared_target.data_binding,
         strategy="copy",  # type: ignore[arg-type]
+        destination_policy=cast(Literal["create-only", "replace-owned", "noop-if-exact"], data_policy),
+        expected_destination_fingerprint=expected_data_fingerprint,
     )
 
     # Config item: copy the transformed config (durable, last)
@@ -1085,6 +1131,8 @@ def build_releaseledger_legacy_migration_plan(
         source_binding=prepared_target.config_binding,
         destination_binding=prepared_target.config_binding,
         strategy="copy",  # type: ignore[arg-type]
+        destination_policy=cast(Literal["create-only", "replace-owned", "noop-if-exact"], config_policy),
+        expected_destination_fingerprint=expected_config_fingerprint,
     )
 
     plan = StorageMigrationPlan(
@@ -1097,6 +1145,37 @@ def build_releaseledger_legacy_migration_plan(
 
     return plan
 
+
+def _compute_destination_fingerprint(path: Path) -> str | None:
+    """Compute the Ledgercore fingerprint of a destination directory.
+
+    Returns the encoded fingerprint string, or None if the path doesn't
+    exist or can't be fingerprinted.
+    """
+    if not path.is_dir():
+        return None
+    try:
+        from ledgercore.migration import fingerprint_storage_directory
+        fp = fingerprint_storage_directory(path)
+        return fp.encoded
+    except Exception:
+        return None
+
+
+def _compute_config_fingerprint(path: Path) -> str | None:
+    """Compute the Ledgercore fingerprint of a config file.
+
+    Returns the encoded fingerprint string, or None if the path doesn't
+    exist or can't be fingerprinted.
+    """
+    if not path.is_file():
+        return None
+    try:
+        from ledgercore.migration import fingerprint_storage_file
+        fp = fingerprint_storage_file(path)
+        return fp.encoded
+    except Exception:
+        return None
 
 def prepare_legacy_migration_target(
     workspace_root: Path,

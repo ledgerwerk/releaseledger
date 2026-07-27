@@ -404,6 +404,13 @@ def ensure_canonical_project(
 
     workspace_root = Path(workspace_root).resolve()
     manifest_path = workspace_root / ".ledger" / "ledger.toml"
+
+    # Guard: refuse to create canonical shell alongside nonempty legacy data.
+    # This prevents the trap where init creates a canonical shell that blocks
+    # migration because the destination is now 'owned-divergent'.
+    if not manifest_path.is_file() or force:
+        _check_legacy_data_before_init(workspace_root, force)
+
     if manifest_path.is_file() and not force:
         # Idempotent: if both registration and config exist, return a
         # summary without rewriting anything.
@@ -501,6 +508,83 @@ def ensure_canonical_project(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _check_legacy_data_before_init(workspace_root: Path, force: bool) -> None:
+    """Check for legacy Releaseledger data before creating canonical shell.
+
+    Refuses initialization when nonempty legacy data is detected
+    unless force is True. This prevents creating a canonical shell
+    that would block migration.
+    """
+    from releaseledger.migration import LEGACY_CONFIG_NAMES
+
+    # Check for legacy config files
+    legacy_config = None
+    for name in LEGACY_CONFIG_NAMES:
+        candidate = workspace_root / name
+        if candidate.is_file():
+            legacy_config = candidate
+            break
+
+    if legacy_config is None:
+        return
+
+    # Check if legacy data directory has durable files
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib  # type: ignore[no-redef]
+
+    try:
+        with legacy_config.open("rb") as fh:
+            parsed = tomllib.load(fh)
+    except Exception:
+        return
+
+    if not isinstance(parsed, dict):
+        return
+
+    raw = parsed.get("releaseledger_dir", ".releaseledger")
+    if not isinstance(raw, str) or not raw.strip():
+        data_dir = workspace_root / ".releaseledger"
+    else:
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = workspace_root / candidate
+        data_dir = candidate.resolve()
+
+    if not data_dir.is_dir():
+        return
+
+    # Check for any durable files under the legacy data directory
+    from releaseledger.migration import select_legacy_durable_paths
+
+    try:
+        selection = select_legacy_durable_paths(data_dir)
+        if selection.included:
+            if force:
+                return
+            raise LaunchError(
+                f"Legacy Releaseledger data was found at {data_dir}. "
+                "Initialization was not performed because it would create a "
+                "canonical shell alongside unmigrated durable data.",
+                code=CODE_CONFLICT,
+                exit_code=4,
+                data={
+                    "legacy_config": str(legacy_config),
+                    "legacy_data_dir": str(data_dir),
+                    "durable_file_count": len(selection.included),
+                },
+                remediation=[
+                    "Run `releaseledger migrate plan storage-layout --output migration-plan.json`.",
+                    "Run `releaseledger migrate apply storage-layout --plan-file migration-plan.json --reason 'Adopt canonical storage'`.",
+                ],
+            )
+    except LaunchError:
+        raise
+    except Exception:
+        pass
 
 
 def _resolve_search_root(start: Path) -> Path:
