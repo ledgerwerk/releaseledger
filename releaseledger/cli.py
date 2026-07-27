@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 import yaml
@@ -128,7 +128,7 @@ from releaseledger.storage.store import load_release
 class LegacyChangelogGroup(TyperGroup):
     """Treat an unknown positional token as the legacy preview version."""
 
-    def resolve_command(self, ctx: typer.Context, args: list[str]):
+    def resolve_command(self, ctx: typer.Context, args: list[str]) -> Any:  # type: ignore[override]
         if args and not args[0].startswith("-") and args[0] not in self.commands:
             preview = self.commands.get("preview")
             if preview is not None:
@@ -402,7 +402,7 @@ def status_command(
         human = (
             f"{result.get('state', '')}: {result.get('project_root', '')}\n"
             f"health: {result.get('health', '')}\n"
-            f"next: {result.get('next_action', {}).get('command', '')}"
+            f"next: {result.get('next_action', {}).get('command', '')}"  # type: ignore[attr-defined]
         )
         return result, [], human
 
@@ -428,7 +428,7 @@ def info_command(ctx: typer.Context) -> None:
             result,
             [],
             (
-                f"project: {result.get('status', {}).get('project_root', '')}\n"
+                f"project: {result.get('status', {}).get('project_root', '')}\n"  # type: ignore[attr-defined]
                 f"releases: {result.get('release_count', 0)}\n"
                 f"entries: {result.get('entry_count', 0)}"
             ),
@@ -457,7 +457,7 @@ def doctor_command(
         checks = result.get("checks", [])
         human = "\n".join(
             f"{item.get('status', ''):<5} {item.get('code', '')}: {item.get('message', '')}"
-            for item in checks
+            for item in checks  # type: ignore[attr-defined]
             if isinstance(item, dict)
         )
         return result, [], human
@@ -1062,14 +1062,14 @@ def release_import_tags_command(
         result = import_tags(_paths(ctx).workspace_root, apply=apply)
         planned = [
             e
-            for e in result.get("plans", [])
+            for e in result.get("plans", [])  # type: ignore[attr-defined]
             if isinstance(e, dict) and e.get("action") == "create"
         ]
         lines = []
         if apply:
-            lines.append(f"Applied {len(result.get('applied_versions', []))} tag(s).")
+            lines.append(f"Applied {len(result.get('applied_versions', []))} tag(s).")  # type: ignore[arg-type]
             lines.append(
-                f"Skipped {len(result.get('skipped_versions', []))} existing tag(s)."
+                f"Skipped {len(result.get('skipped_versions', []))} existing tag(s)."  # type: ignore[arg-type]
             )
         else:
             lines.append(f"DRY RUN: {len(planned)} tag(s) would be imported.")
@@ -3395,7 +3395,7 @@ def storage_validate_command(
                 lines.append(f"  {name}: {status}")
         passed = bool(validation.get("layout_valid", False))
         if "domain" in validation:
-            domain = validation["domain"]
+            domain = validation["domain"]  # type: ignore[assignment]
             lines.append(f"Domain records valid: {domain.get('valid', False)}")
             lines.append(f"Domain failures: {domain.get('total_failures', 0)}")
             passed = passed and bool(domain.get("valid", False))
@@ -3665,7 +3665,7 @@ def storage_migrate_command(
                 result = execute_migration(
                     request, quiescence_check=lambda: quiescence_callback(lock)
                 )
-            migrated_count = result.get("inventory", {}).get("total_releases", 0)
+            migrated_count = result.get("inventory", {}).get("total_releases", 0)  # type: ignore[attr-defined]
             human = (
                 f"Migration {mode} completed to {data_storage} "
                 f"({migrated_count} releases migrated)"
@@ -3674,7 +3674,7 @@ def storage_migrate_command(
 
         if subcommand == "recover":
             result = recover_migration(state.cwd)
-            human = result.get("message", "Recovery attempted.")
+            human = result.get("message", "Recovery attempted.")  # type: ignore[assignment]
             return result, [], human
 
         raise LaunchError(
@@ -3691,7 +3691,9 @@ def storage_migrate_command(
         result_type="storage_migrate",
         json_output=state.json_output,
         produce=produce,
-        branch_guard_policy="if-canonical-project" if subcommand == "apply" else "default",
+        branch_guard_policy="if-canonical-project"
+        if subcommand == "apply"
+        else "default",
     )
 
 
@@ -3750,7 +3752,7 @@ def _migration_command_result(
             (
                 "Migration cleanup previewed"
                 if dry_run
-                else f"Migration cleanup removed {len(result.get('removed', []))} path(s)"
+                else f"Migration cleanup removed {len(result.get('removed', []))} path(s)"  # type: ignore[arg-type]
             ),
         )
 
@@ -4070,7 +4072,7 @@ def config_validate_command(
             else "config validation failed\n"
             + "\n".join(
                 f"- {item.get('code')}: {item.get('message')}"
-                for item in issues
+                for item in issues  # type: ignore[attr-defined]
                 if isinstance(item, dict)
             )
         )

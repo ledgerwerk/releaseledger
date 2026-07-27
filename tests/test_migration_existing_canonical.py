@@ -19,7 +19,6 @@ import json
 import uuid
 from pathlib import Path
 
-import pytest
 from typer.testing import CliRunner
 
 from releaseledger.cli import app
@@ -62,13 +61,13 @@ def _make_legacy_project(
         (version_dir / "entries").mkdir(parents=True)
         (version_dir / "audit").mkdir(parents=True)
         (version_dir / "release.md").write_text(
-            f"---\nrelease_version: \"{version}\"\nledger_ref: main\n"
+            f'---\nrelease_version: "{version}"\nledger_ref: main\n'
             f"status: finalized\n---\n\n# Release {version}\n",
             encoding="utf-8",
         )
         (version_dir / "entries" / "entry-0001.md").write_text(
-            f"---\nentry_id: \"0001\"\nrelease_version: \"{version}\"\n"
-            f"title: \"Entry for {version}\"\n---\n\nContent.\n",
+            f'---\nentry_id: "0001"\nrelease_version: "{version}"\n'
+            f'title: "Entry for {version}"\n---\n\nContent.\n',
             encoding="utf-8",
         )
 
@@ -154,10 +153,14 @@ def _json(result) -> dict:
 
 def _migrated_release_count(root: Path) -> int:
     """Count release records in the canonical data location."""
-    data_dir = root / ".ledger" / "releaseledger" / "data" / "ledgers" / "main" / "releases"
+    data_dir = (
+        root / ".ledger" / "releaseledger" / "data" / "ledgers" / "main" / "releases"
+    )
     if not data_dir.is_dir():
         return 0
-    return sum(1 for d in data_dir.iterdir() if d.is_dir() and (d / "release.md").is_file())
+    return sum(
+        1 for d in data_dir.iterdir() if d.is_dir() and (d / "release.md").is_file()
+    )
 
 
 class TestApplyAdoptsInitializedCanonicalShell:
@@ -177,8 +180,11 @@ class TestApplyAdoptsInitializedCanonicalShell:
 
         # Migrate should succeed
         result = _run(
-            "migrate", "apply", "storage-layout",
-            "--reason", "Adopt canonical storage",
+            "migrate",
+            "apply",
+            "storage-layout",
+            "--reason",
+            "Adopt canonical storage",
             root=tmp_path,
         )
         assert result.exit_code == 0, f"Apply failed: {result.output}"
@@ -195,8 +201,11 @@ class TestApplyAdoptsInitializedCanonicalShell:
 
         # Dry-run should succeed and report actions
         result = _run(
-            "migrate", "apply", "storage-layout",
-            "--reason", "Dry-run test",
+            "migrate",
+            "apply",
+            "storage-layout",
+            "--reason",
+            "Dry-run test",
             "--dry-run",
             root=tmp_path,
             json_output=True,
@@ -245,14 +254,18 @@ class TestConfigMergeAdoptsLegacyValues:
 
         # Migrate
         result = _run(
-            "migrate", "apply", "storage-layout",
-            "--reason", "Config merge test",
+            "migrate",
+            "apply",
+            "storage-layout",
+            "--reason",
+            "Config merge test",
             root=tmp_path,
         )
         assert result.exit_code == 0, f"Migration failed: {result.output}"
 
         # Read the canonical config
         from releaseledger.storage.config import load_project_config
+
         config_path = tmp_path / ".ledger" / "releaseledger" / "config.toml"
         config = load_project_config(config_path)
         assert config.changelog_standard == "keepachangelog-1.1.0"
@@ -261,7 +274,9 @@ class TestConfigMergeAdoptsLegacyValues:
 class TestStatusReportsCorrectly:
     """Status reports correct state for each scenario."""
 
-    def test_status_pending_migration_for_unmigrated_shell(self, tmp_path: Path) -> None:
+    def test_status_pending_migration_for_unmigrated_shell(
+        self, tmp_path: Path
+    ) -> None:
         """Status reports pending-migration, not cleanup-ready."""
         _make_legacy_project(tmp_path, releases=1)
 
@@ -283,8 +298,11 @@ class TestStatusReportsCorrectly:
 
         # Migrate (without init - pure legacy bootstrap)
         result = _run(
-            "migrate", "apply", "storage-layout",
-            "--reason", "Status test",
+            "migrate",
+            "apply",
+            "storage-layout",
+            "--reason",
+            "Status test",
             root=tmp_path,
         )
         assert result.exit_code == 0, f"Migration failed: {result.output}"

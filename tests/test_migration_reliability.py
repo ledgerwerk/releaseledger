@@ -20,11 +20,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-import pytest
 from typer.testing import CliRunner
 
 from releaseledger.cli import app
-from releaseledger.errors import LaunchError, MigrationConflictError
+from releaseledger.errors import MigrationConflictError
 
 runner = CliRunner()
 
@@ -60,13 +59,13 @@ release_template = "default"
         (version_dir / "entries").mkdir(parents=True)
         (version_dir / "audit").mkdir(parents=True)
         (version_dir / "release.md").write_text(
-            f"---\nrelease_version: \"{version}\"\nledger_ref: main\n"
+            f'---\nrelease_version: "{version}"\nledger_ref: main\n'
             f"status: finalized\n---\n\n# Release {version}\n",
             encoding="utf-8",
         )
         (version_dir / "entries" / "entry-0001.md").write_text(
-            f"---\nentry_id: \"0001\"\nrelease_version: \"{version}\"\n"
-            f"title: \"Entry for {version}\"\n---\n\nContent.\n",
+            f'---\nentry_id: "0001"\nrelease_version: "{version}"\n'
+            f'title: "Entry for {version}"\n---\n\nContent.\n',
             encoding="utf-8",
         )
 
@@ -117,10 +116,14 @@ def _json(result: Any) -> dict[str, object]:
 
 def _migrated_release_count(root: Path) -> int:
     """Count release records in the canonical data location."""
-    data_dir = root / ".ledger" / "releaseledger" / "data" / "ledgers" / "main" / "releases"
+    data_dir = (
+        root / ".ledger" / "releaseledger" / "data" / "ledgers" / "main" / "releases"
+    )
     if not data_dir.is_dir():
         return 0
-    return sum(1 for d in data_dir.iterdir() if d.is_dir() and (d / "release.md").is_file())
+    return sum(
+        1 for d in data_dir.iterdir() if d.is_dir() and (d / "release.md").is_file()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -136,8 +139,11 @@ class TestBootstrapFromLegacy:
         _make_legacy_project(tmp_path, releases=2)
 
         result = _run(
-            "migrate", "apply", "storage-layout",
-            "--reason", "Migrate legacy storage",
+            "migrate",
+            "apply",
+            "storage-layout",
+            "--reason",
+            "Migrate legacy storage",
             root=tmp_path,
         )
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -169,8 +175,11 @@ class TestManifestPreservation:
         _make_multi_ledger_manifest(tmp_path)
 
         result = _run(
-            "migrate", "apply", "storage-layout",
-            "--reason", "Migrate with existing taskledger",
+            "migrate",
+            "apply",
+            "storage-layout",
+            "--reason",
+            "Migrate with existing taskledger",
             root=tmp_path,
         )
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -188,8 +197,11 @@ class TestManifestPreservation:
         _make_multi_ledger_manifest(tmp_path)
 
         result = _run(
-            "migrate", "apply", "storage-layout",
-            "--reason", "UUID preservation test",
+            "migrate",
+            "apply",
+            "storage-layout",
+            "--reason",
+            "UUID preservation test",
             root=tmp_path,
         )
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -215,8 +227,11 @@ class TestPlanExactness:
         # Plan
         plan_file = tmp_path / "migration-plan.json"
         result = _run(
-            "migrate", "plan", "storage-layout",
-            "--output", str(plan_file),
+            "migrate",
+            "plan",
+            "storage-layout",
+            "--output",
+            str(plan_file),
             root=tmp_path,
         )
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -235,9 +250,13 @@ class TestPlanExactness:
         if plan_uuid is not None:
             # v2+ plan: verify the manifest uses the plan's UUID
             result = _run(
-                "migrate", "apply", "storage-layout",
-                "--plan-file", str(plan_file),
-                "--reason", "Apply exact plan",
+                "migrate",
+                "apply",
+                "storage-layout",
+                "--plan-file",
+                str(plan_file),
+                "--reason",
+                "Apply exact plan",
                 root=tmp_path,
             )
             assert result.exit_code == 0, f"Failed: {result.output}"
@@ -251,16 +270,23 @@ class TestPlanExactness:
 
         plan_file = tmp_path / "migration-plan.json"
         result = _run(
-            "migrate", "plan", "storage-layout",
-            "--output", str(plan_file),
+            "migrate",
+            "plan",
+            "storage-layout",
+            "--output",
+            str(plan_file),
             root=tmp_path,
         )
         assert result.exit_code == 0, f"Plan failed: {result.output}"
 
         result = _run(
-            "migrate", "apply", "storage-layout",
-            "--plan-file", str(plan_file),
-            "--reason", "Apply from plan file",
+            "migrate",
+            "apply",
+            "storage-layout",
+            "--plan-file",
+            str(plan_file),
+            "--reason",
+            "Apply from plan file",
             root=tmp_path,
         )
         assert result.exit_code == 0, f"Apply failed: {result.output}"
@@ -281,7 +307,9 @@ class TestNamedInitValidation:
         result = _run("init", "--project-name", "demo", root=tmp_path)
         assert result.exit_code == 0, f"Failed: {result.output}"
 
-        result = _run("storage", "validate", "--strict", root=tmp_path, json_output=True)
+        result = _run(
+            "storage", "validate", "--strict", root=tmp_path, json_output=True
+        )
         assert result.exit_code == 0, f"Validation failed: {result.output}"
         payload = _json(result)
         assert payload["result"].get("layout_valid", False) is True
@@ -327,8 +355,11 @@ class TestRetryAfterFailure:
 
         # First apply
         result = _run(
-            "migrate", "apply", "storage-layout",
-            "--reason", "First attempt",
+            "migrate",
+            "apply",
+            "storage-layout",
+            "--reason",
+            "First attempt",
             root=tmp_path,
         )
         assert result.exit_code == 0, f"First apply failed: {result.output}"
@@ -336,8 +367,11 @@ class TestRetryAfterFailure:
         # Second apply should detect already-completed destination
         # (owned-exact should be no-op, or owned-divergent should block)
         result = _run(
-            "migrate", "apply", "storage-layout",
-            "--reason", "Second attempt",
+            "migrate",
+            "apply",
+            "storage-layout",
+            "--reason",
+            "Second attempt",
             root=tmp_path,
         )
         # This should either succeed (idempotent) or give a clear conflict
@@ -359,8 +393,11 @@ class TestIdempotentNoop:
 
         # First apply
         result = _run(
-            "migrate", "apply", "storage-layout",
-            "--reason", "Initial migration",
+            "migrate",
+            "apply",
+            "storage-layout",
+            "--reason",
+            "Initial migration",
             root=tmp_path,
         )
         assert result.exit_code == 0, f"First apply failed: {result.output}"
@@ -368,8 +405,11 @@ class TestIdempotentNoop:
 
         # Second apply should succeed (idempotent)
         result = _run(
-            "migrate", "apply", "storage-layout",
-            "--reason", "Idempotent re-apply",
+            "migrate",
+            "apply",
+            "storage-layout",
+            "--reason",
+            "Idempotent re-apply",
             root=tmp_path,
         )
         # May succeed (noop) or fail with clear conflict message
@@ -467,8 +507,11 @@ class TestReasonPersistence:
 
         reason_text = "Test migration reason 2026-07-27"
         result = _run(
-            "migrate", "apply", "storage-layout",
-            "--reason", reason_text,
+            "migrate",
+            "apply",
+            "storage-layout",
+            "--reason",
+            reason_text,
             root=tmp_path,
             json_output=True,
         )
@@ -490,7 +533,9 @@ class TestRecovery:
         _make_legacy_project(tmp_path, releases=1)
 
         result = _run(
-            "migrate", "recover", "--dry-run",
+            "migrate",
+            "recover",
+            "--dry-run",
             root=tmp_path,
             json_output=True,
         )
@@ -568,14 +613,22 @@ class TestBindingIdentity:
         )
 
         binding_a = StorageBinding(
-            schema_version=1, layout_version=3,
-            project_uuid="uuid-a", project_name=None,
-            tool="releaseledger", mount="data", storage="project",
+            schema_version=1,
+            layout_version=3,
+            project_uuid="uuid-a",
+            project_name=None,
+            tool="releaseledger",
+            mount="data",
+            storage="project",
         )
         binding_b = StorageBinding(
-            schema_version=1, layout_version=3,
-            project_uuid="uuid-b", project_name=None,
-            tool="releaseledger", mount="data", storage="project",
+            schema_version=1,
+            layout_version=3,
+            project_uuid="uuid-b",
+            project_name=None,
+            tool="releaseledger",
+            mount="data",
+            storage="project",
         )
         assert not storage_bindings_match(binding_a, binding_b)
 
@@ -587,14 +640,22 @@ class TestBindingIdentity:
         )
 
         binding_a = StorageBinding(
-            schema_version=1, layout_version=3,
-            project_uuid="uuid-a", project_name="name-a",
-            tool="releaseledger", mount="data", storage="project",
+            schema_version=1,
+            layout_version=3,
+            project_uuid="uuid-a",
+            project_name="name-a",
+            tool="releaseledger",
+            mount="data",
+            storage="project",
         )
         binding_b = StorageBinding(
-            schema_version=1, layout_version=3,
-            project_uuid="uuid-b", project_name="name-b",
-            tool="releaseledger", mount="data", storage="project",
+            schema_version=1,
+            layout_version=3,
+            project_uuid="uuid-b",
+            project_name="name-b",
+            tool="releaseledger",
+            mount="data",
+            storage="project",
         )
         diff = storage_binding_diff(binding_a, binding_b)
         assert "project_uuid" in diff["differences"]
@@ -625,4 +686,7 @@ class TestMigrationConflictError:
         assert error.data["path"] == "/some/path"
         assert error.data["destination_state"] == "owned-divergent"
         assert error.data["retry_safe"] is False
-        assert error.data["remediation_command"] == "releaseledger migrate recover --dry-run"
+        assert (
+            error.data["remediation_command"]
+            == "releaseledger migrate recover --dry-run"
+        )

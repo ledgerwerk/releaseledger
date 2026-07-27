@@ -116,7 +116,9 @@ def storage_where(workspace_root: Path) -> dict[str, object]:
                 },
             },
             "legacy_detected": legacy_detected,
-            "migration_state": _evaluate_migration_state_for_storage(root, legacy_detected),
+            "migration_state": _evaluate_migration_state_for_storage(
+                root, legacy_detected
+            ),
             # Compatibility aliases for one release.
             "workspace_root": str(layout.project_root),
             "releaseledger_dir": str(layout.data_root),

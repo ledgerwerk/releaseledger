@@ -350,7 +350,6 @@ If review only passes with `--include-internal`, tell the user that public
 `CHANGELOG.md` will omit internal-only entries. Use `--include-internal` only for
 internal release notes.
 
-
 ## Complete historical reconstruction protocol
 
 When the user requests "all versions," "all changes," "full history," or equivalent:
@@ -421,6 +420,7 @@ releaseledger release import-tags --apply
 
 This creates released records for every semver tag that does not already have one.
 The command is idempotent and never overwrites existing records.
+
 ## Release review protocol
 
 Use this to answer "what did I already add for this release?" before adding

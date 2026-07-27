@@ -1657,7 +1657,6 @@ def _validate_folded_unreleased_strict(
         )
 
 
-
 def _validate_complete_history(
     workspace_root: Path,
     *,
@@ -1720,6 +1719,7 @@ def _validate_complete_history(
             warnings.append(f"Ambiguous tags for {v}: {', '.join(sorted(tags))}")
 
     return warnings, diagnostics
+
 
 def build_full_changelog_file(  # noqa: C901
     workspace_root: Path,

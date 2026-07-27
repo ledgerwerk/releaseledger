@@ -28,9 +28,7 @@ def _release_counts(records: list[dict[str, object]]) -> dict[str, int]:
 
 def _latest_released(records: list[dict[str, object]]) -> str | None:
     released = [
-        record
-        for record in records
-        if str(record.get("status", "")) == "released"
+        record for record in records if str(record.get("status", "")) == "released"
     ]
     if not released:
         return None
@@ -93,11 +91,15 @@ def project_info(root: Path) -> dict[str, object]:
     """Return the full deterministic read-only project inventory."""
     status = project_status(root)
     storage = storage_where(root)
-    config = config_show(root) if status["initialized"] else {
-        "kind": "config_show",
-        "project_root": str(root.resolve()),
-        "config": {},
-    }
+    config = (
+        config_show(root)
+        if status["initialized"]
+        else {
+            "kind": "config_show",
+            "project_root": str(root.resolve()),
+            "config": {},
+        }
+    )
     records = _records(root)
     entry_counts: dict[str, int] = {}
     total_entries = 0
@@ -141,7 +143,9 @@ def project_doctor(root: Path, *, check: bool = False) -> dict[str, object]:
             "message": "Storage layout is valid."
             if layout_valid
             else "Storage layout is unavailable or invalid.",
-            "remediation": [] if layout_valid else ["Run `releaseledger storage validate --strict`."],
+            "remediation": []
+            if layout_valid
+            else ["Run `releaseledger storage validate --strict`."],
         }
     )
     release_ok = True

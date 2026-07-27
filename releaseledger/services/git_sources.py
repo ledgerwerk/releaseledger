@@ -560,14 +560,18 @@ def collect_git_candidates(
     # Track skipped merge metadata for attribution propagation.
     # For each skipped merge, identify commits introduced by that merge
     # and attach PR/contributor metadata to them.
-    skipped_merges: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []  # (merge_sha, prs, contributors)
+    skipped_merges: list[
+        tuple[str, tuple[str, ...], tuple[str, ...]]
+    ] = []  # (merge_sha, prs, contributors)
     for sha in shas:
         meta = _commit_metadata(workspace_root, sha)
         is_merge = len(meta.parents) >= 2
         if is_merge and include_merges == "nontrivial":
             # Extract PR/contributor from the merge commit message
             pr_refs, _ = _extract_refs(meta.subject, meta.body)
-            contributors = _extract_contributor_handles(meta.author_name, meta.author_email, meta.subject)
+            contributors = _extract_contributor_handles(
+                meta.author_name, meta.author_email, meta.subject
+            )
             if pr_refs or contributors:
                 skipped_merges.append((sha, tuple(pr_refs), contributors))
         candidate = _build_candidate(
@@ -593,11 +597,19 @@ def collect_git_candidates(
             try:
                 introduced_result = _run_git(
                     workspace_root,
-                    ["rev-list", second_parent, "--not", merge_meta.parents[0], "--reverse"]
+                    [
+                        "rev-list",
+                        second_parent,
+                        "--not",
+                        merge_meta.parents[0],
+                        "--reverse",
+                    ],
                 )
                 if introduced_result.returncode == 0:
                     introduced_shas = {
-                        line.strip() for line in introduced_result.stdout.splitlines() if line.strip()
+                        line.strip()
+                        for line in introduced_result.stdout.splitlines()
+                        if line.strip()
                     }
                     # Attach attribution to matching candidates
                     for i, candidate in enumerate(candidates):
@@ -606,9 +618,15 @@ def collect_git_candidates(
                             existing_prs = set(candidate.pr_refs)
                             existing_contributors = set(candidate.contributors)
                             new_prs = existing_prs | set(merge_prs)
-                            new_contributors = existing_contributors | set(merge_contributors)
-                            if new_prs != existing_prs or new_contributors != existing_contributors:
+                            new_contributors = existing_contributors | set(
+                                merge_contributors
+                            )
+                            if (
+                                new_prs != existing_prs
+                                or new_contributors != existing_contributors
+                            ):
                                 from dataclasses import replace
+
                                 # Deduplicate contributors preserving order
                                 seen_contrib: set[str] = set()
                                 merged_contributors: list[str] = []
@@ -663,7 +681,9 @@ def _build_candidate(
         # include_merges == "always": fall through and include it.
     paths, additions, deletions = _changed_paths(workspace_root, sha)
     pr_refs, issue_refs = _extract_refs(meta.subject, meta.body)
-    contributors = _extract_contributor_handles(meta.author_name, meta.author_email, meta.subject)
+    contributors = _extract_contributor_handles(
+        meta.author_name, meta.author_email, meta.subject
+    )
     inferred_kind = _infer_kind(meta.subject)
     # Intentionally blank: commit subjects are evidence, not changelog prose.
     # Agents must write release-entry summaries from reviewed behavior/diffs.

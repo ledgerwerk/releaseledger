@@ -924,8 +924,8 @@ def clear_releaseledger_data_override(start: Path) -> LedgerLocalOverrides | Non
             exc,
             code=CODE_CONFIG_ERROR,
         ) from exc
-    if overrides is None and loaded.locator.local_config_path.is_file():
-        loaded.locator.local_config_path.unlink()
+    if overrides is None and loaded.locator.local_config_path.is_file():  # type: ignore[unreachable]
+        loaded.locator.local_config_path.unlink()  # type: ignore[unreachable]
 
     from ledgercore.tomlio import write_ledger_local_config
 
@@ -1102,8 +1102,10 @@ def build_releaseledger_legacy_migration_plan(
         destination=prepared_target.indexes_root,
         source_binding=prepared_target.data_binding,
         destination_binding=prepared_target.indexes_binding,
-        strategy="rebuild",  # type: ignore[arg-type]
-        destination_policy=cast(Literal["create-only", "replace-owned", "noop-if-exact"], indexes_policy),
+        strategy="rebuild",
+        destination_policy=cast(
+            Literal["create-only", "replace-owned", "noop-if-exact"], indexes_policy
+        ),
         expected_destination_fingerprint=indexes_fp,
     )
 
@@ -1116,8 +1118,10 @@ def build_releaseledger_legacy_migration_plan(
         destination=prepared_target.data_root,
         source_binding=prepared_target.data_binding,
         destination_binding=prepared_target.data_binding,
-        strategy="copy",  # type: ignore[arg-type]
-        destination_policy=cast(Literal["create-only", "replace-owned", "noop-if-exact"], data_policy),
+        strategy="copy",
+        destination_policy=cast(
+            Literal["create-only", "replace-owned", "noop-if-exact"], data_policy
+        ),
         expected_destination_fingerprint=expected_data_fingerprint,
     )
 
@@ -1130,8 +1134,10 @@ def build_releaseledger_legacy_migration_plan(
         destination=prepared_target.config_path,
         source_binding=prepared_target.config_binding,
         destination_binding=prepared_target.config_binding,
-        strategy="copy",  # type: ignore[arg-type]
-        destination_policy=cast(Literal["create-only", "replace-owned", "noop-if-exact"], config_policy),
+        strategy="copy",
+        destination_policy=cast(
+            Literal["create-only", "replace-owned", "noop-if-exact"], config_policy
+        ),
         expected_destination_fingerprint=expected_config_fingerprint,
     )
 
@@ -1156,6 +1162,7 @@ def _compute_destination_fingerprint(path: Path) -> str | None:
         return None
     try:
         from ledgercore.migration import fingerprint_storage_directory
+
         fp = fingerprint_storage_directory(path)
         return fp.encoded
     except Exception:
@@ -1172,10 +1179,12 @@ def _compute_config_fingerprint(path: Path) -> str | None:
         return None
     try:
         from ledgercore.migration import fingerprint_storage_file
+
         fp = fingerprint_storage_file(path)
         return fp.encoded
     except Exception:
         return None
+
 
 def prepare_legacy_migration_target(
     workspace_root: Path,
@@ -1286,9 +1295,10 @@ def prepare_legacy_migration_target(
     # Build config_changes for activation after data copy
     # For project target: full manifest (creates .ledger/ledger.toml)
     # For local target: local overrides (creates .ledger/ledger.local.toml)
-    if target == "project":
-        from ledgercore.manifest import MountOverride
+    config_changes: LedgerProjectManifest | LedgerLocalOverrides
+    from ledgercore.manifest import MountOverride
 
+    if target == "project":
         # Merge with existing manifest to preserve unrelated ledger registrations.
         existing_ledgers: dict[str, Any] = {}
         if manifest_path.is_file():
@@ -1318,9 +1328,7 @@ def prepare_legacy_migration_target(
             storage="cache",
             external_root=None,
         )
-        existing_ledgers[TOOL_NAME] = LedgerRegistration(
-            name=TOOL_NAME, mounts=mounts
-        )
+        existing_ledgers[TOOL_NAME] = LedgerRegistration(name=TOOL_NAME, mounts=mounts)
 
         config_changes = LedgerProjectManifest(
             schema_version=3,

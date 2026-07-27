@@ -117,13 +117,15 @@ class MigrationConflictError(LaunchError):
         remediation_command: str | None = None,
         **kwargs: object,
     ) -> None:
-        data = dict(kwargs.get("data", {}))
-        data.update({
-            "component": component,
-            "path": path,
-            "destination_state": state,
-            "retry_safe": retry_safe,
-        })
+        data = dict(kwargs.get("data", {}))  # type: ignore[call-overload]
+        data.update(
+            {
+                "component": component,
+                "path": path,
+                "destination_state": state,
+                "retry_safe": retry_safe,
+            }
+        )
         if expected_binding:
             data["expected_binding"] = expected_binding
         if actual_binding:
@@ -135,7 +137,7 @@ class MigrationConflictError(LaunchError):
         if remediation_command:
             data["remediation_command"] = remediation_command
         kwargs["data"] = data
-        super().__init__(message, **kwargs)
+        super().__init__(message, **kwargs)  # type: ignore[arg-type]
 
 
 def to_error_payload(error: ReleaseledgerError) -> dict[str, object]:

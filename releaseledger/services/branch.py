@@ -20,9 +20,13 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from releaseledger.errors import CODE_USAGE_ERROR, LaunchError
 from releaseledger.services.git_sources import is_git_worktree
+
+if TYPE_CHECKING:
+    from releaseledger.storage.config import ProjectConfig
 
 __all__ = [
     "BRANCH_GUARD_POLICIES",
@@ -346,7 +350,7 @@ def _update_config_ledger_ref(
     write_project_config(config_path, updated)
 
 
-def _load_config(config_path: Path):
+def _load_config(config_path: Path) -> ProjectConfig:
     from releaseledger.storage.config import load_project_config
 
     return load_project_config(config_path)

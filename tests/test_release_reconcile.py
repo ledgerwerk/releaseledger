@@ -70,11 +70,7 @@ def test_parse_changelog_headings_legacy_version(tmp_path: Path) -> None:
 def test_parse_changelog_headings_bare_version(tmp_path: Path) -> None:
     """Bare '## VERSION' headings are parsed correctly."""
     target = tmp_path / "CHANGELOG.md"
-    target.write_text(
-        "# Changelog\n"
-        "## 0.7.0\n"
-        "## 0.5.1\n"
-    )
+    target.write_text("# Changelog\n## 0.7.0\n## 0.5.1\n")
     headings = _parse_changelog_headings(target)
     assert sorted(headings) == ["0.5.1", "0.7.0"]
 
@@ -82,10 +78,7 @@ def test_parse_changelog_headings_bare_version(tmp_path: Path) -> None:
 def test_parse_changelog_headings_v_prefix_normalized(tmp_path: Path) -> None:
     """v-prefixes are normalized away."""
     target = tmp_path / "CHANGELOG.md"
-    target.write_text(
-        "## [v0.7.0] - 2026-07-26\n"
-        "## v0.4.0\n"
-    )
+    target.write_text("## [v0.7.0] - 2026-07-26\n## v0.4.0\n")
     headings = _parse_changelog_headings(target)
     assert sorted(headings) == ["0.4.0", "0.7.0"]
 
@@ -106,11 +99,7 @@ def test_parse_changelog_headings_ignores_narrative(tmp_path: Path) -> None:
 def test_parse_changelog_headings_skips_unreleased(tmp_path: Path) -> None:
     """## [Unreleased] is skipped."""
     target = tmp_path / "CHANGELOG.md"
-    target.write_text(
-        "# Changelog\n"
-        "## [Unreleased]\n"
-        "## [0.7.0] - 2026-07-26\n"
-    )
+    target.write_text("# Changelog\n## [Unreleased]\n## [0.7.0] - 2026-07-26\n")
     headings = _parse_changelog_headings(target)
     assert sorted(headings) == ["0.7.0"]
 
@@ -144,10 +133,7 @@ def test_parse_changelog_headings_empty_file(tmp_path: Path) -> None:
 def test_parse_changelog_headings_duplicate_versions(tmp_path: Path) -> None:
     """Duplicate version headings are collected into a list."""
     target = tmp_path / "CHANGELOG.md"
-    target.write_text(
-        "## [0.7.0] - 2026-07-26\n"
-        "## [0.7.0] - 2026-07-27\n"
-    )
+    target.write_text("## [0.7.0] - 2026-07-26\n## [0.7.0] - 2026-07-27\n")
     headings = _parse_changelog_headings(target)
     assert len(headings["0.7.0"]) == 2
 
@@ -155,12 +141,16 @@ def test_parse_changelog_headings_duplicate_versions(tmp_path: Path) -> None:
 def test_import_tags_dry_run(tmp_path: Path, monkeypatch) -> None:
     """Dry-run discovers tags but does not create records."""
     ensure_canonical_project(tmp_path)
+
     def fake_run(args, **kwargs):
         if args[-2:] == ["tag", "--list"]:
-            return SimpleNamespace(returncode=0, stdout="v0.1.0\nv0.2.0\nv0.3.0\n", stderr="")
+            return SimpleNamespace(
+                returncode=0, stdout="v0.1.0\nv0.2.0\nv0.3.0\n", stderr=""
+            )
         if len(args) >= 2 and args[-2] == "log":
             return SimpleNamespace(returncode=0, stdout="2026-01-01\n", stderr="")
         return SimpleNamespace(returncode=1, stdout="", stderr="")
+
     monkeypatch.setattr(releases_service.subprocess, "run", fake_run)
     result = import_tags(tmp_path, apply=False)
     assert result["applied"] is False
@@ -174,13 +164,19 @@ def test_import_tags_apply(tmp_path: Path, monkeypatch) -> None:
     """Apply creates release records for missing tags."""
     ensure_canonical_project(tmp_path)
     # Pre-create one release
-    create_release(tmp_path, version="0.1.0", status="released", released_at="2026-01-01")
+    create_release(
+        tmp_path, version="0.1.0", status="released", released_at="2026-01-01"
+    )
+
     def fake_run(args, **kwargs):
         if args[-2:] == ["tag", "--list"]:
-            return SimpleNamespace(returncode=0, stdout="v0.1.0\nv0.2.0\nv0.3.0\n", stderr="")
+            return SimpleNamespace(
+                returncode=0, stdout="v0.1.0\nv0.2.0\nv0.3.0\n", stderr=""
+            )
         if len(args) >= 2 and args[-2] == "log":
             return SimpleNamespace(returncode=0, stdout="2026-01-15\n", stderr="")
         return SimpleNamespace(returncode=1, stdout="", stderr="")
+
     monkeypatch.setattr(releases_service.subprocess, "run", fake_run)
     result = import_tags(tmp_path, apply=True)
     assert result["applied"] is True
@@ -191,12 +187,14 @@ def test_import_tags_apply(tmp_path: Path, monkeypatch) -> None:
 def test_import_tags_idempotent(tmp_path: Path, monkeypatch) -> None:
     """Running import-tags twice does not duplicate records."""
     ensure_canonical_project(tmp_path)
+
     def fake_run(args, **kwargs):
         if args[-2:] == ["tag", "--list"]:
             return SimpleNamespace(returncode=0, stdout="v0.1.0\nv0.2.0\n", stderr="")
         if len(args) >= 2 and args[-2] == "log":
             return SimpleNamespace(returncode=0, stdout="2026-01-01\n", stderr="")
         return SimpleNamespace(returncode=1, stdout="", stderr="")
+
     monkeypatch.setattr(releases_service.subprocess, "run", fake_run)
     # First run
     result1 = import_tags(tmp_path, apply=True)

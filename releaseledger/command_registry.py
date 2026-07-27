@@ -44,12 +44,21 @@ def build_command_inventory() -> CommandInventory:
     def add(path: str, summary: str, **kwargs: object) -> None:
         entries.append(_metadata(path, summary, **kwargs))  # type: ignore[arg-type]
 
-    add("init", "Initialize a canonical Releaseledger project.", effect="workspace-write", requires_workspace=False)
+    add(
+        "init",
+        "Initialize a canonical Releaseledger project.",
+        effect="workspace-write",
+        requires_workspace=False,
+    )
     add("status", "Show a concise read-only project status.")
     add("info", "Show the complete read-only project inventory.")
     add("doctor", "Run read-only project diagnostics.")
     add("next-action", "Recommend the next project command without executing it.")
-    add("commands", "List canonical commands and their effects.", requires_workspace=False)
+    add(
+        "commands",
+        "List canonical commands and their effects.",
+        requires_workspace=False,
+    )
     add("help", "Show generated help for a command path.", requires_workspace=False)
 
     release = [
@@ -74,13 +83,20 @@ def build_command_inventory() -> CommandInventory:
         aliases = rest[1] if len(rest) > 1 else ()
         add(
             f"release {path}",
-            summary,
+            summary,  # type: ignore[arg-type]
             effect=effect,
             aliases=aliases,
             targeting="release-version",
         )
-    add("release chain check", "Check the predecessor chain.", targeting="release-chain")
-    add("release chain repair", "Repair the predecessor chain.", effect="ledger-write", targeting="release-chain")
+    add(
+        "release chain check", "Check the predecessor chain.", targeting="release-chain"
+    )
+    add(
+        "release chain repair",
+        "Repair the predecessor chain.",
+        effect="ledger-write",
+        targeting="release-chain",
+    )
 
     entry = [
         ("add", "Add a release entry.", "ledger-write"),
@@ -89,7 +105,12 @@ def build_command_inventory() -> CommandInventory:
         ("set-status", "Change an entry status.", "ledger-write"),
         ("delete", "Delete a release entry.", "ledger-write"),
         ("import", "Import one release entry.", "ledger-write"),
-        ("apply", "Apply a validated entry batch.", "ledger-write", ("entry add-many",)),
+        (
+            "apply",
+            "Apply a validated entry batch.",
+            "ledger-write",
+            ("entry add-many",),
+        ),
         ("list", "List entries for a release."),
         ("lint", "Lint release entries."),
         ("prompt", "Render an entry drafting prompt."),
@@ -100,23 +121,46 @@ def build_command_inventory() -> CommandInventory:
         aliases = rest[1] if len(rest) > 1 else ()
         add(
             f"entry {path}",
-            summary,
+            summary,  # type: ignore[arg-type]
             effect=effect,
             aliases=aliases,
             targeting="release-entry",
         )
 
-    add("changelog preview", "Render a changelog without writing it.", aliases=("changelog",), targeting="release-version")
-    add("changelog build", "Build the changelog artifact.", effect="external-write", aliases=("build",), targeting="release-version")
-    add("changelog section remove", "Remove a changelog section.", effect="external-write", aliases=("changelog-section remove-section",), targeting="changelog")
-    add("changelog section rename", "Rename a changelog section.", effect="external-write", aliases=("changelog-section rename-section",), targeting="changelog")
+    add(
+        "changelog preview",
+        "Render a changelog without writing it.",
+        aliases=("changelog",),
+        targeting="release-version",
+    )
+    add(
+        "changelog build",
+        "Build the changelog artifact.",
+        effect="external-write",
+        aliases=("build",),
+        targeting="release-version",
+    )
+    add(
+        "changelog section remove",
+        "Remove a changelog section.",
+        effect="external-write",
+        aliases=("changelog-section remove-section",),
+        targeting="changelog",
+    )
+    add(
+        "changelog section rename",
+        "Rename a changelog section.",
+        effect="external-write",
+        aliases=("changelog-section rename-section",),
+        targeting="changelog",
+    )
 
     for path, summary, effect in (
         ("git range", "Inspect a Git source range.", "external-process"),
         ("git import", "Import Git source entries.", "ledger-write"),
         ("git evidence", "Export Git evidence.", "external-process"),
         ("git scaffold", "Generate a Git entry scaffold.", "read"),
-        ("branch status", "Show branch status." , "read"),
+        ("branch status", "Show branch status.", "read"),
         ("branch start", "Start a release branch.", "external-process"),
         ("branch merge", "Merge a release branch.", "external-process"),
     ):
@@ -124,12 +168,16 @@ def build_command_inventory() -> CommandInventory:
 
     for path, summary, effect in (
         ("audit init", "Create an audit sheet.", "ledger-write"),
-        ("audit show", "Show an audit sheet." , "read"),
+        ("audit show", "Show an audit sheet.", "read"),
         ("audit apply", "Apply audit annotations.", "ledger-write"),
         ("audit refresh", "Refresh audit coverage.", "ledger-write"),
         ("audit update", "Update audit rows.", "ledger-write"),
         ("audit validate", "Validate an audit sheet without writing.", "read"),
-        ("audit record-validation", "Record an explicit validation event.", "ledger-write"),
+        (
+            "audit record-validation",
+            "Record an explicit validation event.",
+            "ledger-write",
+        ),
         ("audit sync", "Synchronize audit targets.", "ledger-write"),
     ):
         add(path, summary, effect=effect, targeting="release-version")
@@ -137,12 +185,22 @@ def build_command_inventory() -> CommandInventory:
     add("storage where", "Show effective storage topology.")
     add("storage validate", "Validate storage topology.")
     add("storage set", "Change storage topology.", effect="workspace-write")
-    add("storage clear-override", "Clear a local storage override.", effect="workspace-write")
+    add(
+        "storage clear-override",
+        "Clear a local storage override.",
+        effect="workspace-write",
+    )
     add("migrate status", "Show migration status.")
     add("migrate plan", "Plan a named migration.")
     add("migrate apply", "Apply a named migration.", effect="workspace-write")
-    add("migrate recover", "Recover an interrupted migration.", effect="workspace-write")
-    add("migrate cleanup", "Explicitly clean verified legacy state.", effect="workspace-write")
+    add(
+        "migrate recover", "Recover an interrupted migration.", effect="workspace-write"
+    )
+    add(
+        "migrate cleanup",
+        "Explicitly clean verified legacy state.",
+        effect="workspace-write",
+    )
     add("config show", "Show effective configuration.")
     add("config validate", "Validate configuration.")
     add(
@@ -185,7 +243,8 @@ def command_help(path_parts: list[str]) -> dict[str, object]:
     children = [
         item.as_mapping()
         for item in COMMAND_INVENTORY.entries
-        if item.path.startswith(prefix) and len(item.path.split()) == len(path_parts) + 1
+        if item.path.startswith(prefix)
+        and len(item.path.split()) == len(path_parts) + 1
     ]
     if children:
         return {"path": path, "children": children}

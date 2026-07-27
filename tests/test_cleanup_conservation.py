@@ -14,7 +14,6 @@ import json
 import uuid
 from pathlib import Path
 
-import pytest
 from typer.testing import CliRunner
 
 from releaseledger.cli import app
@@ -48,13 +47,13 @@ release_template = "default"
         (version_dir / "entries").mkdir(parents=True)
         (version_dir / "audit").mkdir(parents=True)
         (version_dir / "release.md").write_text(
-            f"---\nrelease_version: \"{version}\"\nledger_ref: main\n"
+            f'---\nrelease_version: "{version}"\nledger_ref: main\n'
             f"status: finalized\n---\n\n# Release {version}\n",
             encoding="utf-8",
         )
         (version_dir / "entries" / "entry-0001.md").write_text(
-            f"---\nentry_id: \"0001\"\nrelease_version: \"{version}\"\n"
-            f"title: \"Entry for {version}\"\n---\n\nContent.\n",
+            f'---\nentry_id: "0001"\nrelease_version: "{version}"\n'
+            f'title: "Entry for {version}"\n---\n\nContent.\n',
             encoding="utf-8",
         )
 
@@ -133,14 +132,19 @@ class TestCleanupRefusesUnmigratedNonemptyLegacyData:
 
         # Cleanup preview should report unsafe
         result = _run(
-            "migrate", "cleanup", "--dry-run",
+            "migrate",
+            "cleanup",
+            "--dry-run",
             root=tmp_path,
             json_output=True,
         )
         assert result.exit_code == 0, f"Preview failed: {result.output}"
         payload = _json(result)
         assert payload["result"]["cleanup_safe"] is False
-        assert "missing_paths" in payload["result"] or "blocked_reason" in payload["result"]
+        assert (
+            "missing_paths" in payload["result"]
+            or "blocked_reason" in payload["result"]
+        )
 
     def test_cleanup_exec_blocked_by_conservation(self, tmp_path: Path) -> None:
         """Cleanup with --yes exits 4 when conservation fails."""
@@ -151,21 +155,44 @@ class TestCleanupRefusesUnmigratedNonemptyLegacyData:
 
         # Cleanup with --yes should fail with exit code 4
         result = _run(
-            "migrate", "cleanup", "--yes",
-            "--reason", "Test cleanup",
+            "migrate",
+            "cleanup",
+            "--yes",
+            "--reason",
+            "Test cleanup",
             root=tmp_path,
             json_output=True,
         )
-        assert result.exit_code == 4, f"Expected exit 4, got {result.exit_code}: {result.output}"
+        assert result.exit_code == 4, (
+            f"Expected exit 4, got {result.exit_code}: {result.output}"
+        )
         payload = _json(result)
         assert payload["error"]["code"] == "conflict"
 
         # Verify legacy files still exist
         assert (tmp_path / ".releaseledger.toml").exists()
-        assert (tmp_path / ".releaseledger" / "ledgers" / "main" / "releases" / "1.0.0" / "release.md").exists()
-        assert (tmp_path / ".releaseledger" / "ledgers" / "main" / "releases" / "2.0.0" / "release.md").exists()
+        assert (
+            tmp_path
+            / ".releaseledger"
+            / "ledgers"
+            / "main"
+            / "releases"
+            / "1.0.0"
+            / "release.md"
+        ).exists()
+        assert (
+            tmp_path
+            / ".releaseledger"
+            / "ledgers"
+            / "main"
+            / "releases"
+            / "2.0.0"
+            / "release.md"
+        ).exists()
 
-    def test_status_does_not_recommend_cleanup_for_unmigrated(self, tmp_path: Path) -> None:
+    def test_status_does_not_recommend_cleanup_for_unmigrated(
+        self, tmp_path: Path
+    ) -> None:
         """Status never recommends cleanup when legacy data is unmigrated."""
         _make_legacy_project(tmp_path, releases=1)
 
@@ -192,15 +219,20 @@ class TestCleanupAllowsVerifiedCompletedMigration:
 
         # Migrate first
         result = _run(
-            "migrate", "apply", "storage-layout",
-            "--reason", "Initial migration",
+            "migrate",
+            "apply",
+            "storage-layout",
+            "--reason",
+            "Initial migration",
             root=tmp_path,
         )
         assert result.exit_code == 0, f"Migration failed: {result.output}"
 
         # Cleanup preview should be safe
         result = _run(
-            "migrate", "cleanup", "--dry-run",
+            "migrate",
+            "cleanup",
+            "--dry-run",
             root=tmp_path,
             json_output=True,
         )
@@ -214,22 +246,40 @@ class TestCleanupAllowsVerifiedCompletedMigration:
 
         # Migrate
         result = _run(
-            "migrate", "apply", "storage-layout",
-            "--reason", "Migration for cleanup test",
+            "migrate",
+            "apply",
+            "storage-layout",
+            "--reason",
+            "Migration for cleanup test",
             root=tmp_path,
         )
         assert result.exit_code == 0
 
         # Count canonical releases before cleanup
-        canonical_releases = tmp_path / ".ledger" / "releaseledger" / "data" / "ledgers" / "main" / "releases"
+        canonical_releases = (
+            tmp_path
+            / ".ledger"
+            / "releaseledger"
+            / "data"
+            / "ledgers"
+            / "main"
+            / "releases"
+        )
         assert canonical_releases.is_dir()
-        count = sum(1 for d in canonical_releases.iterdir() if d.is_dir() and (d / "release.md").is_file())
+        count = sum(
+            1
+            for d in canonical_releases.iterdir()
+            if d.is_dir() and (d / "release.md").is_file()
+        )
         assert count == 1
 
         # Cleanup
         result = _run(
-            "migrate", "cleanup", "--yes",
-            "--reason", "Remove verified legacy data after migration",
+            "migrate",
+            "cleanup",
+            "--yes",
+            "--reason",
+            "Remove verified legacy data after migration",
             root=tmp_path,
             json_output=True,
         )
@@ -240,5 +290,9 @@ class TestCleanupAllowsVerifiedCompletedMigration:
         assert not (tmp_path / ".releaseledger").exists()
 
         # Canonical should be unchanged
-        count_after = sum(1 for d in canonical_releases.iterdir() if d.is_dir() and (d / "release.md").is_file())
+        count_after = sum(
+            1
+            for d in canonical_releases.iterdir()
+            if d.is_dir() and (d / "release.md").is_file()
+        )
         assert count_after == 1

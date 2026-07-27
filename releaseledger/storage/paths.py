@@ -432,7 +432,7 @@ def ensure_canonical_project(
             backup = config_path.with_suffix(config_path.suffix + ".bak")
             shutil.copy2(config_path, backup)
             write_project_config(config_path, ProjectConfig())
-        written = {
+        written: dict[str, object] = {
             "kind": "project_init_idempotent",
             "project_root": str(workspace_root),
             "manifest_path": str(manifest_path),
@@ -532,9 +532,9 @@ def _check_legacy_data_before_init(workspace_root: Path, force: bool) -> None:
 
     # Check if legacy data directory has durable files
     try:
-        import tomllib
+        import tomllib  # type: ignore[import-not-found]
     except ModuleNotFoundError:
-        import tomli as tomllib  # type: ignore[no-redef]
+        import tomli as tomllib  # type: ignore[import-not-found]
 
     try:
         with legacy_config.open("rb") as fh:

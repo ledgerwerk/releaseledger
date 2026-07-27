@@ -43,7 +43,7 @@ __all__ = [
 
 
 # A command body returns (result_dict, event_ids, optional human text).
-CommandResult: TypeAlias = tuple[dict[str, object], list[object], str | None]
+CommandResult: TypeAlias = tuple[dict[str, object], Sequence[str], str | None]
 
 _warnings: ContextVar[list[CLIWarning] | None] = ContextVar(
     "releaseledger_cli_warnings", default=None
@@ -170,7 +170,7 @@ def emit_payload(
     command: str,
     result_type: str,
     result: dict[str, object],
-    events: list[object] | None = None,
+    events: Sequence[str] | None = None,
     human: str | None = None,
     json_output: bool,
     warnings: Sequence[CLIWarning] = (),
@@ -187,10 +187,7 @@ def emit_payload(
             tool="releaseledger",
             command=canonical,
             result=result,
-            events=tuple(
-                event if isinstance(event, dict) else {"id": str(event)}
-                for event in (events or [])
-            ),
+            events=tuple({"id": str(event)} for event in (events or [])),
             warnings=tuple(collected),
         ).as_mapping()
         typer.echo(render_json(payload))
@@ -369,7 +366,7 @@ def _check_migration_branch_guard(
     try:
         from releaseledger.storage.paths import load_releaseledger_project
 
-        project = load_releaseledger_project(workspace_root)
+        load_releaseledger_project(workspace_root)
     except Exception:
         # No canonical project: migration is bootstrapping. Skip guard.
         return

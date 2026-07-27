@@ -22,7 +22,7 @@ import hashlib
 import json
 import shutil
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -204,18 +204,18 @@ def iter_legacy_ledger_roots(
     seen: set[str] = set()
 
     for dirpath, dirnames, filenames in _walk_no_symlinks(ledgers_dir):
-        dirpath = Path(dirpath)
+        current = Path(dirpath)
         child_names = set(dirnames) | set(filenames)
         if recognized_children & child_names:
-            ref = str(dirpath.relative_to(ledgers_dir))
+            ref = str(current.relative_to(ledgers_dir))
             ref = ref.replace("\\", "/")
             if ref not in seen:
                 seen.add(ref)
-                yield ref, dirpath
+                yield ref, current
                 dirnames.clear()
 
 
-def _walk_no_symlinks(root: Path):
+def _walk_no_symlinks(root: Path) -> Iterator[tuple[str, list[str], list[str]]]:
     """Walk a directory tree without following symlinks."""
     from os import scandir, walk
 
@@ -869,7 +869,9 @@ def transform_legacy_config_v1_to_v2(
             tmp.unlink()
 
 
-def _migrate_flat_keys_to_sections(legacy: dict[str, object], data: dict[str, object]) -> None:
+def _migrate_flat_keys_to_sections(
+    legacy: dict[str, object], data: dict[str, object]
+) -> None:
     """Move legacy flat top-level keys into their v2 sub-sections.
 
     In v1 configs, changelog and git settings were top-level keys like
@@ -887,7 +889,7 @@ def _migrate_flat_keys_to_sections(legacy: dict[str, object], data: dict[str, ob
         data["changelog"] = changelog_section
     for key, value in legacy.items():
         if key.startswith(changelog_prefix) and key != "changelog_standard":
-            sub_key = key[len(changelog_prefix):]
+            sub_key = key[len(changelog_prefix) :]
             if sub_key not in changelog_section:
                 changelog_section[sub_key] = deepcopy(value)
     # Special case: changelog_standard maps to 'standard'
@@ -902,7 +904,7 @@ def _migrate_flat_keys_to_sections(legacy: dict[str, object], data: dict[str, ob
         data["git"] = git_section
     for key, value in legacy.items():
         if key.startswith(git_prefix):
-            sub_key = key[len(git_prefix):]
+            sub_key = key[len(git_prefix) :]
             if sub_key not in git_section:
                 git_section[sub_key] = deepcopy(value)
 
@@ -966,7 +968,7 @@ def project_config_from_legacy_mapping(
         ("git", ALLOWED_GIT_KEYS),
     ]:
         if section in data and isinstance(data[section], dict):
-            data[section] = {k: v for k, v in data[section].items() if k in allowed}
+            data[section] = {k: v for k, v in data[section].items() if k in allowed}  # type: ignore[attr-defined]
 
     return _config_from_dict(data, source)
 
@@ -985,9 +987,9 @@ def discover_legacy_project(start: Path) -> tuple[Path, dict[str, object]]:
     """
     # Use tomllib (Python 3.11+) with tomli fallback
     try:
-        import tomllib
+        import tomllib  # type: ignore[import-not-found]
     except ModuleNotFoundError:
-        import tomli as tomllib  # type: ignore[no-redef]
+        import tomli as tomllib  # type: ignore[import-not-found]
 
     search = Path(start).resolve()
     if search.is_file():
@@ -1087,7 +1089,7 @@ def validate_domain_records(data_root: Path) -> dict[str, object]:
     for ref, ledger_dir in iter_legacy_ledger_roots(data_root):
         report = _validate_ledger_domain(ledger_dir, ref)
         ledger_reports[ref] = report
-        for f in report.get("failures", []):
+        for f in report.get("failures", []):  # type: ignore[attr-defined]
             failures.append(f)
 
     refs = [r for r, _ in iter_legacy_ledger_roots(data_root)]
@@ -1362,7 +1364,7 @@ def plan_migration(request: ReleaseledgerMigrationRequest) -> dict[str, object]:
 
     target_data = target_info.data_root
     if _is_subpath(legacy_dir, target_data) or _is_subpath(target_data, legacy_dir):
-        plan["warnings"].append(
+        plan["warnings"].append(  # type: ignore[attr-defined]
             "Legacy data root and target data root overlap or are nested; "
             "the migration planner will reject this configuration at "
             "execution time."
@@ -1507,7 +1509,7 @@ def _is_subpath(a: Path, b: Path) -> bool:
 def execute_migration(
     request: ReleaseledgerMigrationRequest,
     *,
-    quiescence_check=None,
+    quiescence_check: Callable[[], object] | None = None,
 ) -> dict[str, object]:
     """Execute a migration from legacy to schema-3.
 
@@ -1528,11 +1530,11 @@ def execute_migration(
     if not domain_before["valid"]:
         failures = domain_before["failures"]
         raise LaunchError(
-            f"{len(failures)} domain records failed validation; "
+            f"{len(failures)} domain records failed validation; "  # type: ignore[arg-type]
             "fix them before migration.",
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
-            data={"failures": failures[:10]},
+            data={"failures": failures[:10]},  # type: ignore[index]
             remediation=[
                 "Inspect the failed records and correct them.",
                 "Re-run the migration after fixing.",
@@ -1542,7 +1544,7 @@ def execute_migration(
     # 3. Prepare the canonical target (pure — no writes yet)
     prepared = _backend.prepare_legacy_migration_target(
         source.workspace_root,
-        project_name=source.legacy_config.get("project_name"),
+        project_name=source.legacy_config.get("project_name"),  # type: ignore[arg-type]
         data_storage=request.data_storage,
         external_root=request.external_root,
         target=request.target,
@@ -1595,10 +1597,10 @@ def execute_migration(
     if not domain_staged["valid"]:
         failures = domain_staged["failures"]
         raise LaunchError(
-            f"{len(failures)} domain records in staged data failed validation.",
+            f"{len(failures)} domain records in staged data failed validation.",  # type: ignore[arg-type]
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
-            data={"failures": failures[:10]},
+            data={"failures": failures[:10]},  # type: ignore[index]
         )
 
     staged_inventory = build_strict_inventory(
@@ -1620,8 +1622,8 @@ def execute_migration(
         staged_data_root=stage.data_root,
         staged_config_path=stage.config_path,
         project_uuid=prepared.project_uuid,
-        data_action=preflight.get("data_action", "create"),
-        config_action=preflight.get("config_action", "create"),
+        data_action=preflight.get("data_action", "create"),  # type: ignore[arg-type]
+        config_action=preflight.get("config_action", "create"),  # type: ignore[arg-type]
     )
 
     # 8b. Validate plan with Ledgercore (destination policies, fingerprints, overlaps)
@@ -1844,8 +1846,7 @@ def inspect_destination(
     children = list(path.iterdir())
     # Exclude the write lock file from content detection.
     has_content = any(
-        child.name not in (".ledger-project.toml", "write.lock")
-        for child in children
+        child.name not in (".ledger-project.toml", "write.lock") for child in children
     )
 
     if not marker.is_file():
@@ -1854,7 +1855,10 @@ def inspect_destination(
         return "non-empty-unbound", f"{path} has content but no binding marker"
 
     try:
-        from ledgercore.storage_binding import read_storage_binding, storage_bindings_match
+        from ledgercore.storage_binding import (
+            read_storage_binding,
+            storage_bindings_match,
+        )
 
         actual = read_storage_binding(marker)
     except Exception as exc:
@@ -1910,9 +1914,7 @@ def _validate_plan_with_ledgercore(plan: Any, project_root: Path) -> None:
         return
 
     try:
-        result = validate_storage_migration_plan(
-            plan, project_root=project_root
-        )
+        result = validate_storage_migration_plan(plan, project_root=project_root)
         if not result.valid:
             errors = list(result.errors)
             raise LaunchError(
@@ -1927,7 +1929,7 @@ def _validate_plan_with_ledgercore(plan: Any, project_root: Path) -> None:
             )
     except LaunchError:
         raise
-    except Exception as exc:
+    except Exception:
         # Ledgercore validation failed unexpectedly, log but continue
         # with Releaseledger-only validation
         pass
@@ -1968,7 +1970,11 @@ def _adopt_canonical_shell(
         # Validate binding of the existing destination
         marker = data_root / ".ledger-project.toml"
         if marker.is_file():
-            from ledgercore.storage_binding import read_storage_binding, storage_bindings_match
+            from ledgercore.storage_binding import (
+                read_storage_binding,
+                storage_bindings_match,
+            )
+
             actual = read_storage_binding(marker)
             if not storage_bindings_match(actual, prepared.data_binding):
                 raise LaunchError(
@@ -2054,6 +2060,7 @@ def _merge_and_write_config(
     - If both differ from base and differ from each other: conflict (take legacy for now)
     """
     import shutil
+
     from releaseledger.storage.config import (
         ProjectConfig,
         load_project_config,
@@ -2093,7 +2100,14 @@ def _merge_and_write_config(
         elif canonical_val == base_val:
             merged_dict[field] = legacy_val
             if legacy_val != base_val:
-                changes.append({"field": field, "from": str(canonical_val), "to": str(legacy_val), "source": "legacy"})
+                changes.append(
+                    {
+                        "field": field,
+                        "from": str(canonical_val),
+                        "to": str(legacy_val),
+                        "source": "legacy",
+                    }
+                )
         elif legacy_val == base_val:
             merged_dict[field] = canonical_val
         elif canonical_val == legacy_val:
@@ -2102,7 +2116,14 @@ def _merge_and_write_config(
             # Both differ from base and from each other.
             # Take legacy value (the migration source is authoritative).
             merged_dict[field] = legacy_val
-            changes.append({"field": field, "from": str(canonical_val), "to": str(legacy_val), "source": "legacy"})
+            changes.append(
+                {
+                    "field": field,
+                    "from": str(canonical_val),
+                    "to": str(legacy_val),
+                    "source": "legacy",
+                }
+            )
 
     # Build merged config
     merged_config = _dict_to_config(merged_dict)
@@ -2120,6 +2141,7 @@ def _merge_and_write_config(
 def _config_to_dict(config: Any) -> dict[str, object]:
     """Convert a ProjectConfig to a flat dict of field names and values."""
     import dataclasses
+
     result: dict[str, object] = {}
     for field in dataclasses.fields(config):
         result[field.name] = getattr(config, field.name)
@@ -2128,12 +2150,14 @@ def _config_to_dict(config: Any) -> dict[str, object]:
 
 def _dict_to_config(data: dict[str, object]) -> Any:
     """Convert a dict back to a ProjectConfig."""
-    from releaseledger.storage.config import ProjectConfig
     # Filter to only known fields
     import dataclasses
+
+    from releaseledger.storage.config import ProjectConfig
+
     known = {f.name for f in dataclasses.fields(ProjectConfig)}
     filtered = {k: v for k, v in data.items() if k in known}
-    return ProjectConfig(**filtered)
+    return ProjectConfig(**filtered)  # type: ignore[arg-type]
 
 
 def _is_empty_shell(path: Path) -> bool:
@@ -2157,6 +2181,7 @@ def _is_empty_shell(path: Path) -> bool:
             if child.stat().st_size > 0:
                 return False
     return True
+
 
 def _preflight_destinations(
     *,
@@ -2200,15 +2225,17 @@ def _preflight_destinations(
         )
 
         if state in ("foreign-bound", "non-directory", "symlink", "non-empty-unbound"):
-            conflicts.append({
-                "component": component,
-                "path": str(path),
-                "state": state,
-                "detail": detail,
-                "remediation": (
-                    f"Run `releaseledger migrate recover --dry-run` to inspect."
-                ),
-            })
+            conflicts.append(
+                {
+                    "component": component,
+                    "path": str(path),
+                    "state": state,
+                    "detail": detail,
+                    "remediation": (
+                        "Run `releaseledger migrate recover --dry-run` to inspect."
+                    ),
+                }
+            )
         elif state == "owned-divergent":
             # For config, owned-divergent is expected when a canonical config
             # exists. The migration will merge configs, not overwrite.
@@ -2217,16 +2244,18 @@ def _preflight_destinations(
             if component == "config":
                 config_action = "merge"
             else:
-                conflicts.append({
-                    "component": component,
-                    "path": str(path),
-                    "state": state,
-                    "detail": detail,
-                    "remediation": (
-                        f"The destination has different content from the migration source. "
-                        f"Inspect the listed file collision; resolve or choose another destination."
-                    ),
-                })
+                conflicts.append(
+                    {
+                        "component": component,
+                        "path": str(path),
+                        "state": state,
+                        "detail": detail,
+                        "remediation": (
+                            "The destination has different content from the migration source. "
+                            "Inspect the listed file collision; resolve or choose another destination."
+                        ),
+                    }
+                )
         elif state == "owned-empty-shell":
             # Empty shell is adoptable — no conflict.
             if component == "data":
@@ -2263,6 +2292,7 @@ def _preflight_destinations(
         "config_action": config_action,
         "conflicts": [],
     }
+
 
 def _inventory_fingerprint_from_root(path: Path) -> str:
     """Compute a hash fingerprint of all files under path."""
@@ -2303,8 +2333,11 @@ def is_empty_releaseledger_bootstrap(
         return False
 
     try:
-        from ledgercore.storage_binding import read_storage_binding, storage_bindings_match
-        from ledgercore.storage_binding import StorageBinding
+        from ledgercore.storage_binding import (
+            StorageBinding,
+            read_storage_binding,
+            storage_bindings_match,
+        )
 
         actual = read_storage_binding(marker)
         expected = StorageBinding(
@@ -2330,6 +2363,7 @@ def is_empty_releaseledger_bootstrap(
             if child.suffix in (".json",):
                 try:
                     import json
+
                     content = json.loads(child.read_text())
                     if content:  # non-empty index file
                         return False
@@ -2442,10 +2476,9 @@ def _ensure_binding(
         f'storage = "{binding.storage}"\n'
     )
     if binding.project_name:
-        binding_content += (
-            f'project_name = "{binding.project_name}"\n'
-        )
+        binding_content += f'project_name = "{binding.project_name}"\n'
     ledgercore.atomic_write_text(marker_path, binding_content)
+
 
 # ---------------------------------------------------------------------------
 # Journal and recovery
@@ -2522,7 +2555,9 @@ def evaluate_migration_state(
     validation_report = None
     if has_canonical:
         try:
-            from releaseledger.ledgercore_backend import load_releaseledger_ledger_layout
+            from releaseledger.ledgercore_backend import (
+                load_releaseledger_ledger_layout,
+            )
 
             layout = load_releaseledger_ledger_layout(
                 workspace_root, allow_missing=False, validate_storage=True
@@ -2560,7 +2595,11 @@ def evaluate_migration_state(
             ),
         }
 
-    if canonical_valid and validation_report is not None and not validation_report.valid:
+    if (
+        canonical_valid
+        and validation_report is not None
+        and not validation_report.valid
+    ):
         return {
             "state": "canonical-invalid",
             "legacy_detected": legacy is not None,
@@ -2577,7 +2616,9 @@ def evaluate_migration_state(
     if canonical_valid and legacy is not None:
         # Compute legacy_relation and cleanup_safe for the
         # canonical-with-legacy-artifacts state.
-        legacy_relation, cleanup_safe, next_action = _compute_legacy_relation(workspace_root, legacy)
+        legacy_relation, cleanup_safe, next_action = _compute_legacy_relation(
+            workspace_root, legacy
+        )
         result: dict[str, object] = {
             "state": "canonical-with-legacy-artifacts",
             "legacy_detected": True,
@@ -2673,9 +2714,12 @@ def _compute_legacy_relation(
                 canonical_layout = _backend.load_releaseledger_ledger_layout(
                     workspace_root, validate_storage=False, allow_missing=False
                 )
-                canonical_selection = select_legacy_durable_paths(canonical_layout.data_root)
+                canonical_selection = select_legacy_durable_paths(
+                    canonical_layout.data_root
+                )
                 canonical_inventory = build_strict_inventory(
-                    canonical_layout.data_root, selected_paths=canonical_selection.included
+                    canonical_layout.data_root,
+                    selected_paths=canonical_selection.included,
                 )
                 current_target_fp = _inventory_fingerprint(canonical_inventory)
                 if receipt_target_fp == current_target_fp:
@@ -2761,10 +2805,6 @@ def _write_migration_receipt(
     .ledger/releaseledger/migrations/<migration-id>.toml
     that records the migration as completed and permits cleanup.
     """
-    try:
-        import tomllib
-    except ModuleNotFoundError:
-        import tomli as tomllib  # type: ignore[no-redef]
 
     receipt_dir = workspace_root / ".ledger" / "releaseledger" / "migrations"
     receipt_dir.mkdir(parents=True, exist_ok=True)
@@ -2803,7 +2843,7 @@ def _load_migration_receipt(
     try:
         import tomllib
     except ModuleNotFoundError:
-        import tomli as tomllib  # type: ignore[no-redef]
+        import tomli as tomllib
 
     receipts: list[dict[str, object]] = []
     for entry in sorted(receipt_dir.iterdir(), reverse=True):
@@ -2817,6 +2857,7 @@ def _load_migration_receipt(
                 continue
 
     return receipts[0] if receipts else None
+
 
 def migration_status(
     workspace_root: Path,
@@ -2876,108 +2917,29 @@ def recover_migration(
             "message": f"Migration completed (phase={phase}). Nothing to recover.",
         }
 
-    # Find temporary artifacts from this migration
     staging_dir = journal_dir / STAGING_DIR_NAME / str(migration_id)
-    ledgercore_migrations = root / ".ledger" / "migrations"
-    ledgercore_temp_patterns = [
-        root / ".ledger" / "releaseledger" / "data" / f".data.migrating-{migration_id}",
-        root / ".ledger" / "releaseledger" / f".data.migrating-{migration_id}",
-    ]
-
-    # Scan for all .migrating-* temp paths
-    temp_paths: list[str] = []
-    if staging_dir.exists():
-        temp_paths.append(str(staging_dir))
-    for pattern in ledgercore_temp_patterns:
-        if pattern.exists():
-            temp_paths.append(str(pattern))
-    # Also scan broadly for .migrating-<id> paths
-    for parent in [root / ".ledger" / "releaseledger", root / ".ledger"]:
-        if parent.is_dir():
-            for child in parent.iterdir():
-                if (
-                    child.name.endswith(f".migrating-{migration_id}")
-                    and str(child) not in temp_paths
-                ):
-                    temp_paths.append(str(child))
-
-    # Check if destination data was already activated
-    dest_data = last.get("target_data_root")
-    dest_activated = False
-    if dest_data:
-        data_path = Path(str(dest_data))
-        if data_path.is_dir():
-            marker = data_path / ".ledger-project.toml"
-            if marker.is_file():
-                dest_activated = True
+    temp_paths = _collect_migration_temp_paths(root, migration_id, staging_dir)
+    dest_activated = _check_dest_activated(last.get("target_data_root"))
 
     if phase == "failed" and dest_activated:
-        # Data was activated but something failed after.
-        # Safe to remove temporaries and re-run.
-        result: dict[str, object] = {
-            "kind": "safe-to-remove-temporaries",
-            "last_phase": phase,
-            "migration_id": migration_id,
-            "temp_paths": temp_paths,
-            "destinations_activated": dest_activated,
-            "message": (
-                "Migration failed after data was activated. "
-                "Temporary artifacts can be safely removed."
-            ),
-        }
-        if dry_run:
-            result["dry_run"] = True
-            result["action"] = "Would remove temporary artifacts and re-run migration."
-        elif yes:
-            for path_str in temp_paths:
-                path = Path(path_str)
-                if path.is_dir():
-                    shutil.rmtree(path, ignore_errors=True)
-                elif path.exists():
-                    path.unlink()
-            result["removed"] = temp_paths
-            result["action"] = "Removed temporary artifacts. Re-run migration to complete."
-        else:
-            result["remediation"] = (
-                "Run `releaseledger migrate recover --yes --reason '...'` to clean up, "
-                "then re-run `migrate apply`."
-            )
-        return result
+        return _recover_after_activation(
+            phase,
+            migration_id,
+            temp_paths,
+            dest_activated,
+            dry_run=dry_run,
+            yes=yes,
+        )
 
     if phase in ("staging", "failed") and not dest_activated:
-        # Nothing was activated. Safe to remove all temp artifacts.
-        result = {
-            "kind": "safe-to-remove-temporaries",
-            "last_phase": phase,
-            "migration_id": migration_id,
-            "temp_paths": temp_paths,
-            "destinations_activated": False,
-            "message": (
-                "Migration failed before any destination was activated. "
-                "All temporary artifacts can be safely removed."
-            ),
-        }
-        if dry_run:
-            result["dry_run"] = True
-            result["action"] = "Would remove all temporary artifacts."
-        elif yes:
-            for path_str in temp_paths:
-                path = Path(path_str)
-                if path.is_dir():
-                    shutil.rmtree(path, ignore_errors=True)
-                elif path.exists():
-                    path.unlink()
-            # Clear the failed journal
-            if journal_path.is_file():
-                journal_path.unlink()
-            result["removed"] = temp_paths
-            result["journal_cleared"] = True
-            result["action"] = "Removed temporary artifacts and cleared journal."
-        else:
-            result["remediation"] = (
-                "Run `releaseledger migrate recover --yes --reason '...'` to clean up."
-            )
-        return result
+        return _recover_before_activation(
+            phase,
+            migration_id,
+            temp_paths,
+            dry_run=dry_run,
+            yes=yes,
+            journal_path=journal_path,
+        )
 
     # Unknown or complex state: report with exact details
     return {
@@ -2999,6 +2961,130 @@ def recover_migration(
             "Run `releaseledger migrate recover --yes --reason '...'` to clean temporaries.",
         ],
     }
+
+
+def _collect_migration_temp_paths(
+    root: Path,
+    migration_id: str | object,
+    staging_dir: Path,
+) -> list[str]:
+    """Scan for temporary artifacts left by an interrupted migration."""
+    ledgercore_temp_patterns = [
+        root / ".ledger" / "releaseledger" / "data" / f".data.migrating-{migration_id}",
+        root / ".ledger" / "releaseledger" / f".data.migrating-{migration_id}",
+    ]
+
+    temp_paths: list[str] = []
+    if staging_dir.exists():
+        temp_paths.append(str(staging_dir))
+    for pattern in ledgercore_temp_patterns:
+        if pattern.exists():
+            temp_paths.append(str(pattern))
+    for parent in [root / ".ledger" / "releaseledger", root / ".ledger"]:
+        if parent.is_dir():
+            for child in parent.iterdir():
+                if (
+                    child.name.endswith(f".migrating-{migration_id}")
+                    and str(child) not in temp_paths
+                ):
+                    temp_paths.append(str(child))
+    return temp_paths
+
+
+def _check_dest_activated(dest_data: object) -> bool:
+    """Check whether migration destination data was already activated."""
+    if not dest_data:
+        return False
+    data_path = Path(str(dest_data))
+    if data_path.is_dir():
+        marker = data_path / ".ledger-project.toml"
+        if marker.is_file():
+            return True
+    return False
+
+
+def _recover_after_activation(
+    phase: str,
+    migration_id: str | object,
+    temp_paths: list[str],
+    dest_activated: bool,
+    *,
+    dry_run: bool,
+    yes: bool,
+) -> dict[str, object]:
+    """Recover when data was activated but migration failed after."""
+    result: dict[str, object] = {
+        "kind": "safe-to-remove-temporaries",
+        "last_phase": phase,
+        "migration_id": migration_id,
+        "temp_paths": temp_paths,
+        "destinations_activated": dest_activated,
+        "message": (
+            "Migration failed after data was activated. "
+            "Temporary artifacts can be safely removed."
+        ),
+    }
+    if dry_run:
+        result["dry_run"] = True
+        result["action"] = "Would remove temporary artifacts and re-run migration."
+    elif yes:
+        for path_str in temp_paths:
+            path = Path(path_str)
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            elif path.exists():
+                path.unlink()
+        result["removed"] = temp_paths
+        result["action"] = "Removed temporary artifacts. Re-run migration to complete."
+    else:
+        result["remediation"] = (
+            "Run `releaseledger migrate recover --yes --reason '...'` to clean up, "
+            "then re-run `migrate apply`."
+        )
+    return result
+
+
+def _recover_before_activation(
+    phase: str,
+    migration_id: str | object,
+    temp_paths: list[str],
+    *,
+    dry_run: bool,
+    yes: bool,
+    journal_path: Path,
+) -> dict[str, object]:
+    """Recover when nothing was activated yet."""
+    result: dict[str, object] = {
+        "kind": "safe-to-remove-temporaries",
+        "last_phase": phase,
+        "migration_id": migration_id,
+        "temp_paths": temp_paths,
+        "destinations_activated": False,
+        "message": (
+            "Migration failed before any destination was activated. "
+            "All temporary artifacts can be safely removed."
+        ),
+    }
+    if dry_run:
+        result["dry_run"] = True
+        result["action"] = "Would remove all temporary artifacts."
+    elif yes:
+        for path_str in temp_paths:
+            path = Path(path_str)
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            elif path.exists():
+                path.unlink()
+        if journal_path.is_file():
+            journal_path.unlink()
+        result["removed"] = temp_paths
+        result["journal_cleared"] = True
+        result["action"] = "Removed temporary artifacts and cleared journal."
+    else:
+        result["remediation"] = (
+            "Run `releaseledger migrate recover --yes --reason '...'` to clean up."
+        )
+    return result
 
 
 def cleanup_migration(
@@ -3056,7 +3142,9 @@ def cleanup_migration(
                 "different_paths": conservation.get("different_paths", []),
             }
         raise LaunchError(
-            conservation.get("blocked_reason", "Cleanup conservation check failed."),
+            str(
+                conservation.get("blocked_reason", "Cleanup conservation check failed.")
+            ),
             code="CONFLICT",
             exit_code=4,
             data={
@@ -3199,7 +3287,9 @@ def _verify_cleanup_conservation(
         if missing_paths:
             parts.append(f"{len(missing_paths)} file(s) missing from canonical data")
         if different_paths:
-            parts.append(f"{len(different_paths)} file(s) differ between legacy and canonical")
+            parts.append(
+                f"{len(different_paths)} file(s) differ between legacy and canonical"
+            )
         return {
             "safe": False,
             "blocked_reason": f"canonical data does not contain all legacy durable files: {'; '.join(parts)}.",
@@ -3222,7 +3312,8 @@ def _verify_cleanup_conservation(
 
     return {"safe": True, "missing_paths": [], "different_paths": []}
 
-def _read_jsonl_strict(path: Path):
+
+def _read_jsonl_strict(path: Path) -> Iterator[dict[str, object]]:
     """Yield parsed JSON objects from a JSON-lines file. Fails on invalid rows."""
     if not path.is_file():
         return
@@ -3242,7 +3333,7 @@ def _read_jsonl_strict(path: Path):
                 ) from exc
 
 
-def _read_jsonl_permissive(path: Path):
+def _read_jsonl_permissive(path: Path) -> Iterator[dict[str, object]]:
     """Yield parsed JSON objects from a JSON-lines file (permissive)."""
     if not path.is_file():
         return
