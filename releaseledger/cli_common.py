@@ -8,13 +8,15 @@ atomically when ``--output`` is requested.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeAlias
 
 import ledgercore
 import typer
+from ledgercore.cli import CLIWarning, ErrorEnvelope, SuccessEnvelope
 
 from releaseledger.errors import (
     CODE_USAGE_ERROR,
@@ -25,10 +27,13 @@ from releaseledger.errors import (
 
 __all__ = [
     "CLIState",
+    "add_cli_warning",
+    "canonical_command_path",
     "cli_state_from_context",
     "emit_error",
     "emit_payload",
     "launch_error_exit_code",
+    "normalize_legacy_global_argv",
     "render_json",
     "resolve_workspace_root",
     "run_command",
@@ -38,27 +43,36 @@ __all__ = [
 
 
 # A command body returns (result_dict, event_ids, optional human text).
-CommandResult: TypeAlias = tuple[dict[str, object], list[str], str | None]
+CommandResult: TypeAlias = tuple[dict[str, object], list[object], str | None]
+
+_warnings: ContextVar[list[CLIWarning] | None] = ContextVar(
+    "releaseledger_cli_warnings", default=None
+)
 
 
 @dataclass(slots=True)
 class CLIState:
     """Resolved per-invocation CLI options shared across subcommands.
 
-    Attributes:
-        cwd: Effective working directory (root for config discovery).
-        json_output: When true, subcommands emit JSON envelopes.
+    ``cwd`` remains a read-only compatibility property while ``root`` is the
+    canonical project selector.
     """
 
-    cwd: Path
-    json_output: bool
+    root: Path
+    json_output: bool = False
+    warnings: list[CLIWarning] = field(default_factory=list)
+
+    @property
+    def cwd(self) -> Path:
+        """Compatibility view for code not yet renamed from ``cwd``."""
+        return self.root
 
 
-def resolve_workspace_root(cwd: Path | None) -> Path:
-    """Resolve the effective workspace root from an optional ``--cwd`` value."""
-    if cwd is None:
-        return Path.cwd()
-    resolved = Path(cwd).expanduser()
+def resolve_workspace_root(root: Path | None) -> Path:
+    """Resolve a project root without changing the process working directory."""
+    if root is None:
+        return Path.cwd().resolve()
+    resolved = Path(root).expanduser()
     return resolved.resolve()
 
 
@@ -72,6 +86,7 @@ def store_cli_state(ctx: typer.Context, state: CLIState) -> None:
     ctx.ensure_object(dict)
     obj: dict[str, Any] = ctx.obj
     obj["state"] = state
+    _warnings.set(state.warnings)
 
 
 def cli_state_from_context(ctx: typer.Context) -> CLIState:
@@ -85,7 +100,69 @@ def cli_state_from_context(ctx: typer.Context) -> CLIState:
     if isinstance(state, CLIState):
         return state
     # Defensive fallback for direct command invocation without the callback.
-    return CLIState(cwd=resolve_workspace_root(None), json_output=False)
+    return CLIState(root=resolve_workspace_root(None), json_output=False)
+
+
+def canonical_command_path(command: str) -> str:
+    """Return the public space-separated command path."""
+    return command.replace(".", " ").strip()
+
+
+def normalize_legacy_global_argv(argv: Sequence[str]) -> list[str]:
+    """Hoist only the supported legacy post-command global ``--json`` flag.
+
+    Click/Typer normally require group options before a subcommand. This
+    narrow compatibility pass deliberately leaves values and all content after
+    ``--`` untouched, and never reinterprets command-local options.
+    """
+    args = list(argv)
+    try:
+        end = args.index("--")
+    except ValueError:
+        end = len(args)
+    before = args[:end]
+    after = args[end:]
+    if "--json" not in before:
+        return args
+    # Already canonical: preserving order avoids duplicate options.
+    if before and before[0] == "--json":
+        return args
+    removed = False
+    remaining: list[str] = []
+    for item in before:
+        if item == "--json" and not removed:
+            removed = True
+            continue
+        remaining.append(item)
+    return ["--json", *remaining, *after]
+
+
+def add_cli_warning(warning: CLIWarning) -> None:
+    """Collect a warning for the current invocation."""
+    current = _warnings.get()
+    if current is None:
+        current = []
+        _warnings.set(current)
+    if not any(
+        item.code == warning.code
+        and item.message == warning.message
+        and item.replacement == warning.replacement
+        for item in current
+    ):
+        current.append(warning)
+
+
+def _current_warnings(extra: Sequence[CLIWarning] = ()) -> list[CLIWarning]:
+    """Return invocation warnings with deterministic de-duplication."""
+    combined = [*(_warnings.get() or []), *extra]
+    result: list[CLIWarning] = []
+    seen: set[tuple[str, str, str | None]] = set()
+    for warning in combined:
+        key = (warning.code, warning.message, warning.replacement)
+        if key not in seen:
+            seen.add(key)
+            result.append(warning)
+    return result
 
 
 def emit_payload(
@@ -93,26 +170,33 @@ def emit_payload(
     command: str,
     result_type: str,
     result: dict[str, object],
-    events: list[str] | None = None,
+    events: list[object] | None = None,
     human: str | None = None,
     json_output: bool,
+    warnings: Sequence[CLIWarning] = (),
 ) -> None:
     """Render a success payload as JSON or a human line.
 
     ``human`` is shown verbatim for human mode; JSON mode emits the full
     envelope with sorted keys and a trailing newline.
     """
+    canonical = canonical_command_path(command)
+    collected = _current_warnings(warnings)
     if json_output:
-        payload: dict[str, object] = {
-            "ok": True,
-            "command": command,
-            "result_type": result_type,
-            "result": result,
-        }
-        if events is not None:
-            payload["events"] = list(events)
+        payload = SuccessEnvelope(
+            tool="releaseledger",
+            command=canonical,
+            result=result,
+            events=tuple(
+                event if isinstance(event, dict) else {"id": str(event)}
+                for event in (events or [])
+            ),
+            warnings=tuple(collected),
+        ).as_mapping()
         typer.echo(render_json(payload))
         return
+    for warning in collected:
+        typer.echo(f"warning: {warning.message}", err=True)
     if human is not None:
         typer.echo(human)
 
@@ -124,25 +208,33 @@ def emit_error(
     json_output: bool,
     human: str | None = None,
     result: dict[str, object] | None = None,
+    events: list[object] | None = None,
+    warnings: Sequence[CLIWarning] = (),
 ) -> None:
     """Render an error payload as JSON (stdout) or a human line (stderr)."""
+    canonical = canonical_command_path(command)
+    collected = _current_warnings(warnings)
     if json_output:
-        payload: dict[str, object] = {
-            "ok": False,
-            "command": command,
-            "error": to_error_payload(error),
-        }
+        payload = ErrorEnvelope(
+            tool="releaseledger",
+            command=canonical,
+            error=to_error_payload(error),
+            events=tuple(
+                event if isinstance(event, dict) else {"id": str(event)}
+                for event in (events or [])
+            ),
+            warnings=tuple(collected),
+        ).as_mapping()
         if result is None:
             embedded = error.data.get("result")
             if isinstance(embedded, dict):
                 result = embedded
         if result is not None:
-            payload["result_type"] = str(
-                result.get("kind", result.get("result_type", "command_result"))
-            )
             payload["result"] = result
         typer.echo(render_json(payload))
         return
+    for warning in collected:
+        typer.echo(f"warning: {warning.message}", err=True)
     if human is None:
         embedded_human = error.data.get("human")
         human = embedded_human if isinstance(embedded_human, str) else None
@@ -183,6 +275,7 @@ def run_command(
     produce: Callable[[], CommandResult],
     workspace_root: Path | None = None,
     mutating: bool = False,
+    check_passed: bool | None = None,
 ) -> None:
     """Run a command body, emitting a success or error envelope.
 
@@ -190,11 +283,9 @@ def run_command(
     :class:`ReleaseledgerError` raised by the service layer is turned into the
     error envelope and a non-zero typer exit.
     """
-    if mutating and workspace_root is not None:
-        check_mutating_branch_guard(
-            workspace_root, json_output=json_output, command=command
-        )
     try:
+        if mutating and workspace_root is not None:
+            check_mutating_branch_guard(workspace_root, command=command)
         if mutating and workspace_root is not None:
             from releaseledger.storage.locking import acquire_write_lock
 
@@ -213,12 +304,15 @@ def run_command(
         human=human,
         json_output=json_output,
     )
+    if check_passed is False or (
+        check_passed is None and result.get("passed") is False
+    ):
+        raise typer.Exit(1)
 
 
 def check_mutating_branch_guard(
     workspace_root: Path,
     *,
-    json_output: bool,
     command: str,
 ) -> None:
     """Enforce ledger_branch_guard for mutating commands (design §9.6).
@@ -239,8 +333,12 @@ def check_mutating_branch_guard(
             mutating=True,
         )
         if warning:
-            # In warn mode, print to stderr (typer.echo with err=True).
-            typer.echo(f"warning: {warning}", err=True)
+            add_cli_warning(
+                CLIWarning(
+                    code="branch_guard",
+                    message=str(warning),
+                )
+            )
     except ReleaseledgerError:
         raise
     except Exception:

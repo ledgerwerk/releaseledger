@@ -1,22 +1,30 @@
 """Releaseledger command-line interface.
 
-The root :data:`app` exposes ``--cwd``, ``--json`` and ``--version`` and stores
-a :class:`~releaseledger.cli_common.CLIState` on the typer context for
-subcommands. Subcommand groups are registered progressively (``init``,
-``release``, ``entry``, ``changelog``) at the bottom of this module.
+The root callback owns canonical ``--root`` selection and compatibility
+handling for ``--cwd``. Domain services remain below this module while the
+shared command boundary in :mod:`releaseledger.cli_common` owns rendering.
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Annotated
 
 import typer
+import yaml
+from ledgercore.cli import (
+    CLIWarning,
+    deprecated_command_warning,
+    deprecated_option_warning,
+)
+from typer.core import TyperGroup
 
 from releaseledger._version import __version__
 from releaseledger.cli_common import (
     CLIState,
     CommandResult,
+    add_cli_warning,
     cli_state_from_context,
     emit_error,
     emit_payload,
@@ -26,6 +34,13 @@ from releaseledger.cli_common import (
     run_command,
     store_cli_state,
     write_text_output,
+)
+from releaseledger.command_registry import COMMAND_INVENTORY, command_help
+from releaseledger.commands.common import (
+    next_action,
+    project_doctor,
+    project_info,
+    project_status,
 )
 from releaseledger.errors import CODE_USAGE_ERROR, LaunchError, ReleaseledgerError
 from releaseledger.services.audit import (
@@ -51,6 +66,7 @@ from releaseledger.services.changelog_build import (
 )
 from releaseledger.services.config import (
     config_show,
+    config_validate,
     storage_where,
 )
 from releaseledger.services.entries import (
@@ -59,7 +75,9 @@ from releaseledger.services.entries import (
     delete_release_entry,
     import_release_entry_file,
     list_release_entries,
-    load_entry_batch_file,
+    load_entry_batch_file_with_metadata,
+    load_entry_batch_payload,
+    set_entry_status,
     show_release_entry,
     update_release_entry,
 )
@@ -84,6 +102,7 @@ from releaseledger.services.releases import (
     check_release_chain,
     create_release,
     finalize_release,
+    import_tags,
     list_release_records,
     prepare_release,
     reconcile_releases,
@@ -91,6 +110,7 @@ from releaseledger.services.releases import (
     rename_changelog_section,
     rename_release,
     repair_release_chain,
+    set_release_status,
     show_release,
     tag_release,
     update_release,
@@ -103,6 +123,19 @@ from releaseledger.storage.paths import (
     require_project,
 )
 from releaseledger.storage.store import load_release
+
+
+class LegacyChangelogGroup(TyperGroup):
+    """Treat an unknown positional token as the legacy preview version."""
+
+    def resolve_command(self, ctx: typer.Context, args: list[str]):
+        if args and not args[0].startswith("-") and args[0] not in self.commands:
+            preview = self.commands.get("preview")
+            if preview is not None:
+                ctx.meta["legacy_changelog_preview"] = True
+                return "preview", preview, args
+        return super().resolve_command(ctx, args)
+
 
 app = typer.Typer(
     add_completion=True,
@@ -129,9 +162,17 @@ def releaseledger_main(
             help="Print version and exit.",
         ),
     ] = False,
+    root: Annotated[
+        Path | None,
+        typer.Option("--root", help="Project root for discovery and commands."),
+    ] = None,
     cwd: Annotated[
         Path | None,
-        typer.Option("--cwd", help="Run as if started from PATH."),
+        typer.Option(
+            "--cwd",
+            help="Deprecated alias for --root.",
+            hidden=True,
+        ),
     ] = None,
     json_output: Annotated[
         bool,
@@ -139,9 +180,30 @@ def releaseledger_main(
     ] = False,
 ) -> None:
     """Manage project-local release state."""
+    resolved_root = resolve_workspace_root(root)
+    resolved_cwd = resolve_workspace_root(cwd) if cwd is not None else None
+    if root is not None and resolved_cwd is not None and resolved_root != resolved_cwd:
+        error = LaunchError(
+            "--root and deprecated --cwd refer to different paths.",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+            remediation=["Supply only --root PATH."],
+        )
+        emit_error(
+            command=ctx.invoked_subcommand or "",
+            error=error,
+            json_output=json_output,
+        )
+        raise typer.Exit(2)
+    effective_root = (
+        resolved_cwd if root is None and resolved_cwd is not None else resolved_root
+    )
+    warnings = []
+    if cwd is not None:
+        warnings.append(deprecated_option_warning("--cwd", "--root"))
     store_cli_state(
         ctx,
-        CLIState(cwd=resolve_workspace_root(cwd), json_output=json_output),
+        CLIState(root=effective_root, json_output=json_output, warnings=warnings),
     )
     if ctx.invoked_subcommand is None:
         typer.echo(ctx.get_help())
@@ -256,6 +318,172 @@ def init_command(
     run_command(
         command="init",
         result_type="project_init",
+        json_output=state.json_output,
+        produce=produce,
+    )
+
+
+@app.command("commands")
+def commands_command(ctx: typer.Context) -> None:
+    """List canonical command metadata without requiring a project."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        commands = [entry.as_mapping() for entry in COMMAND_INVENTORY.entries]
+        return (
+            {"kind": "command_inventory", "commands": commands},
+            [],
+            COMMAND_INVENTORY.human_table(),
+        )
+
+    run_command(
+        command="commands",
+        result_type="command_inventory",
+        json_output=state.json_output,
+        produce=produce,
+    )
+
+
+@app.command("help")
+def help_command_cli(
+    ctx: typer.Context,
+    path: Annotated[list[str] | None, typer.Argument(help="Command path.")] = None,
+) -> None:
+    """Show generated help for a command or command group."""
+    state = cli_state_from_context(ctx)
+    path_parts = list(path or [])
+    requested = " ".join(path_parts)
+
+    def produce() -> CommandResult:
+        try:
+            result = command_help(path_parts)
+        except KeyError as exc:
+            raise LaunchError(
+                f"Unknown command path `{requested}`.",
+                code=CODE_USAGE_ERROR,
+                exit_code=2,
+                remediation=["Run `releaseledger commands`."],
+            ) from exc
+        metadata = COMMAND_INVENTORY.resolve(requested)
+        if metadata is not None and requested != metadata.path:
+            add_cli_warning(deprecated_command_warning(requested, metadata.path))
+        if "children" in result:
+            children = result["children"]
+            assert isinstance(children, list)
+            human = "\n".join(
+                f"{item['path']}  {item['summary']}"
+                for item in children
+                if isinstance(item, dict)
+            )
+        else:
+            human = f"{result.get('path', requested)}\n{result.get('summary', '')}"
+        return result, [], human
+
+    run_command(
+        command="help",
+        result_type="command_help",
+        json_output=state.json_output,
+        produce=produce,
+    )
+
+
+@app.command("status")
+def status_command(
+    ctx: typer.Context,
+    check: Annotated[
+        bool, typer.Option("--check", help="Return 1 when unhealthy.")
+    ] = False,
+) -> None:
+    """Show a concise, read-only project status."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        result = project_status(state.root, check=check)
+        human = (
+            f"{result.get('state', '')}: {result.get('project_root', '')}\n"
+            f"health: {result.get('health', '')}\n"
+            f"next: {result.get('next_action', {}).get('command', '')}"
+        )
+        return result, [], human
+
+    run_command(
+        command="status",
+        result_type="project_status",
+        json_output=state.json_output,
+        produce=produce,
+        check_passed=None
+        if not check
+        else bool(project_status(state.root, check=True).get("passed")),
+    )
+
+
+@app.command("info")
+def info_command(ctx: typer.Context) -> None:
+    """Show the full read-only project inventory."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        result = project_info(state.root)
+        return (
+            result,
+            [],
+            (
+                f"project: {result.get('status', {}).get('project_root', '')}\n"
+                f"releases: {result.get('release_count', 0)}\n"
+                f"entries: {result.get('entry_count', 0)}"
+            ),
+        )
+
+    run_command(
+        command="info",
+        result_type="project_info",
+        json_output=state.json_output,
+        produce=produce,
+    )
+
+
+@app.command("doctor")
+def doctor_command(
+    ctx: typer.Context,
+    check: Annotated[
+        bool, typer.Option("--check", help="Exit 1 on failed checks.")
+    ] = False,
+) -> None:
+    """Run read-only project diagnostics."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        result = project_doctor(state.root, check=check)
+        checks = result.get("checks", [])
+        human = "\n".join(
+            f"{item.get('status', ''):<5} {item.get('code', '')}: {item.get('message', '')}"
+            for item in checks
+            if isinstance(item, dict)
+        )
+        return result, [], human
+
+    result = project_doctor(state.root, check=check)
+    run_command(
+        command="doctor",
+        result_type="doctor",
+        json_output=state.json_output,
+        produce=produce,
+        check_passed=None if not check else bool(result.get("passed")),
+    )
+
+
+@app.command("next-action")
+def next_action_command(ctx: typer.Context) -> None:
+    """Recommend the next command without executing it."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        result = next_action(state.root)
+        return result, [], f"next: {result['command']}\nreason: {result['reason']}"
+
+    run_command(
+        command="next-action",
+        result_type="next_action",
         json_output=state.json_output,
         produce=produce,
     )
@@ -459,9 +687,70 @@ def release_update_command(
             "--force", help="Allow clearing released_at on a released release."
         ),
     ] = False,
+    reason: Annotated[str | None, typer.Option("--reason")] = None,
 ) -> None:
     """Update release metadata, with explicit clear flags for optional fields."""
     state = cli_state_from_context(ctx)
+
+    if status is not None:
+        metadata_supplied = any(
+            value is not None
+            for value in (
+                title,
+                note,
+                previous_version,
+                changelog_file,
+                boundary_ref,
+                source_refs,
+                source_count,
+                released_at,
+                git_base_ref,
+                git_head_ref,
+            )
+        ) or any(
+            (
+                clear_previous,
+                clear_changelog_file,
+                clear_boundary_ref,
+                clear_source_refs,
+                clear_source_count,
+                clear_released_at,
+                clear_git_range,
+            )
+        )
+        if metadata_supplied:
+            error = LaunchError(
+                "--status is now a lifecycle command and cannot be combined with metadata updates.",
+                code=CODE_USAGE_ERROR,
+                exit_code=2,
+                remediation=["Use `release set-status VERSION STATUS --reason TEXT`."],
+            )
+            emit_error(
+                command="release update", error=error, json_output=state.json_output
+            )
+            raise typer.Exit(2)
+        add_cli_warning(
+            deprecated_command_warning("release update --status", "release set-status")
+        )
+
+        def legacy_status() -> CommandResult:
+            result = set_release_status(
+                _paths(ctx).workspace_root,
+                version=version,
+                status=status,
+                reason=reason or "Legacy release update --status transition.",
+            )
+            return result, _event_ids(result), f"updated release {version} status"
+
+        run_command(
+            command="release set-status",
+            result_type="release_status_change",
+            json_output=state.json_output,
+            produce=legacy_status,
+            workspace_root=_paths(ctx).workspace_root,
+            mutating=True,
+        )
+        return
 
     def produce() -> CommandResult:
         result = update_release(
@@ -498,6 +787,42 @@ def release_update_command(
         produce=produce,
         workspace_root=_paths(ctx).workspace_root,
         mutating=True,
+    )
+
+
+@release_app.command("set-status")
+def release_set_status_command(
+    ctx: typer.Context,
+    version: Annotated[str, typer.Argument()],
+    status: Annotated[str, typer.Argument()],
+    reason: Annotated[str, typer.Option("--reason")],
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """Set a nonterminal release status explicitly."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        result = set_release_status(
+            _paths(ctx).workspace_root,
+            version=version,
+            status=status,
+            reason=reason,
+            dry_run=dry_run,
+        )
+        action = "previewed" if dry_run else "set"
+        return (
+            result,
+            _event_ids(result),
+            f"{action} release {version} status to {status}",
+        )
+
+    run_command(
+        command="release set-status",
+        result_type="release_status_change",
+        json_output=state.json_output,
+        produce=produce,
+        workspace_root=_paths(ctx).workspace_root,
+        mutating=not dry_run,
     )
 
 
@@ -719,6 +1044,51 @@ def release_reconcile_command(
     )
 
 
+@release_app.command("import-tags")
+def release_import_tags_command(
+    ctx: typer.Context,
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help="Create missing release records. Without this flag, only dry-run.",
+        ),
+    ] = False,
+) -> None:
+    """Discover semver git tags and create missing release records."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        result = import_tags(_paths(ctx).workspace_root, apply=apply)
+        planned = [
+            e
+            for e in result.get("plans", [])
+            if isinstance(e, dict) and e.get("action") == "create"
+        ]
+        lines = []
+        if apply:
+            lines.append(f"Applied {len(result.get('applied_versions', []))} tag(s).")
+            lines.append(
+                f"Skipped {len(result.get('skipped_versions', []))} existing tag(s)."
+            )
+        else:
+            lines.append(f"DRY RUN: {len(planned)} tag(s) would be imported.")
+            lines.append("Use --apply to create release records.")
+        for entry in planned:
+            lines.append(
+                f"  {entry['version']} (tag: {entry['tag']}, date: {entry.get('released_at', '')})"
+            )
+        human = "\n".join(lines)
+        return result, [], human
+
+    run_command(
+        command="release.import_tags",
+        result_type="release_import_tags",
+        json_output=state.json_output,
+        produce=produce,
+    )
+
+
 @release_app.command("check")
 def release_check_command(
     ctx: typer.Context,
@@ -760,18 +1130,18 @@ def release_check_command(
             include_history_health=True,
         )
     except ReleaseledgerError as exc:
-        emit_error(command="release.check", error=exc, json_output=state.json_output)
+        emit_error(command="release check", error=exc, json_output=state.json_output)
         raise typer.Exit(launch_error_exit_code(exc)) from exc
     ok = bool(result.get("ok", False))
     emit_payload(
-        command="release.check",
+        command="release check",
         result_type="release_check",
         result=result,
         human=_render_release_check_human(version, result),
         json_output=state.json_output,
     )
     if strict and not ok:
-        raise typer.Exit(2)
+        raise typer.Exit(1)
 
 
 @release_app.command("cancel")
@@ -1183,9 +1553,50 @@ def entry_update_command(
     prs: Annotated[list[str] | None, typer.Option("--pr")] = None,
     breaking: Annotated[bool | None, typer.Option("--breaking/--no-breaking")] = None,
     internal: Annotated[bool | None, typer.Option("--internal/--no-internal")] = None,
+    reason: Annotated[str | None, typer.Option("--reason")] = None,
 ) -> None:
     """Update explicitly supplied entry fields."""
     state = cli_state_from_context(ctx)
+
+    if status is not None and all(
+        value is None
+        for value in (
+            kind,
+            summary,
+            body,
+            audience,
+            scopes,
+            source_refs,
+            paths,
+            issues,
+            prs,
+            breaking,
+            internal,
+        )
+    ):
+        add_cli_warning(
+            deprecated_command_warning("entry update --status", "entry set-status")
+        )
+
+        def legacy_status() -> CommandResult:
+            result = set_entry_status(
+                _paths(ctx).workspace_root,
+                release_version=version,
+                entry_id=entry_id,
+                status=status,
+                reason=reason or "Legacy entry update --status transition.",
+            )
+            return result, _event_ids(result), f"updated entry {entry_id} status"
+
+        run_command(
+            command="entry set-status",
+            result_type="entry_status_change",
+            json_output=state.json_output,
+            produce=legacy_status,
+            workspace_root=_paths(ctx).workspace_root,
+            mutating=True,
+        )
+        return
 
     def produce() -> CommandResult:
         result = update_release_entry(
@@ -1212,6 +1623,44 @@ def entry_update_command(
         result_type="release_entry",
         json_output=state.json_output,
         produce=produce,
+    )
+
+
+@entry_app.command("set-status")
+def entry_set_status_command(
+    ctx: typer.Context,
+    version: Annotated[str, typer.Argument()],
+    entry_id: Annotated[str, typer.Argument()],
+    status: Annotated[str, typer.Argument()],
+    reason: Annotated[str, typer.Option("--reason")],
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """Set an entry status explicitly."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        result = set_entry_status(
+            _paths(ctx).workspace_root,
+            release_version=version,
+            entry_id=entry_id,
+            status=status,
+            reason=reason,
+            dry_run=dry_run,
+        )
+        action = "previewed" if dry_run else "set"
+        return (
+            result,
+            _event_ids(result),
+            f"{action} entry {entry_id} status to {status}",
+        )
+
+    run_command(
+        command="entry set-status",
+        result_type="entry_status_change",
+        json_output=state.json_output,
+        produce=produce,
+        workspace_root=_paths(ctx).workspace_root,
+        mutating=not dry_run,
     )
 
 
@@ -1321,9 +1770,30 @@ def entry_add_many_command(
 ) -> None:
     """Add a validated YAML batch atomically."""
     state = cli_state_from_context(ctx)
+    if "entry apply" not in ctx.command_path:
+        add_cli_warning(deprecated_command_warning("entry add-many", "entry apply"))
 
     def produce() -> CommandResult:
-        entries = load_entry_batch_file(source_path)
+        if source_path == Path("-"):
+            try:
+                payload = yaml.safe_load(sys.stdin.read())
+            except yaml.YAMLError as exc:
+                raise LaunchError(
+                    f"Invalid entry batch input: {exc}",
+                    code=CODE_USAGE_ERROR,
+                    exit_code=2,
+                ) from exc
+            entries, legacy_batch = load_entry_batch_payload(payload)
+        else:
+            entries, legacy_batch = load_entry_batch_file_with_metadata(source_path)
+        if legacy_batch:
+            add_cli_warning(
+                CLIWarning(
+                    code="legacy_input",
+                    message="Unversioned entry batches are deprecated.",
+                    replacement="schema: releaseledger.entry-batch.v1",
+                )
+            )
         if guard_commit_subjects:
             workspace_root = _paths(ctx).workspace_root
             subjects = collect_commit_subjects(workspace_root, version=version)
@@ -1345,7 +1815,17 @@ def entry_add_many_command(
             sync_audit=sync_audit,
         )
         issues = result.get("issues")
-        if isinstance(issues, list) and issues:
+        blocking_issues = (
+            [
+                issue
+                for issue in issues
+                if isinstance(issue, dict)
+                and (str(issue.get("severity", "error")) == "error" or strict)
+            ]
+            if isinstance(issues, list)
+            else []
+        )
+        if blocking_issues:
             lint = result.get("lint", {})
             lint_summary = lint.get("summary", {}) if isinstance(lint, dict) else {}
             warnings = (
@@ -1354,18 +1834,16 @@ def entry_add_many_command(
                 else 0
             )
             raise ReleaseledgerError(
-                f"Entry batch validation failed with {len(issues)} issue(s)"
+                f"Entry batch validation failed with {len(blocking_issues)} issue(s)"
                 f" and {warnings} warning(s).",
                 code="VALIDATION_ERROR",
                 exit_code=2,
                 data={
                     "result": result,
                     "human": (
-                        f"Entry batch validation failed with {len(issues)} issue(s) "
+                        f"Entry batch validation failed with {len(blocking_issues)} issue(s) "
                         f"and {warnings} warning(s).\n"
-                        + _render_lint_issues(
-                            [issue for issue in issues if isinstance(issue, dict)]
-                        )
+                        + _render_lint_issues(blocking_issues)
                     ),
                 },
             )
@@ -1377,13 +1855,16 @@ def entry_add_many_command(
         )
 
     run_command(
-        command="entry.add-many",
+        command="entry apply",
         result_type="release_entry_batch",
         json_output=state.json_output,
         produce=produce,
         workspace_root=_paths(ctx).workspace_root,
         mutating=not dry_run,
     )
+
+
+entry_app.command("apply")(entry_add_many_command)
 
 
 @entry_app.command("list")
@@ -1463,7 +1944,7 @@ def entry_lint_command(
             ),
         )
     except ReleaseledgerError as exc:
-        emit_error(command="entry.lint", error=exc, json_output=state.json_output)
+        emit_error(command="entry lint", error=exc, json_output=state.json_output)
         raise typer.Exit(launch_error_exit_code(exc)) from exc
 
     summary = result["summary"]
@@ -1474,7 +1955,7 @@ def entry_lint_command(
     if result["passed"]:
         human = f"entry lint passed: {errors} error(s), {warnings} warning(s)"
         emit_payload(
-            command="entry.lint",
+            command="entry lint",
             result_type="entry_lint",
             result=result,
             human=human,
@@ -1487,22 +1968,18 @@ def entry_lint_command(
         code="VALIDATION_ERROR",
         exit_code=2,
     )
-    if state.json_output:
-        payload: dict[str, object] = {
-            "ok": False,
-            "command": "entry.lint",
-            "result_type": "entry_lint",
-            "result": result,
-            "error": lint_error.to_payload(),
-        }
-        typer.echo(render_json(payload))
-    else:
-        typer.echo(lint_error.message, err=True)
+    emit_error(
+        command="entry lint",
+        error=lint_error,
+        json_output=state.json_output,
+        result=result,
+    )
+    if not state.json_output:
         issues = result.get("issues", [])
         if isinstance(issues, list) and issues:
             typer.echo("", err=True)
             typer.echo(_render_lint_issues(issues), err=True)
-    raise typer.Exit(launch_error_exit_code(lint_error))
+    raise typer.Exit(1)
 
 
 @entry_app.command("prompt")
@@ -1525,29 +2002,44 @@ def entry_prompt_command(
             format_name=format_name,
         )
     except ReleaseledgerError as exc:
-        emit_error(command="entry.prompt", error=exc, json_output=state.json_output)
+        emit_error(command="entry prompt", error=exc, json_output=state.json_output)
         raise typer.Exit(launch_error_exit_code(exc)) from exc
     text = render_json(result) if isinstance(result, dict) else result
     if output is not None:
         target = write_text_output(output, text)
-        if state.json_output:
-            typer.echo(
-                render_json(
-                    {
-                        "ok": True,
-                        "command": "entry.prompt",
-                        "result_type": "entry_prompt",
-                        "result": {"output": str(target), "format": format_name},
-                    }
-                )
-            )
-        else:
-            typer.echo(f"wrote {target}")
+        emit_payload(
+            command="entry prompt",
+            result_type="entry_prompt",
+            result={"output": str(target), "format": format_name},
+            human=f"wrote {target}",
+            json_output=state.json_output,
+        )
         return
-    typer.echo(text)
+    emit_payload(
+        command="entry prompt",
+        result_type="entry_prompt",
+        result={"format": format_name, "content": text},
+        human=text,
+        json_output=state.json_output,
+    )
 
 
-@app.command("changelog")
+changelog_app = typer.Typer(
+    help="Preview and build changelog artifacts.",
+    cls=LegacyChangelogGroup,
+    invoke_without_command=True,
+)
+app.add_typer(changelog_app, name="changelog")
+
+
+@changelog_app.callback(invoke_without_command=True)
+def changelog_group(
+    ctx: typer.Context,
+) -> None:
+    """Route the legacy positional changelog form to preview."""
+
+
+@changelog_app.command("preview")
 def changelog_command(
     ctx: typer.Context,
     version: Annotated[str, typer.Argument(help="Release version string.")],
@@ -1584,13 +2076,21 @@ def changelog_command(
 ) -> None:
     """Render changelog context for a release."""
     state = cli_state_from_context(ctx)
+    if ctx.meta.get("legacy_changelog_preview"):
+        add_cli_warning(
+            deprecated_command_warning("changelog VERSION", "changelog preview VERSION")
+        )
+    if target_changelog is not None:
+        add_cli_warning(deprecated_option_warning("--target-changelog", "--output"))
     if format_name not in {"markdown", "json"}:
         err = ReleaseledgerError(
             f"Unsupported --format: {format_name!r}",
             code="USAGE_ERROR",
             exit_code=2,
         )
-        emit_error(command="changelog", error=err, json_output=state.json_output)
+        emit_error(
+            command="changelog preview", error=err, json_output=state.json_output
+        )
         raise typer.Exit(launch_error_exit_code(err)) from err
     try:
         workspace_root = _paths(ctx).workspace_root
@@ -1606,7 +2106,9 @@ def changelog_command(
             lint=lint,
         )
     except ReleaseledgerError as exc:
-        emit_error(command="changelog", error=exc, json_output=state.json_output)
+        emit_error(
+            command="changelog preview", error=exc, json_output=state.json_output
+        )
         raise typer.Exit(launch_error_exit_code(exc)) from exc
     if format_name == "json":
         text = render_json(content) if isinstance(content, dict) else str(content)
@@ -1614,18 +2116,21 @@ def changelog_command(
         text = content if isinstance(content, str) else render_json(content)
     if output is not None:
         out_path = write_text_output(output, text)
-        if state.json_output:
-            payload: dict[str, object] = {
-                "ok": True,
-                "command": "changelog",
-                "result_type": "changelog",
-                "result": {"output": str(out_path), "format": format_name},
-            }
-            typer.echo(render_json(payload))
-        else:
-            typer.echo(f"wrote {out_path}")
+        emit_payload(
+            command="changelog preview",
+            result_type="changelog_preview",
+            result={"output": str(out_path), "format": format_name},
+            human=f"wrote {out_path}",
+            json_output=state.json_output,
+        )
         return
-    typer.echo(text)
+    emit_payload(
+        command="changelog preview",
+        result_type="changelog_preview",
+        result={"kind": "changelog_preview", "format": format_name, "content": text},
+        human=text,
+        json_output=state.json_output,
+    )
 
 
 def _format_coverage_row(row: dict[str, object]) -> str:
@@ -1696,6 +2201,8 @@ def review_command(
 ) -> None:
     """Review release coverage, orphans, lint, and a strict changelog dry-run."""
     state = cli_state_from_context(ctx)
+    if "release review" not in ctx.command_path:
+        add_cli_warning(deprecated_command_warning("review", "release review"))
     statuses = tuple(include_statuses) if include_statuses is not None else None
     try:
         result = build_release_review(
@@ -1711,24 +2218,22 @@ def review_command(
             require_audit_sheet=require_audit_sheet,
         )
     except ReleaseledgerError as exc:
-        emit_error(command="review", error=exc, json_output=state.json_output)
+        emit_error(command="release review", error=exc, json_output=state.json_output)
         raise typer.Exit(launch_error_exit_code(exc)) from exc
 
     ok = bool(result.get("ok", False))
-    if state.json_output:
-        payload: dict[str, object] = {
-            "ok": ok,
-            "command": "review",
-            "result_type": "release_review",
-            "result": result,
-        }
-        typer.echo(render_json(payload))
-        if strict and not ok:
-            raise typer.Exit(2)
-        return
-    typer.echo(_render_review_human(version, result))
+    emit_payload(
+        command="release review",
+        result_type="release_review",
+        result=result,
+        human=_render_review_human(version, result),
+        json_output=state.json_output,
+    )
     if strict and not ok:
-        raise typer.Exit(2)
+        raise typer.Exit(1)
+
+
+release_app.command("review")(review_command)
 
 
 def _render_review_human(version: str, result: dict[str, object]) -> str:
@@ -1914,7 +2419,6 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
-@app.command("build")
 def build_command(
     ctx: typer.Context,
     version: Annotated[
@@ -1923,7 +2427,10 @@ def build_command(
     ] = None,
     target_file: Annotated[
         Path | None,
-        typer.Option("--target-file", help="CHANGELOG target file."),
+        typer.Option("--target-file", help="Deprecated CHANGELOG target file."),
+    ] = None,
+    output: Annotated[
+        Path | None, typer.Option("--output", help="CHANGELOG target file.")
     ] = None,
     release_date: Annotated[
         str | None,
@@ -2003,13 +2510,18 @@ def build_command(
     --all, rebuild the complete target file from ledger state.
     """
     state = cli_state_from_context(ctx)
+    if target_file is not None and output is None:
+        add_cli_warning(deprecated_option_warning("--target-file", "--output"))
+    target_file = output or target_file
+    if "changelog build" not in ctx.command_path:
+        add_cli_warning(deprecated_command_warning("build", "changelog build"))
     if format_name not in {"markdown", "json"}:
         err = ReleaseledgerError(
             f"Unsupported --format: {format_name!r}",
             code="USAGE_ERROR",
             exit_code=2,
         )
-        emit_error(command="build", error=err, json_output=state.json_output)
+        emit_error(command="changelog build", error=err, json_output=state.json_output)
         raise typer.Exit(launch_error_exit_code(err)) from err
     full_build = all_releases or version is None
     if all_releases and version is not None:
@@ -2022,7 +2534,7 @@ def build_command(
                 "`releaseledger build VERSION` for one section.",
             ],
         )
-        emit_error(command="build", error=err, json_output=state.json_output)
+        emit_error(command="changelog build", error=err, json_output=state.json_output)
         raise typer.Exit(launch_error_exit_code(err)) from err
     if unreleased_version is not None and not full_build:
         err = ReleaseledgerError(
@@ -2034,7 +2546,7 @@ def build_command(
                 "Use `releaseledger build --all --unreleased-version VERSION`."
             ],
         )
-        emit_error(command="build", error=err, json_output=state.json_output)
+        emit_error(command="changelog build", error=err, json_output=state.json_output)
         raise typer.Exit(launch_error_exit_code(err)) from err
     try:
         workspace_root = _paths(ctx).workspace_root
@@ -2072,7 +2584,7 @@ def build_command(
                 allow_empty=allow_empty,
             )
     except ReleaseledgerError as exc:
-        emit_error(command="build", error=exc, json_output=state.json_output)
+        emit_error(command="changelog build", error=exc, json_output=state.json_output)
         raise typer.Exit(launch_error_exit_code(exc)) from exc
     target = str(result.get("target_file", ""))
     if full_build:
@@ -2102,7 +2614,7 @@ def build_command(
             human += f"\nInternal-only covered commits: {hidden_commits}"
         result_type = "changelog_build"
     emit_payload(
-        command="build",
+        command="changelog build",
         result_type=result_type,
         result=result,
         human=human,
@@ -2110,10 +2622,16 @@ def build_command(
     )
 
 
+changelog_app.command("build")(build_command)
+app.command("build")(build_command)
+
+
 changelog_section_app = typer.Typer(
     help="Correct release sections in an existing changelog file."
 )
 app.add_typer(changelog_section_app, name="changelog-section")
+section_app = typer.Typer(help="Correct sections in a generated changelog.")
+changelog_app.add_typer(section_app, name="section")
 
 
 @changelog_section_app.command("remove-section")
@@ -2121,9 +2639,12 @@ def changelog_remove_section_command(
     ctx: typer.Context,
     version: Annotated[str, typer.Argument(help="Release section to remove.")],
     target_file: Annotated[
-        Path,
-        typer.Option("--target-file", help="Changelog file to update."),
-    ],
+        Path | None,
+        typer.Option("--target-file", help="Deprecated changelog output path."),
+    ] = None,
+    output: Annotated[
+        Path | None, typer.Option("--output", help="Changelog file to update.")
+    ] = None,
     ignore_missing: Annotated[
         bool,
         typer.Option("--ignore-missing", help="Skip a missing section."),
@@ -2135,12 +2656,21 @@ def changelog_remove_section_command(
 ) -> None:
     """Remove a release section from a changelog file."""
     state = cli_state_from_context(ctx)
+    if target_file is not None and output is None:
+        add_cli_warning(deprecated_option_warning("--target-file", "--output"))
+    effective_target = output or target_file
 
     def produce() -> CommandResult:
+        if effective_target is None:
+            raise LaunchError(
+                "An output path is required; use --output PATH.",
+                code=CODE_USAGE_ERROR,
+                exit_code=2,
+            )
         result = remove_changelog_section(
             _paths(ctx).workspace_root,
             version=version,
-            target_file=target_file,
+            target_file=effective_target,
             ignore_missing=ignore_missing,
             dry_run=dry_run,
         )
@@ -2152,7 +2682,7 @@ def changelog_remove_section_command(
         return result, [], human
 
     run_command(
-        command="changelog-section.remove",
+        command="changelog section remove",
         result_type="changelog_section_remove",
         json_output=state.json_output,
         produce=produce,
@@ -2165,9 +2695,12 @@ def changelog_rename_section_command(
     old_version: Annotated[str, typer.Argument(help="Section version to rename.")],
     new_version: Annotated[str, typer.Argument(help="New section version.")],
     target_file: Annotated[
-        Path,
-        typer.Option("--target-file", help="Changelog file to update."),
-    ],
+        Path | None,
+        typer.Option("--target-file", help="Deprecated changelog output path."),
+    ] = None,
+    output: Annotated[
+        Path | None, typer.Option("--output", help="Changelog file to update.")
+    ] = None,
     ignore_missing: Annotated[
         bool,
         typer.Option("--ignore-missing", help="Skip a missing source section."),
@@ -2185,13 +2718,22 @@ def changelog_rename_section_command(
 ) -> None:
     """Rename a release section heading in a changelog file."""
     state = cli_state_from_context(ctx)
+    if target_file is not None and output is None:
+        add_cli_warning(deprecated_option_warning("--target-file", "--output"))
+    effective_target = output or target_file
 
     def produce() -> CommandResult:
+        if effective_target is None:
+            raise LaunchError(
+                "An output path is required; use --output PATH.",
+                code=CODE_USAGE_ERROR,
+                exit_code=2,
+            )
         result = rename_changelog_section(
             _paths(ctx).workspace_root,
             old_version=old_version,
             new_version=new_version,
-            target_file=target_file,
+            target_file=effective_target,
             ignore_missing=ignore_missing,
             replace_existing=replace_existing,
             dry_run=dry_run,
@@ -2204,11 +2746,15 @@ def changelog_rename_section_command(
         return result, [], human
 
     run_command(
-        command="changelog-section.rename",
+        command="changelog section rename",
         result_type="changelog_section_rename",
         json_output=state.json_output,
         produce=produce,
     )
+
+
+section_app.command("remove")(changelog_remove_section_command)
+section_app.command("rename")(changelog_rename_section_command)
 
 
 # -- Git-first release evidence commands (design §7) -------------------
@@ -2395,16 +2941,6 @@ def _run_git_range(
     }
     if drift is not None:
         result["snapshot_drift"] = drift
-    if state.json_output:
-        payload: dict[str, object] = {
-            "ok": True,
-            "command": "git.range",
-            "result_type": "git_range",
-            "result": result,
-        }
-        typer.echo(render_json(payload))
-        return
-
     lines = [f"GIT RANGE {display_version}", ""]
     lines.append(f"  base: {base_ref_display} -> {base_sha[:7]}")
     lines.append(f"  head: {head_display} -> {head_sha[:7]}")
@@ -2434,7 +2970,13 @@ def _run_git_range(
             if c.diff_excerpt:
                 excerpt = c.diff_excerpt.replace("\n", " ")[:120]
                 lines.append(f"    diff: {excerpt}")
-    typer.echo("\n".join(lines))
+    emit_payload(
+        command="git range",
+        result_type="git_range",
+        result=result,
+        human="\n".join(lines),
+        json_output=state.json_output,
+    )
 
 
 @git_app.command("import")
@@ -2581,18 +3123,6 @@ def git_import_command(
         "status": status,
         "entries": batch["entries"],
     }
-    if state.json_output:
-        payload: dict[str, object] = {
-            "ok": True,
-            "command": command_name,
-            "result_type": "git_scaffold"
-            if invoked_name == "scaffold"
-            else "git_import",
-            "result": result,
-        }
-        typer.echo(render_json(payload))
-        return
-
     lines = [f"{human_name} {version}", ""]
     lines.append(f"  output: {output}")
     lines.append(f"  base: {base_display} -> {base_sha[:7]}")
@@ -2617,7 +3147,13 @@ def git_import_command(
     lines.append("  do not copy or paraphrase git commit messages into summaries")
     lines.append(f"  releaseledger entry add-many {version} --file {output} --dry-run")
     lines.append(f"  releaseledger entry add-many {version} --file {output}")
-    typer.echo("\n".join(lines))
+    emit_payload(
+        command=("git scaffold" if invoked_name == "scaffold" else "git import"),
+        result_type=("git_scaffold" if invoked_name == "scaffold" else "git_import"),
+        result=result,
+        human="\n".join(lines),
+        json_output=state.json_output,
+    )
 
 
 git_app.command("scaffold")(git_import_command)
@@ -2857,10 +3393,13 @@ def storage_validate_command(
         if isinstance(bindings, dict):
             for name, status in bindings.items():
                 lines.append(f"  {name}: {status}")
+        passed = bool(validation.get("layout_valid", False))
         if "domain" in validation:
             domain = validation["domain"]
             lines.append(f"Domain records valid: {domain.get('valid', False)}")
             lines.append(f"Domain failures: {domain.get('total_failures', 0)}")
+            passed = passed and bool(domain.get("valid", False))
+        validation["passed"] = passed
         human = "\n".join(lines)
         return validation, [], human
 
@@ -2869,6 +3408,7 @@ def storage_validate_command(
         result_type="storage_validate",
         json_output=state.json_output,
         produce=produce,
+        check_passed=None,
     )
 
 
@@ -2888,16 +3428,19 @@ def storage_set_command(
     ] = "project",
     root: Annotated[
         str | None,
-        typer.Option(
-            "--root", help="External root path (required for external storage)."
-        ),
+        typer.Option("--root", hidden=True),
+    ] = None,
+    storage_root: Annotated[
+        str | None,
+        typer.Option("--storage-root", help="External root path."),
     ] = None,
     target: Annotated[
+        str | None,
+        typer.Option("--target", hidden=True),
+    ] = None,
+    scope: Annotated[
         str,
-        typer.Option(
-            "--target",
-            help="Write target: project (manifest) or local (local override).",
-        ),
+        typer.Option("--scope", help="Write scope: project or local."),
     ] = "project",
     dry_run: Annotated[
         bool,
@@ -2910,6 +3453,14 @@ def storage_set_command(
 ) -> None:
     """Set the data mount storage kind."""
     state = cli_state_from_context(ctx)
+    if root is not None:
+        add_cli_warning(
+            deprecated_option_warning("storage set --root", "--storage-root")
+        )
+    if target is not None:
+        add_cli_warning(deprecated_option_warning("storage set --target", "--scope"))
+    effective_root = storage_root if storage_root is not None else root
+    effective_scope = target if target is not None else scope
 
     def produce() -> CommandResult:
         if mount != "data":
@@ -2918,31 +3469,56 @@ def storage_set_command(
                 code=CODE_USAGE_ERROR,
                 exit_code=2,
             )
+        if migrate_flag:
+            raise LaunchError(
+                "--migrate is no longer a storage-set shortcut; use explicit migration commands.",
+                code=CODE_USAGE_ERROR,
+                exit_code=2,
+                remediation=[
+                    "Run `migrate plan storage-layout` then `migrate apply storage-layout`."
+                ],
+            )
+        if data_storage == "cache":
+            raise LaunchError(
+                "Authoritative Releaseledger data cannot use cache storage.",
+                code=CODE_USAGE_ERROR,
+                exit_code=2,
+                remediation=["Choose project, external, or user-data storage."],
+            )
         from releaseledger.ledgercore_backend import set_releaseledger_data_target
 
-        set_releaseledger_data_target(
-            state.cwd,
-            storage=data_storage,
-            external_root=root,
-            target=target,
-        )
+        if not dry_run:
+            set_releaseledger_data_target(
+                state.cwd,
+                storage=data_storage,
+                external_root=effective_root,
+                target=effective_scope,
+            )
         human = (
             f"data storage set to {data_storage}"
-            + (f" (external root: {root})" if root else "")
-            + f" via {target}"
+            + (f" (external root: {effective_root})" if effective_root else "")
+            + f" via {effective_scope}"
         )
         if dry_run:
             return (
                 {
                     "dry_run": True,
                     "storage": data_storage,
-                    "root": root,
-                    "target": target,
+                    "storage_root": effective_root,
+                    "scope": effective_scope,
                 },
                 [],
                 human,
             )
-        return {"storage": data_storage, "root": root, "target": target}, [], human
+        return (
+            {
+                "storage": data_storage,
+                "storage_root": effective_root,
+                "scope": effective_scope,
+            },
+            [],
+            human,
+        )
 
     run_command(
         command="storage.set",
@@ -2959,6 +3535,8 @@ def storage_clear_override_command(
         str,
         typer.Argument(help="Mount to clear: data."),
     ] = "data",
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    reason: Annotated[str | None, typer.Option("--reason")] = None,
 ) -> None:
     """Remove a local data mount override."""
     state = cli_state_from_context(ctx)
@@ -2972,15 +3550,27 @@ def storage_clear_override_command(
             )
         from releaseledger.ledgercore_backend import clear_releaseledger_data_override
 
-        clear_releaseledger_data_override(state.cwd)
-        human = "data override cleared"
-        return {"cleared": True, "mount": mount}, [], human
+        if not dry_run:
+            clear_releaseledger_data_override(state.cwd)
+        effective = storage_where(state.cwd)
+        human = "data override clear previewed" if dry_run else "data override cleared"
+        return (
+            {
+                "cleared": not dry_run,
+                "dry_run": dry_run,
+                "mount": mount,
+                "effective": effective,
+            },
+            [],
+            human,
+        )
 
     run_command(
         command="storage.clear-override",
         result_type="storage_clear_override",
         json_output=state.json_output,
         produce=produce,
+        mutating=not dry_run,
     )
 
 
@@ -3020,6 +3610,10 @@ def storage_migrate_command(
 ) -> None:
     """Plan or execute storage migration from legacy to schema-3."""
     state = cli_state_from_context(ctx)
+    if "storage migrate" in ctx.command_path:
+        add_cli_warning(
+            deprecated_command_warning("storage migrate", f"migrate {subcommand}")
+        )
 
     def produce() -> CommandResult:
         from releaseledger.migration import (
@@ -3093,10 +3687,299 @@ def storage_migrate_command(
         )
 
     run_command(
-        command="storage.migrate",
+        command=f"migrate {subcommand}",
         result_type="storage_migrate",
         json_output=state.json_output,
         produce=produce,
+    )
+
+
+def _migration_command_result(
+    ctx: typer.Context,
+    operation: str,
+    *,
+    migration: str,
+    data_storage: str = "project",
+    storage_root: str | None = None,
+    scope: str = "project",
+    output: Path | None = None,
+    plan_file: Path | None = None,
+    dry_run: bool = False,
+    journal: Path | None = None,
+    yes: bool = False,
+    reason: str | None = None,
+) -> CommandResult:
+    """Execute one canonical migration operation through the CLI boundary."""
+    from releaseledger.migration import (
+        ReleaseledgerMigrationRequest,
+        cleanup_migration,
+        execute_migration,
+        load_migration_plan,
+        migration_status,
+        plan_migration,
+        recover_migration,
+        validate_migration_plan,
+    )
+
+    root = cli_state_from_context(ctx).root
+    if migration != "storage-layout":
+        raise LaunchError(
+            f"Unknown migration: {migration!r}.",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+            remediation=["Use `storage-layout`."],
+        )
+    if operation == "status":
+        result = migration_status(root)
+        return result, [], f"Migration state: {result.get('state', 'unknown')}"
+    if operation == "recover":
+        result = recover_migration(root, journal=journal)
+        return result, [], str(result.get("message", "Recovery attempted."))
+    if operation == "cleanup":
+        result = cleanup_migration(root, yes=yes, dry_run=dry_run, reason=reason)
+        return (
+            result,
+            [],
+            (
+                "Migration cleanup previewed"
+                if dry_run
+                else f"Migration cleanup removed {len(result.get('removed', []))} path(s)"
+            ),
+        )
+
+    if operation == "apply" and not dry_run and (not reason or not reason.strip()):
+        raise LaunchError(
+            "Migration apply requires a reason.",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+            remediation=["Provide --reason describing the migration decision."],
+        )
+
+    if operation == "apply" and plan_file is not None:
+        plan = load_migration_plan(plan_file)
+        validation = validate_migration_plan(plan, root)
+        if dry_run:
+            return (
+                {
+                    "kind": "migration_apply_preview",
+                    "migration": migration,
+                    "plan": plan,
+                    "validation": validation,
+                    "dry_run": True,
+                },
+                [],
+                "Migration apply validated (dry-run)",
+            )
+        destination = plan.get("destination", {})
+        source = plan.get("source", {})
+        assert isinstance(destination, dict)
+        request = ReleaseledgerMigrationRequest(
+            start=root,
+            data_storage=str(destination.get("storage", "project")),  # type: ignore[arg-type]
+            external_root=(
+                str(destination.get("external_root"))
+                if destination.get("external_root")
+                else None
+            ),
+            target=str(destination.get("scope", "project")),  # type: ignore[arg-type]
+            mode="copy",
+        )
+        result = execute_migration(request)
+        result["plan_hash"] = plan.get("plan_hash")
+        result["source_fingerprint"] = (
+            source.get("fingerprint") if isinstance(source, dict) else None
+        )
+        return result, [], "Migration applied from verified plan"
+
+    request = ReleaseledgerMigrationRequest(
+        start=root,
+        data_storage=data_storage,  # type: ignore[arg-type]
+        external_root=storage_root,
+        target=scope,  # type: ignore[arg-type]
+        mode="copy",
+    )
+    plan = plan_migration(request)
+    if operation == "plan" or dry_run:
+        result = dict(plan)
+        result["dry_run"] = dry_run
+        if output is not None:
+            write_text_output(output, render_json(result))
+            result["output"] = str(output)
+        return (
+            result,
+            [],
+            (
+                f"wrote migration plan to {output}"
+                if output is not None
+                else "Migration plan ready"
+            ),
+        )
+    result = execute_migration(request)
+    return result, [], "Migration applied"
+
+
+migrate_app = typer.Typer(help="Plan and execute named migrations.")
+app.add_typer(migrate_app, name="migrate")
+
+
+@migrate_app.command("status")
+def migrate_status_command(ctx: typer.Context) -> None:
+    """Show migration status."""
+    state = cli_state_from_context(ctx)
+    run_command(
+        command="migrate status",
+        result_type="migration_status",
+        json_output=state.json_output,
+        produce=lambda: _migration_command_result(
+            ctx, "status", migration="storage-layout"
+        ),
+    )
+
+
+def _migrate_common_options(
+    ctx: typer.Context,
+    operation: str,
+    migration: str,
+    data_storage: str,
+    storage_root: str | None,
+    scope: str,
+    mode: str,
+    preserve_legacy_config: bool,
+) -> None:
+    if migration != "storage-layout":
+        error = LaunchError(
+            f"Unknown migration: {migration!r}.",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+            remediation=["Use `storage-layout`."],
+        )
+        state = cli_state_from_context(ctx)
+        emit_error(
+            command=f"migrate {operation}", error=error, json_output=state.json_output
+        )
+        raise typer.Exit(2)
+    ctx.invoke(
+        storage_migrate_command,
+        subcommand=operation,
+        data_storage=data_storage,
+        root=storage_root,
+        target=scope,
+        mode=mode,
+        preserve_legacy_config=preserve_legacy_config,
+    )
+
+
+@migrate_app.command("plan")
+def migrate_plan_command(
+    ctx: typer.Context,
+    migration: Annotated[str, typer.Argument()] = "storage-layout",
+    data_storage: Annotated[str, typer.Option("--storage")] = "project",
+    storage_root: Annotated[str | None, typer.Option("--storage-root")] = None,
+    scope: Annotated[str, typer.Option("--scope")] = "project",
+    mode: Annotated[str, typer.Option("--mode", hidden=True)] = "copy",
+    preserve_legacy_config: Annotated[
+        bool, typer.Option("--preserve-legacy-config", hidden=True)
+    ] = False,
+    output: Annotated[Path | None, typer.Option("--output")] = None,
+) -> None:
+    """Plan the named storage-layout migration."""
+    state = cli_state_from_context(ctx)
+    run_command(
+        command="migrate plan",
+        result_type="migration_plan",
+        json_output=state.json_output,
+        produce=lambda: _migration_command_result(
+            ctx,
+            "plan",
+            migration=migration,
+            data_storage=data_storage,
+            storage_root=storage_root,
+            scope=scope,
+            output=output,
+        ),
+    )
+
+
+@migrate_app.command("apply")
+def migrate_apply_command(
+    ctx: typer.Context,
+    migration: Annotated[str, typer.Argument()] = "storage-layout",
+    data_storage: Annotated[str, typer.Option("--storage")] = "project",
+    storage_root: Annotated[str | None, typer.Option("--storage-root")] = None,
+    scope: Annotated[str, typer.Option("--scope")] = "project",
+    mode: Annotated[str, typer.Option("--mode", hidden=True)] = "copy",
+    preserve_legacy_config: Annotated[
+        bool, typer.Option("--preserve-legacy-config", hidden=True)
+    ] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    plan_file: Annotated[Path | None, typer.Option("--plan-file")] = None,
+    reason: Annotated[str | None, typer.Option("--reason")] = None,
+) -> None:
+    """Apply the named storage-layout migration."""
+    state = cli_state_from_context(ctx)
+    run_command(
+        command="migrate apply",
+        result_type="migration_apply",
+        json_output=state.json_output,
+        produce=lambda: _migration_command_result(
+            ctx,
+            "apply",
+            migration=migration,
+            data_storage=data_storage,
+            storage_root=storage_root,
+            scope=scope,
+            plan_file=plan_file,
+            dry_run=dry_run,
+            reason=reason,
+        ),
+        workspace_root=state.root,
+        mutating=not dry_run,
+    )
+
+
+@migrate_app.command("recover")
+def migrate_recover_command(
+    ctx: typer.Context,
+    journal: Annotated[Path | None, typer.Option("--journal")] = None,
+) -> None:
+    """Recover an interrupted storage-layout migration."""
+    state = cli_state_from_context(ctx)
+    run_command(
+        command="migrate recover",
+        result_type="migration_recovery",
+        json_output=state.json_output,
+        produce=lambda: _migration_command_result(
+            ctx, "recover", migration="storage-layout", journal=journal
+        ),
+        workspace_root=state.root,
+        mutating=True,
+    )
+
+
+@migrate_app.command("cleanup")
+def migrate_cleanup_command(
+    ctx: typer.Context,
+    migration: Annotated[str, typer.Argument()] = "storage-layout",
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+    reason: Annotated[str | None, typer.Option("--reason")] = None,
+) -> None:
+    """Explicitly clean verified legacy state after migration."""
+    state = cli_state_from_context(ctx)
+    run_command(
+        command="migrate cleanup",
+        result_type="migration_cleanup",
+        json_output=state.json_output,
+        produce=lambda: _migration_command_result(
+            ctx,
+            "cleanup",
+            migration=migration,
+            dry_run=dry_run,
+            yes=yes,
+            reason=reason,
+        ),
+        workspace_root=state.root,
+        mutating=not dry_run,
     )
 
 
@@ -3134,6 +4017,37 @@ def config_show_command(ctx: typer.Context) -> None:
     run_command(
         command="config.show",
         result_type="config_show",
+        json_output=state.json_output,
+        produce=produce,
+    )
+
+
+@config_app.command("validate")
+def config_validate_command(
+    ctx: typer.Context,
+    strict: Annotated[bool, typer.Option("--strict")] = False,
+) -> None:
+    """Validate configuration and storage without writing state."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        result = config_validate(state.root, strict=strict)
+        issues = result.get("issues", [])
+        human = (
+            "config validation passed"
+            if result.get("valid")
+            else "config validation failed\n"
+            + "\n".join(
+                f"- {item.get('code')}: {item.get('message')}"
+                for item in issues
+                if isinstance(item, dict)
+            )
+        )
+        return result, [], human
+
+    run_command(
+        command="config validate",
+        result_type="config_validation",
         json_output=state.json_output,
         produce=produce,
     )
@@ -3437,11 +4351,20 @@ def audit_validate_command(
     ] = False,
     record_event: Annotated[
         bool,
-        typer.Option("--record-event", help="Append an audit.validated event."),
+        typer.Option(
+            "--record-event",
+            help="Deprecated compatibility path; use audit record-validation.",
+        ),
     ] = False,
 ) -> None:
     """Validate the audit sheet against release entries and git coverage."""
     state = cli_state_from_context(ctx)
+    if record_event:
+        add_cli_warning(
+            deprecated_option_warning(
+                "audit validate --record-event", "audit record-validation"
+            )
+        )
     try:
         workspace_root = _paths(ctx).workspace_root
         result = validate_commit_audit_sheet(
@@ -3453,7 +4376,7 @@ def audit_validate_command(
             record_event=record_event,
         )
     except ReleaseledgerError as exc:
-        emit_error(command="audit.validate", error=exc, json_output=state.json_output)
+        emit_error(command="audit validate", error=exc, json_output=state.json_output)
         raise typer.Exit(launch_error_exit_code(exc)) from exc
     ok = bool(result.get("ok"))
     if ok:
@@ -3468,11 +4391,54 @@ def audit_validate_command(
             f"missing_coverage={missing})"
         )
     emit_payload(
-        command="audit.validate",
+        command="audit validate",
         result_type="commit_audit_validation",
         result=result,
         human=human,
         json_output=state.json_output,
+    )
+    if not ok:
+        raise typer.Exit(1)
+
+
+@audit_app.command("record-validation")
+def audit_record_validation_command(
+    ctx: typer.Context,
+    version: Annotated[str, typer.Argument(help="Release version string.")],
+    reason: Annotated[str, typer.Option("--reason")],
+    phase: Annotated[str, typer.Option("--phase")] = "complete",
+    strict: Annotated[bool, typer.Option("--strict")] = False,
+    include_internal: Annotated[bool, typer.Option("--include-internal")] = False,
+) -> None:
+    """Validate and explicitly append an audit validation event."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        if not reason or not reason.strip():
+            raise LaunchError(
+                "--reason is required when recording validation.",
+                code=CODE_USAGE_ERROR,
+                exit_code=2,
+            )
+        result = validate_commit_audit_sheet(
+            _paths(ctx).workspace_root,
+            version=version,
+            phase=phase,
+            strict=strict,
+            include_internal=include_internal,
+            record_event=True,
+            reason=reason,
+        )
+        result["reason"] = reason
+        return result, [], f"recorded audit validation for {version}"
+
+    run_command(
+        command="audit record-validation",
+        result_type="commit_audit_validation",
+        json_output=state.json_output,
+        produce=produce,
+        workspace_root=_paths(ctx).workspace_root,
+        mutating=True,
     )
 
 

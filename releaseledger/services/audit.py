@@ -1000,6 +1000,7 @@ def validate_commit_audit_sheet(
     strict: bool = False,
     include_internal: bool = False,
     record_event: bool = False,
+    reason: str | None = None,
 ) -> dict[str, object]:
     """Cross-check the audit sheet against release entries and git coverage.
 
@@ -1082,7 +1083,12 @@ def validate_commit_audit_sheet(
                     event="audit.validated",
                     release_version=version,
                     record_revisions={"commit_audit_sheet": sheet.versioning.revision},
-                    data={"ok": False, "phase": phase, "blockers": blockers},
+                    data={
+                        "ok": False,
+                        "phase": phase,
+                        "blockers": blockers,
+                        **({"reason": reason} if reason else {}),
+                    },
                 )
             raise LaunchError(
                 f"Strict audit validation failed for {version}: "
@@ -1098,7 +1104,11 @@ def validate_commit_audit_sheet(
             event="audit.validated",
             release_version=version,
             record_revisions={"commit_audit_sheet": sheet.versioning.revision},
-            data={"ok": ok, "phase": phase},
+            data={
+                "ok": ok,
+                "phase": phase,
+                **({"reason": reason} if reason else {}),
+            },
         )
     return report
 

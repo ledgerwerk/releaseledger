@@ -56,6 +56,7 @@ __all__ = [
     "show_release_entry",
     "delete_release_entry",
     "update_release_entry",
+    "set_entry_status",
 ]
 
 
@@ -434,6 +435,7 @@ def update_release_entry(
     prs: tuple[str, ...] | None = None,
     breaking: bool | None = None,
     internal: bool | None = None,
+    reason: str | None = None,
 ) -> dict[str, object]:
     existing = _find_entry(workspace_root, release_version, entry_id)
     candidate = _candidate(
@@ -507,11 +509,58 @@ def update_release_entry(
                 field
                 for field, value in changes.items()
                 if getattr(existing, field) != value
-            )
+            ),
+            **({"reason": reason} if reason else {}),
         },
     )
     rebuild_indexes(workspace_root)
     return _payload(workspace_root, release_version, updated, events=[event.event_id])
+
+
+def set_entry_status(
+    workspace_root: Path,
+    *,
+    release_version: str,
+    entry_id: str,
+    status: str,
+    reason: str,
+    dry_run: bool = False,
+) -> dict[str, object]:
+    """Set an entry status through the explicit lifecycle command."""
+    if not reason.strip():
+        raise LaunchError(
+            "--reason is required for entry status transitions.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
+    existing = _find_entry(workspace_root, release_version, entry_id)
+    normalized = normalize_entry_status(status)
+    if existing.status == normalized:
+        raise LaunchError(
+            f"Entry {entry_id} already has status {normalized!r}.",
+            code=CODE_CONFLICT,
+            exit_code=4,
+        )
+    if dry_run:
+        return {
+            "kind": "entry_status_change",
+            "release_version": release_version,
+            "entry_id": entry_id,
+            "from": existing.status,
+            "to": normalized,
+            "reason": reason,
+            "dry_run": True,
+        }
+    result = update_release_entry(
+        workspace_root,
+        release_version=release_version,
+        entry_id=entry_id,
+        status=normalized,
+        reason=reason,
+    )
+    result["kind"] = "entry_status_change"
+    result["reason"] = reason
+    return result
 
 
 def _globalize_legacy_ref(value: object, source_ledger: str | None) -> str | None:
@@ -669,11 +718,30 @@ def import_release_entry_file(
     return _payload(workspace_root, release_version, record, events=[event.event_id])
 
 
-def load_entry_batch_file(source_path: Path) -> list[dict[str, object]]:
-    try:
-        payload = ledgercore.load_yaml_object(source_path, label="entry batch")
-    except ledgercore.YamlStoreError as exc:
-        raise LaunchError(str(exc), code=CODE_VALIDATION_ERROR, exit_code=2) from exc
+def load_entry_batch_payload(
+    payload: object,
+) -> tuple[list[dict[str, object]], bool]:
+    if not isinstance(payload, dict):
+        raise LaunchError(
+            "Entry batch must be a mapping.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
+    schema = payload.get("schema")
+    legacy = schema is None
+    if schema is not None and schema != "releaseledger.entry-batch.v1":
+        raise LaunchError(
+            f"Unsupported entry batch schema: {schema!r}.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+            remediation=["Use schema: releaseledger.entry-batch.v1."],
+        )
+    if schema is not None and payload.get("operation", "create") != "create":
+        raise LaunchError(
+            "Only entry batch operation 'create' is supported.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
     raw_entries = payload.get("entries")
     if not isinstance(raw_entries, list):
         raise LaunchError(
@@ -687,7 +755,22 @@ def load_entry_batch_file(source_path: Path) -> list[dict[str, object]]:
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
         )
-    return [dict(item) for item in raw_entries]
+    return [dict(item) for item in raw_entries], legacy
+
+
+def load_entry_batch_file(source_path: Path) -> list[dict[str, object]]:
+    entries, _legacy = load_entry_batch_file_with_metadata(source_path)
+    return entries
+
+
+def load_entry_batch_file_with_metadata(
+    source_path: Path,
+) -> tuple[list[dict[str, object]], bool]:
+    try:
+        payload = ledgercore.load_yaml_object(source_path, label="entry batch")
+    except ledgercore.YamlStoreError as exc:
+        raise LaunchError(str(exc), code=CODE_VALIDATION_ERROR, exit_code=2) from exc
+    return load_entry_batch_payload(payload)
 
 
 def add_many_release_entries(

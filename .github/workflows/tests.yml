@@ -16,7 +16,12 @@ jobs:
     - name: Install packages
       run: |
         pip install pytest
+        pip install ruff
         pip install -e .
+    - name: Check CLI metadata drift and style
+      run: |
+        python -m ruff check releaseledger tests
+        python -m pytest -q tests/test_cli_inventory.py
     - name: Run tests
       if: runner.os != 'Windows'
       run: python -m pytest

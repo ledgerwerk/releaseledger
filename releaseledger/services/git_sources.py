@@ -232,6 +232,50 @@ _SUBJECT_KIND_MAP = (
 _PR_HASH_RE = re.compile(r"#(\d+)")
 _ISSUE_REF_RE = re.compile(r"\bissues?/(\d+)\b", re.IGNORECASE)
 
+# GitHub merge commit pattern: "Merge pull request #3 from user/branch"
+_MERGE_PR_RE = re.compile(
+    r"^Merge pull request #(\d+) from ([^/\s]+)",
+    re.IGNORECASE,
+)
+
+# GitHub noreply email patterns for contributor handle extraction
+_NOREPLY_EMAIL_RE = re.compile(
+    r"(?:\d+\+)?([^@]+)@users\.noreply\.github\.com",
+    re.IGNORECASE,
+)
+
+
+def _extract_contributor_handles(
+    author_name: str, author_email: str, subject: str
+) -> tuple[str, ...]:
+    """Extract contributor handles from commit metadata.
+
+    Returns a tuple of canonical contributor tokens (e.g. '@neurlang').
+    Handles are extracted from:
+    1. GitHub noreply email addresses
+    2. Merge commit messages ("Merge pull request #N from user/branch")
+    """
+    handles: list[str] = []
+    seen: set[str] = set()
+
+    # Try noreply email
+    noreply_match = _NOREPLY_EMAIL_RE.search(author_email)
+    if noreply_match:
+        handle = noreply_match.group(1)
+        if handle and handle not in seen:
+            seen.add(handle)
+            handles.append(f"@{handle}")
+
+    # Try merge commit subject
+    merge_match = _MERGE_PR_RE.match(subject)
+    if merge_match:
+        handle = merge_match.group(2)
+        if handle and handle not in seen:
+            seen.add(handle)
+            handles.append(f"@{handle}")
+
+    return tuple(handles)
+
 
 @dataclass(frozen=True)
 class _CommitMeta:
@@ -269,6 +313,7 @@ class GitSourceCandidate:
     deletions: int | None
     pr_refs: tuple[str, ...]
     issue_refs: tuple[str, ...]
+    contributors: tuple[str, ...]
     inferred_kind: str
     inferred_summary: str
     diff_excerpt: str | None
@@ -512,7 +557,19 @@ def collect_git_candidates(
             ],
         )
     candidates: list[GitSourceCandidate] = []
+    # Track skipped merge metadata for attribution propagation.
+    # For each skipped merge, identify commits introduced by that merge
+    # and attach PR/contributor metadata to them.
+    skipped_merges: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []  # (merge_sha, prs, contributors)
     for sha in shas:
+        meta = _commit_metadata(workspace_root, sha)
+        is_merge = len(meta.parents) >= 2
+        if is_merge and include_merges == "nontrivial":
+            # Extract PR/contributor from the merge commit message
+            pr_refs, _ = _extract_refs(meta.subject, meta.body)
+            contributors = _extract_contributor_handles(meta.author_name, meta.author_email, meta.subject)
+            if pr_refs or contributors:
+                skipped_merges.append((sha, tuple(pr_refs), contributors))
         candidate = _build_candidate(
             workspace_root,
             sha=sha,
@@ -522,6 +579,51 @@ def collect_git_candidates(
         if candidate is None:
             continue
         candidates.append(candidate)
+
+    # Propagate skipped merge attribution to non-merge candidates.
+    # For each skipped merge, find commits introduced by the merge (second parent lineage)
+    # and add the merge's PR/contributor metadata if not already present.
+    if skipped_merges and include_merges == "nontrivial":
+        for merge_sha, merge_prs, merge_contributors in skipped_merges:
+            merge_meta = _commit_metadata(workspace_root, merge_sha)
+            if len(merge_meta.parents) < 2:
+                continue
+            second_parent = merge_meta.parents[1]
+            # Get commits in second parent lineage that are in our range
+            try:
+                introduced_result = _run_git(
+                    workspace_root,
+                    ["rev-list", second_parent, "--not", merge_meta.parents[0], "--reverse"]
+                )
+                if introduced_result.returncode == 0:
+                    introduced_shas = {
+                        line.strip() for line in introduced_result.stdout.splitlines() if line.strip()
+                    }
+                    # Attach attribution to matching candidates
+                    for i, candidate in enumerate(candidates):
+                        if candidate.sha in introduced_shas:
+                            # Merge PR refs and contributors
+                            existing_prs = set(candidate.pr_refs)
+                            existing_contributors = set(candidate.contributors)
+                            new_prs = existing_prs | set(merge_prs)
+                            new_contributors = existing_contributors | set(merge_contributors)
+                            if new_prs != existing_prs or new_contributors != existing_contributors:
+                                from dataclasses import replace
+                                # Deduplicate contributors preserving order
+                                seen_contrib: set[str] = set()
+                                merged_contributors: list[str] = []
+                                for c in [*candidate.contributors, *merge_contributors]:
+                                    if c not in seen_contrib:
+                                        seen_contrib.add(c)
+                                        merged_contributors.append(c)
+                                candidates[i] = replace(
+                                    candidate,
+                                    pr_refs=tuple(sorted(new_prs)),
+                                    contributors=tuple(merged_contributors),
+                                )
+            except Exception:
+                pass  # Best-effort attribution propagation
+
     return candidates
 
 
@@ -561,6 +663,7 @@ def _build_candidate(
         # include_merges == "always": fall through and include it.
     paths, additions, deletions = _changed_paths(workspace_root, sha)
     pr_refs, issue_refs = _extract_refs(meta.subject, meta.body)
+    contributors = _extract_contributor_handles(meta.author_name, meta.author_email, meta.subject)
     inferred_kind = _infer_kind(meta.subject)
     # Intentionally blank: commit subjects are evidence, not changelog prose.
     # Agents must write release-entry summaries from reviewed behavior/diffs.
@@ -584,6 +687,7 @@ def _build_candidate(
         deletions=deletions,
         pr_refs=tuple(pr_refs),
         issue_refs=tuple(issue_refs),
+        contributors=contributors,
         inferred_kind=inferred_kind,
         inferred_summary=inferred_summary,
         diff_excerpt=diff_excerpt,
@@ -847,6 +951,9 @@ def generate_git_scaffold_batch(
                 "source_refs": [candidate.source_ref],
                 "paths": list(candidate.paths),
                 "sources": [candidate.source_ref],
+                "prs": list(candidate.pr_refs),
+                "issues": list(candidate.issue_refs),
+                "contributors": list(candidate.contributors),
             }
         )
     return {

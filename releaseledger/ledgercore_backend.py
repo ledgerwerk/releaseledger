@@ -400,10 +400,6 @@ def _load_project(start: Path, *, allow_missing: bool) -> Any:
         cause_data: dict[str, object] = {
             "start": str(start.resolve()),
         }
-        if isinstance(exc, StorageError):
-            raise _map_ledgercore_error(
-                exc, code=CODE_CONFIG_ERROR, extra_data=cause_data
-            ) from exc
         if allow_missing and "No canonical" in str(exc):
             raise LaunchError(
                 f"No Releaseledger project found from {start}",
@@ -413,6 +409,10 @@ def _load_project(start: Path, *, allow_missing: bool) -> Any:
                 remediation=[
                     "Run `releaseledger init` to initialize a schema-3 project.",
                 ],
+            ) from exc
+        if isinstance(exc, StorageError):
+            raise _map_ledgercore_error(
+                exc, code=CODE_CONFIG_ERROR, extra_data=cause_data
             ) from exc
         raise _map_ledgercore_error(
             exc, code=CODE_CONFIG_ERROR, extra_data=cause_data
@@ -461,6 +461,19 @@ def load_releaseledger_ledger_layout(
 
     registration = manifest.ledgers.get(TOOL_NAME)
     if registration is None:
+        if allow_missing:
+            raise LaunchError(
+                f"No Releaseledger project found from {search}",
+                code=CODE_NOT_FOUND,
+                exit_code=2,
+                data={
+                    "tool": TOOL_NAME,
+                    "manifest_path": str(loaded.locator.manifest_path),
+                },
+                remediation=[
+                    "Run `releaseledger init` to initialize a schema-3 project.",
+                ],
+            )
         raise LaunchError(
             f"no '{TOOL_NAME}' registration in {loaded.locator.manifest_path}",
             code=CODE_CONFIG_ERROR,

@@ -1,5 +1,13 @@
 # Changelog rendering
 
+## CLI migration notes
+
+Changelog rendering is now exposed canonically as `changelog preview` and
+`changelog build`; the root `changelog VERSION` and `build` forms remain
+deprecated aliases. Use `release review` for the canonical review command.
+All JSON output uses the `ledgerwerk.cli.v1` envelope, and `--root` replaces
+`--cwd` as the preferred project selector.
+
 ## Two-step model
 
 `releaseledger changelog` renders review context. Use it when a human or

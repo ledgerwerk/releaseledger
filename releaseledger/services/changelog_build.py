@@ -120,6 +120,7 @@ def _entry_payload(entry: ReleaseEntryRecord) -> dict[str, object]:
         "issues": list(entry.issues),
         "prs": list(entry.prs),
         "sources": list(entry.sources),
+        "contributors": list(entry.contributors),
         "status": entry.status,
         "audience": entry.audience,
         "scopes": list(entry.scopes),
@@ -1499,12 +1500,20 @@ def render_full_changelog_document(
 ) -> str:
     """Assemble the full changelog document from rendered release sections.
 
-    Layout: ``# Changelog`` title, optional preamble (Keep a Changelog mode), an
-    optional ``## [Unreleased]`` section preserving ``unreleased_body``, the
-    release sections newest-first, and finally the generated-by marker plus the
-    link-reference block. The result ends with exactly one newline.
+    Layout: ``# Changelog`` title, visible generated notice (when enabled),
+    optional preamble, optional ``## [Unreleased]`` section, release sections
+    newest-first, link-reference block, and optional hidden sentinel.
+    The result ends with exactly one newline.
     """
     parts: list[str] = ["# Changelog"]
+
+    # Visible generated notice after title.
+    if config.changelog_generated_notice:
+        notice = config.changelog_generated_notice_text.strip()
+        if notice:
+            parts.append("")
+            parts.append(notice)
+
     is_kac = config.changelog_standard == "keepachangelog-1.1.0"
     preamble = config.changelog_preamble
     if is_kac and not preamble.strip():
@@ -1524,9 +1533,11 @@ def render_full_changelog_document(
             continue
         parts.append("")
         parts.append(section)
-    if config.changelog_footer.strip():
+    # Hidden sentinel (machine-readable ownership marker).
+    sentinel = config.changelog_generated_sentinel.strip()
+    if sentinel:
         parts.append("")
-        parts.append(config.changelog_footer.strip())
+        parts.append(sentinel)
     refs = link_refs or {}
     for name, url in refs.items():
         parts.append(f"[{name}]: {url}")
@@ -1646,6 +1657,70 @@ def _validate_folded_unreleased_strict(
         )
 
 
+
+def _validate_complete_history(
+    workspace_root: Path,
+    *,
+    selected_versions: set[str],
+    release_statuses: set[str],
+) -> tuple[list[str], dict[str, object]]:
+    """Validate that every semver git tag has a release record.
+
+    Returns (warnings, diagnostics). Raises LaunchError when tags are missing.
+    """
+    import subprocess
+
+    from releaseledger.domain.release import parse_release_version_tuple
+
+    git_result = subprocess.run(
+        ["git", "-C", str(workspace_root), "tag", "--list"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    raw_tags = [line.strip() for line in git_result.stdout.splitlines() if line.strip()]
+    tag_versions: dict[str, list[str]] = {}
+    for tag in raw_tags:
+        normalized = tag[1:] if tag.startswith("v") else tag
+        if parse_release_version_tuple(normalized) is None:
+            continue
+        tag_versions.setdefault(normalized, []).append(tag)
+
+    all_releases = list_releases(workspace_root)
+    release_versions = {r.version for r in all_releases}
+
+    missing = sorted(set(tag_versions) - release_versions)
+    ambiguous = {v: tags for v, tags in tag_versions.items() if len(tags) > 1}
+
+    diagnostics: dict[str, object] = {
+        "discovered_tag_count": len(tag_versions),
+        "recorded_release_count": len(release_versions),
+        "selected_release_count": len(selected_versions),
+        "missing_release_versions": missing,
+        "ambiguous_tags": {v: sorted(tags) for v, tags in sorted(ambiguous.items())},
+        "history_complete": not missing and not ambiguous,
+    }
+
+    warnings: list[str] = []
+    if missing:
+        missing_str = ", ".join(missing)
+        raise LaunchError(
+            f"Complete-history validation found {len(missing)} tagged release(s) "
+            f"missing from releaseledger: {missing_str}.\n\n"
+            "Run:\n"
+            "  releaseledger release import-tags --dry-run\n"
+            "  releaseledger release import-tags --apply\n"
+            "\nThen rebuild.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+            data={"diagnostics": diagnostics},
+        )
+    if ambiguous:
+        for v, tags in sorted(ambiguous.items()):
+            warnings.append(f"Ambiguous tags for {v}: {', '.join(sorted(tags))}")
+
+    return warnings, diagnostics
+
 def build_full_changelog_file(  # noqa: C901
     workspace_root: Path,
     *,
@@ -1659,6 +1734,7 @@ def build_full_changelog_file(  # noqa: C901
     allow_empty: bool = False,
     preserve_unreleased: bool = True,
     unreleased_version: str | None = None,
+    require_complete_history: bool = False,
 ) -> dict[str, object]:
     """Rebuild the full changelog target from releaseledger state.
 
@@ -1699,6 +1775,18 @@ def build_full_changelog_file(  # noqa: C901
 
     selected, order_warnings = _order_releases_for_changelog(selected)
     warnings.extend(order_warnings)
+
+    # Complete-history validation when requested.
+    complete_history_diagnostics: dict[str, object] | None = None
+    if require_complete_history or strict:
+        selected_versions = {record.version for record in selected}
+        ch_warnings, ch_diag = _validate_complete_history(
+            workspace_root,
+            selected_versions=selected_versions,
+            release_statuses=release_statuses,
+        )
+        warnings.extend(ch_warnings)
+        complete_history_diagnostics = ch_diag
 
     unreleased_version_rendered: str | None = None
     unreleased_entry_count = 0
@@ -1931,6 +2019,7 @@ def build_full_changelog_file(  # noqa: C901
         "unreleased_version": unreleased_version_rendered,
         "unreleased_entry_count": unreleased_entry_count,
         "unreleased_rendered": unreleased_version_rendered is not None,
+        "complete_history_diagnostics": complete_history_diagnostics,
         "excluded_internal_count": total_excluded_internal,
         "excluded_draft_count": total_excluded_draft,
         "excluded_rejected_count": total_excluded_rejected,

@@ -31,6 +31,7 @@ from releaseledger import ledgercore_backend as _backend
 from releaseledger.errors import (
     CODE_CONFIG_ERROR,
     CODE_NOT_FOUND,
+    CODE_USAGE_ERROR,
     CODE_VALIDATION_ERROR,
     LaunchError,
 )
@@ -51,6 +52,9 @@ __all__ = [
     "build_strict_inventory",
     "inventory_legacy_data",
     "plan_migration",
+    "serialize_migration_plan",
+    "load_migration_plan",
+    "validate_migration_plan",
     "execute_migration",
     "validate_domain_records",
     "rebuild_all_indexes",
@@ -62,6 +66,7 @@ __all__ = [
     "read_migration_journal",
     "migration_status",
     "recover_migration",
+    "cleanup_migration",
 ]
 
 # File names searched when detecting a legacy Releaseledger project.
@@ -1255,6 +1260,8 @@ def plan_migration(request: ReleaseledgerMigrationRequest) -> dict[str, object]:
     )
 
     plan: dict[str, object] = {
+        "schema": "releaseledger.migration-plan.v1",
+        "migration": "storage-layout",
         "kind": "releaseledger_migration_plan",
         "legacy_config_path": str(config_path),
         "legacy_data_root": str(legacy_dir),
@@ -1276,6 +1283,32 @@ def plan_migration(request: ReleaseledgerMigrationRequest) -> dict[str, object]:
         "selected_paths_count": len(selected.included),
         "excluded_paths_count": len(selected.excluded),
         "warnings": list(selected.warnings),
+        "source": {
+            "config_path": str(config_path),
+            "data_root": str(legacy_dir),
+            "fingerprint": _inventory_fingerprint(inventory),
+        },
+        "destination": {
+            "data_root": str(target_info.data_root),
+            "indexes_root": str(target_info.indexes_root),
+            "storage": target_data_storage,
+            "scope": request.target,
+            "external_root": target_external_root,
+        },
+        "operations": [
+            {
+                "operation": "copy",
+                "path": item.relative_path,
+                "size": item.size,
+                "sha256": item.sha256,
+            }
+            for item in inventory.files
+        ],
+        "preconditions": [
+            "source inventory fingerprint matches plan",
+            "legacy source contains no symlinks",
+            "target paths do not overlap legacy source",
+        ],
     }
 
     target_data = target_info.data_root
@@ -1289,7 +1322,75 @@ def plan_migration(request: ReleaseledgerMigrationRequest) -> dict[str, object]:
     else:
         plan["overlap_detected"] = False
 
-    return plan
+    return serialize_migration_plan(plan)
+
+
+def _inventory_fingerprint(inventory: ReleaseledgerDataInventory) -> str:
+    payload = [
+        {"path": item.relative_path, "size": item.size, "sha256": item.sha256}
+        for item in inventory.files
+    ]
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def serialize_migration_plan(plan: dict[str, object]) -> dict[str, object]:
+    """Return a deterministic migration plan with its canonical hash."""
+    result = dict(plan)
+    result.pop("plan_hash", None)
+    encoded = json.dumps(result, sort_keys=True, separators=(",", ":"), default=str)
+    result["plan_hash"] = "sha256:" + hashlib.sha256(encoded.encode()).hexdigest()
+    return result
+
+
+def load_migration_plan(path: Path) -> dict[str, object]:
+    """Load and validate a versioned migration plan file."""
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LaunchError(
+            f"Cannot read migration plan {path}: {exc}",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        ) from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema") != "releaseledger.migration-plan.v1"
+    ):
+        raise LaunchError(
+            "Migration plan must use schema releaseledger.migration-plan.v1.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
+    expected = payload.get("plan_hash")
+    actual = serialize_migration_plan(payload).get("plan_hash")
+    if expected != actual:
+        raise LaunchError(
+            "Migration plan hash does not match its contents.",
+            code="CONFLICT",
+            exit_code=4,
+        )
+    return payload
+
+
+def validate_migration_plan(plan: dict[str, object], start: Path) -> dict[str, object]:
+    """Recompute source inventory and reject a stale plan."""
+    source = discover_legacy_source(start)
+    current = _inventory_fingerprint(source.inventory)
+    source_data = plan.get("source", {})
+    expected = source_data.get("fingerprint") if isinstance(source_data, dict) else None
+    if expected != current:
+        raise LaunchError(
+            "Migration plan is stale: the legacy source inventory changed.",
+            code="CONFLICT",
+            exit_code=4,
+            remediation=["Run `migrate plan storage-layout` again."],
+        )
+    return {
+        "valid": True,
+        "source_fingerprint": current,
+        "plan_hash": plan.get("plan_hash"),
+    }
 
 
 def _reject_symlinks(data_root: Path) -> None:
@@ -1744,7 +1845,7 @@ def migration_status(
             "legacy_config_path": legacy,
             "canonical_detected": False,
             "migration_in_progress": False,
-            "remediation": "Run `releaseledger storage migrate plan`.",
+            "remediation": "Run `releaseledger migrate plan storage-layout`.",
         }
 
     if has_canonical and legacy:
@@ -1769,7 +1870,7 @@ def migration_status(
                 "migration_in_progress": False,
                 "migration_recovery_required": True,
                 "last_phase": last.get("phase"),
-                "remediation": "Run `releaseledger storage migrate recover`.",
+                "remediation": "Run `releaseledger migrate recover`.",
             }
 
     return {
@@ -1781,26 +1882,121 @@ def migration_status(
     }
 
 
-def recover_migration(workspace_root: Path) -> dict[str, object]:
+def recover_migration(
+    workspace_root: Path,
+    *,
+    journal: Path | None = None,
+) -> dict[str, object]:
     """Attempt recovery from an interrupted migration journal."""
     journal_dir = workspace_root.resolve() / ".ledger" / "releaseledger"
-    journal = read_migration_journal(journal_dir)
-    if not journal:
+    rows = (
+        list(_read_jsonl_permissive(journal))
+        if journal is not None
+        else read_migration_journal(journal_dir)
+    )
+    if not rows:
         return {
             "kind": "recovery_noop",
             "message": "No migration journal found; nothing to recover.",
         }
 
-    last = journal[-1]
+    last = rows[-1]
     phase = last.get("phase", "unknown")
     return {
         "kind": "recovery_attempted",
         "last_phase": phase,
-        "journal_entries": len(journal),
+        "journal_entries": len(rows),
+        "journal": str(journal)
+        if journal is not None
+        else str(journal_dir / JOURNAL_FILENAME),
         "message": (
             f"Migration was in phase '{phase}'. Manual inspection of the "
             "journal and data directories is required before retrying."
         ),
+    }
+
+
+def cleanup_migration(
+    workspace_root: Path,
+    *,
+    yes: bool = False,
+    dry_run: bool = False,
+    reason: str | None = None,
+) -> dict[str, object]:
+    """List or explicitly remove verified legacy migration artifacts."""
+    root = Path(workspace_root).resolve()
+    status = migration_status(root)
+    if status.get("state") not in {
+        "canonical-ready",
+        "canonical-with-legacy-artifacts",
+    }:
+        raise LaunchError(
+            "Migration cleanup requires a verified canonical project.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
+    journal_dir = root / ".ledger" / "releaseledger"
+    journal = read_migration_journal(journal_dir)
+    if journal and journal[-1].get("phase") in {
+        "staging",
+        "ledgercore-executing",
+        "failed",
+    }:
+        raise LaunchError(
+            "Migration cleanup is blocked by an incomplete migration journal.",
+            code="CONFLICT",
+            exit_code=4,
+            remediation=["Run `migrate recover --journal PATH` first."],
+        )
+    paths: list[Path] = []
+    for name in LEGACY_CONFIG_NAMES:
+        config = root / name
+        if config.is_file():
+            paths.append(config)
+            try:
+                source = discover_legacy_source(root)
+                if source.data_root.exists():
+                    paths.append(source.data_root)
+            except LaunchError:
+                pass
+            break
+    listed = sorted({str(path) for path in paths})
+    if dry_run:
+        return {
+            "kind": "migration_cleanup",
+            "dry_run": True,
+            "removed": [],
+            "paths": listed,
+            "reason": reason,
+        }
+    if not reason or not reason.strip():
+        raise LaunchError(
+            "Migration cleanup requires a reason.",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+            remediation=["Provide --reason explaining why legacy state is removed."],
+        )
+    if not yes:
+        raise LaunchError(
+            "Cleanup deletes legacy paths and requires --yes.",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+            remediation=["Review `migrate cleanup storage-layout --dry-run` first."],
+        )
+    removed: list[str] = []
+    for raw in listed:
+        path = Path(raw)
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()
+        removed.append(raw)
+    return {
+        "kind": "migration_cleanup",
+        "dry_run": False,
+        "removed": removed,
+        "paths": listed,
+        "reason": reason,
     }
 
 

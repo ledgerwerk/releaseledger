@@ -80,11 +80,13 @@ __all__ = [
     "check_release_chain",
     "create_release",
     "finalize_release",
+    "import_tags",
     "list_release_records",
     "rename_release",
     "repair_release_chain",
     "prepare_release",
     "show_release",
+    "set_release_status",
     "tag_release",
     "update_release",
 ]
@@ -575,6 +577,7 @@ def update_release(
     git_head_ref: Any = UNSET,
     clear_git_range: bool = False,
     force: bool = False,
+    reason: str | None = None,
 ) -> dict[str, object]:
     """Update explicitly supplied release metadata.
 
@@ -706,11 +709,70 @@ def update_release(
         data={
             "fields": sorted(
                 key for key, value in values.items() if getattr(existing, key) != value
-            )
+            ),
+            **({"reason": reason} if reason else {}),
         },
     )
     rebuild_indexes(workspace_root)
     return _release_payload(workspace_root, updated, event.event_id)
+
+
+def set_release_status(
+    workspace_root: Path,
+    *,
+    version: str,
+    status: str,
+    reason: str,
+    dry_run: bool = False,
+) -> dict[str, object]:
+    """Set a nonterminal status without bypassing terminal workflows."""
+    if not reason.strip():
+        raise LaunchError(
+            "--reason is required for release status transitions.",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+        )
+    existing = load_release(workspace_root, version)
+    if status not in {"planned", "draft", "candidate"}:
+        raise LaunchError(
+            "Terminal release states require `release finalize` or `release cancel`.",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+            remediation=[
+                "Use `release finalize VERSION` for released.",
+                "Use `release cancel VERSION --reason TEXT` for canceled.",
+            ],
+        )
+    if existing.status in {"released", "canceled", "yanked"}:
+        raise LaunchError(
+            f"Cannot change terminal release {version} from {existing.status!r}.",
+            code=CODE_CONFLICT,
+            exit_code=4,
+        )
+    if existing.status == status:
+        raise LaunchError(
+            f"Release {version} already has status {status!r}.",
+            code=CODE_CONFLICT,
+            exit_code=4,
+        )
+    if dry_run:
+        return {
+            "kind": "release_status_change",
+            "version": version,
+            "from": existing.status,
+            "to": status,
+            "reason": reason,
+            "dry_run": True,
+        }
+    result = update_release(
+        workspace_root,
+        version=version,
+        status=status,
+        reason=reason,
+    )
+    result["kind"] = "release_status_change"
+    result["reason"] = reason
+    return result
 
 
 def list_release_records(workspace_root: Path) -> list[dict[str, object]]:
@@ -1311,20 +1373,53 @@ def _load_git_tags(
 def _parse_changelog_headings(target: Path) -> dict[str, list[str]]:
     """Extract version headings from a changelog file.
 
-    Returns a dict mapping version strings to the heading lines.
+    Returns a dict mapping normalized version strings to the heading lines.
+    Accepts canonical (``## [0.7.0] - 2026-07-26``), bare (``## 0.7.0``),
+    and legacy (``## Version 0.4.0 (2026-01-11)``) headings. Narrative
+    headings like ``## Previous Unreleased Changes`` are ignored.
     """
     changelog_text = target.read_text(encoding="utf-8") if target.is_file() else ""
-    heading_re = re.compile(r"^##\s+\[?\s*([^\]\s]+)", re.MULTILINE)
+    # Canonical: ## [0.7.0] - 2026-07-26  or  ## [0.7.0]
+    _CANONICAL_RE = re.compile(r"^##\s+\[(?P<version>[^\]]+)\]")
+    # Bare version: ## 0.7.0  (no brackets, no Version prefix)
+    _BARE_RE = re.compile(r"^##\s+(?P<version>v?\d+\.\d+[^\s]*)")
+    # Legacy: ## Version 0.4.0 (2026-01-11)
+    _LEGACY_VERSION_RE = re.compile(
+        r"^##\s+Version\s+(?P<version>v?\d+\.\d+[^\s(]*)", re.IGNORECASE
+    )
     headings: dict[str, list[str]] = {}
-    for match in heading_re.finditer(changelog_text):
-        heading = match.group(1)
-        if heading.lower() == "unreleased":
+    for line in changelog_text.splitlines():
+        line_stripped = line.strip()
+        version: str | None = None
+        match = _CANONICAL_RE.match(line_stripped)
+        if match:
+            version = match.group("version").strip()
+        else:
+            match = _LEGACY_VERSION_RE.match(line_stripped)
+            if match:
+                version = match.group("version").strip()
+            else:
+                match = _BARE_RE.match(line_stripped)
+                if match:
+                    candidate = match.group("version").strip()
+                    # Skip narrative headings (not starting with a digit/v)
+                    if candidate and (
+                        candidate[0].isdigit() or candidate[0].lower() == "v"
+                    ):
+                        # Validate it looks like a semver
+                        normalized = (
+                            candidate[1:] if candidate.startswith("v") else candidate
+                        )
+                        if parse_release_version_tuple(normalized) is not None:
+                            version = normalized
+        if version is None:
             continue
-        line_end = changelog_text.find("\n", match.start())
-        line = changelog_text[
-            match.start() : line_end if line_end >= 0 else len(changelog_text)
-        ]
-        headings.setdefault(heading, []).append(line)
+        # Normalize optional v prefix
+        if version.startswith("v"):
+            version = version[1:]
+        if version.lower() == "unreleased":
+            continue
+        headings.setdefault(version, []).append(line_stripped)
     return headings
 
 
@@ -1490,6 +1585,120 @@ def reconcile_releases(
         "tag_dates": dict(sorted(tag_dates.items())),
         "changelog_file": str(target),
         "changelog_versions": sorted(headings),
+    }
+
+
+def import_tags(
+    workspace_root: Path,
+    *,
+    apply: bool = False,
+) -> dict[str, object]:
+    """Discover semver git tags and create missing release records.
+
+    With ``apply=False`` (dry-run), returns the planned actions without
+    mutating state. With ``apply=True``, creates released records for
+    every tag that does not already have one. Idempotent: existing
+    records are never overwritten.
+    """
+    tags_by_version, tag_dates, git_result = _load_git_tags(workspace_root)
+    existing_records = list_releases(workspace_root)
+    existing_versions = {record.version for record in existing_records}
+
+    # Sort tags semantically
+    def _sort_key(item: tuple[str, list[str]]) -> tuple:
+        version_str = item[0]
+        semver = parse_release_version_tuple(version_str)
+        return (semver is None, semver or (), version_str)
+
+    sorted_tags = sorted(tags_by_version.items(), key=_sort_key)
+
+    # Find the earliest tag for :root base
+    earliest_version: str | None = sorted_tags[0][0] if sorted_tags else None
+
+    planned: list[dict[str, object]] = []
+    applied_versions: list[str] = []
+    skipped_versions: list[str] = []
+
+    # Build predecessor chain from existing + new tags
+    all_versions = sorted(
+        set(existing_versions) | {v for v, _ in sorted_tags},
+        key=lambda v: (
+            parse_release_version_tuple(v) is None,
+            parse_release_version_tuple(v) or (),
+            v,
+        ),
+    )
+    predecessor_map: dict[str, str | None] = {}
+    for idx, version in enumerate(all_versions):
+        predecessor_map[version] = all_versions[idx - 1] if idx > 0 else None
+
+    for version, tags in sorted_tags:
+        tag = tags[0]  # Use first tag if ambiguous
+        tag_date = tag_dates.get(tag, "")
+        is_ambiguous = len(tags) > 1
+        already_exists = version in existing_versions
+
+        action = "skip" if already_exists else "create"
+        predecessor = predecessor_map.get(version)
+
+        entry: dict[str, object] = {
+            "version": version,
+            "tag": tag,
+            "tags": sorted(tags),
+            "released_at": tag_date,
+            "previous_version": predecessor,
+            "git_base_ref": f"v{predecessor}"
+            if predecessor and version != earliest_version
+            else (":root" if version == earliest_version else None),
+            "git_head_ref": f"v{version}",
+            "action": action,
+            "ambiguous": is_ambiguous,
+            "already_exists": already_exists,
+        }
+        planned.append(entry)
+
+        if apply and not already_exists:
+            if is_ambiguous:
+                raise LaunchError(
+                    f"Ambiguous tags for {version}: {', '.join(sorted(tags))}. "
+                    "Resolve the ambiguity before importing.",
+                    code=CODE_CONFLICT,
+                    exit_code=2,
+                )
+            # Create the release record
+            base_ref = ":root" if version == earliest_version else f"v{predecessor}"
+            create_release(
+                workspace_root,
+                version=version,
+                status="released",
+                released_at=tag_date or _today(),
+                previous_version=predecessor,
+            )
+            # Update with git range
+            try:
+                update_release(
+                    workspace_root,
+                    version=version,
+                    git_base_ref=base_ref,
+                    git_head_ref=f"v{version}",
+                )
+            except LaunchError:
+                pass  # Git range is best-effort if workspace lacks the refs
+            applied_versions.append(version)
+        elif already_exists:
+            skipped_versions.append(version)
+
+    return {
+        "kind": "release_import_tags",
+        "applied": apply,
+        "discovered_tag_count": len(tags_by_version),
+        "existing_release_count": len(existing_versions),
+        "planned_count": len([e for e in planned if e["action"] == "create"]),
+        "applied_count": len(applied_versions),
+        "skipped_count": len(skipped_versions),
+        "plans": planned,
+        "applied_versions": applied_versions,
+        "skipped_versions": skipped_versions,
     }
 
 

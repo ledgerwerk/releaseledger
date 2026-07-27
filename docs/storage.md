@@ -1,5 +1,47 @@
 # Storage and configuration
 
+Releaseledger storage topology is owned by the canonical Ledgercore project
+manifest. New projects use schema 3 and keep Releaseledger configuration at
+`.ledger/releaseledger/config.toml`; authoritative data is a `data` mount and
+derived indexes are a `cache` mount. Inspect the resolved topology with:
+
+```bash
+releaseledger --root PATH storage where
+releaseledger --root PATH storage validate --strict
+```
+
+Change topology through the command boundary, with a real dry-run before a
+write:
+
+```bash
+releaseledger storage set data --storage external \
+  --storage-root ../ledger --scope project --dry-run
+releaseledger storage set data --storage external \
+  --storage-root ../ledger --scope project
+```
+
+Authoritative data must not use cache storage. Local overrides can be removed
+with `storage clear-override data`; its result reports the effective location.
+
+Legacy projects are migrated through the named lifecycle:
+
+```bash
+releaseledger migrate status
+releaseledger migrate plan storage-layout --output migration-plan.json
+releaseledger migrate apply storage-layout --plan-file migration-plan.json \
+  --reason "Adopt the canonical Ledgercore storage layout"
+releaseledger migrate cleanup storage-layout --dry-run
+releaseledger migrate cleanup storage-layout --yes \
+  --reason "Remove verified legacy artifacts"
+```
+
+Plans are deterministic and hash-protected. Apply rechecks the source
+fingerprint; a changed source is a conflict and must be replanned. Cleanup
+never happens implicitly as part of apply.
+
+The examples below document the pre-migration layout retained for discovery;
+they are not the canonical configuration format.
+
 ## Default layout
 
 A normal project stores release state inside the workspace:

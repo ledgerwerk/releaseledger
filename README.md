@@ -13,6 +13,20 @@ events, and JSON indexes in a deterministic file layout. It can also render
 reviewable changelog context and write final `CHANGELOG.md` sections from
 releaseledger entries.
 
+The current CLI uses the canonical Ledgercore project layout. Use `--root` to
+select a project, `commands`/`help` for the metadata-backed command inventory,
+and `--json` for the stable `ledgerwerk.cli.v1` envelope:
+
+```bash
+releaseledger --root PATH status
+releaseledger commands
+releaseledger --root PATH --json doctor
+```
+
+Legacy `--cwd`, root command aliases, and `storage migrate` remain available
+with structured deprecation warnings. Use `migrate plan/apply/recover/cleanup`
+for the explicit storage migration lifecycle.
+
 typed file-storage primitives. It does not import `taskledger`, inspect
 `.taskledger/`, or validate task state. Cross-ledger provenance is represented
 only as explicit refs such as `tl:task-0103`.

@@ -1,15 +1,55 @@
 # Commands
 
-## Root options
+## Unified CLI contract
 
 ```text
-releaseledger --cwd PATH ...
+releaseledger --root PATH ...
+releaseledger --cwd PATH ...        # deprecated compatibility alias
 releaseledger --json ...
 releaseledger --version
 ```
 
-`--cwd` runs as if started from another directory. `--json` emits
-deterministic JSON envelopes.
+`--root` selects the project without changing the process working directory.
+`--cwd` remains accepted with a structured deprecation warning. `--json`
+emits the deterministic `ledgerwerk.cli.v1` success/error envelope; warnings
+are included in `warnings` rather than mixed into stdout.
+
+Every command has a space-separated canonical path and exits with `0` for
+success, `1` for a failed check, `2` for usage/input errors, `3` for an
+unavailable dependency, `4` for conflicts or stale plans, and `5` for
+external-process failures.
+
+## Common and migration commands
+
+```text
+releaseledger commands
+releaseledger help release review
+releaseledger status [--check]
+releaseledger info
+releaseledger doctor [--check]
+releaseledger next-action
+releaseledger storage where
+releaseledger storage validate [--strict]
+releaseledger storage set data --storage project|external|user-data
+                             [--storage-root PATH] [--scope project|local]
+                             [--dry-run]
+releaseledger storage clear-override data [--dry-run]
+releaseledger migrate status
+releaseledger migrate plan storage-layout [--storage ...] [--output PLAN.json]
+releaseledger migrate apply storage-layout [--plan-file PLAN.json]
+                             --reason TEXT [--dry-run]
+releaseledger migrate recover [--journal PATH]
+releaseledger migrate cleanup storage-layout [--dry-run]
+                             [--yes --reason TEXT]
+releaseledger config show
+releaseledger config validate [--strict]
+```
+
+Migration plans use `releaseledger.migration-plan.v1`, include source and
+destination fingerprints, and are rejected with exit `4` if the source
+changes before apply. Cleanup is explicit, confirmation-gated, and requires
+an audit reason. `storage migrate ...` remains a deprecated compatibility
+entry point for the named migration commands.
 
 ## Project commands
 

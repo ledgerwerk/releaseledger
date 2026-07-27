@@ -17,6 +17,7 @@ from releaseledger.storage.config import (
 __all__ = [
     "config_set_releaseledger_dir",
     "config_show",
+    "config_validate",
     "storage_where",
 ]
 
@@ -36,7 +37,7 @@ def storage_where(workspace_root: Path) -> dict[str, object]:
         )
 
         layout = load_releaseledger_ledger_layout(
-            root, allow_missing=True, validate_storage=False
+            root, allow_missing=True, validate_storage=True
         )
         ledger_ref = ""
         ledger_dir = ""
@@ -58,6 +59,16 @@ def storage_where(workspace_root: Path) -> dict[str, object]:
         except Exception:
             pass
 
+        bindings: dict[str, object] = {}
+        report = layout.validation_report
+        if report is not None:
+            for item in report.results:
+                bindings[item.binding.mount if item.binding else "unknown"] = {
+                    "valid": item.valid,
+                    "path": str(item.path),
+                    "reason": item.reason or "",
+                    "storage": item.binding.storage if item.binding else "",
+                }
         return {
             "kind": "storage_location",
             "project_root": str(layout.project_root),
@@ -73,7 +84,19 @@ def storage_where(workspace_root: Path) -> dict[str, object]:
             "indexes_root": str(layout.indexes_root),
             "active_ledger_ref": ledger_ref,
             "active_ledger_dir": ledger_dir,
-            "layout_valid": True,
+            "layout_valid": bool(report is None or report.valid),
+            "bindings": bindings,
+            "mounts": {
+                "data": {
+                    "storage": str(layout.data_storage),
+                    "path": str(layout.data_root),
+                    "source": layout.data_source,
+                },
+                "indexes": {
+                    "storage": "cache",
+                    "path": str(layout.indexes_root),
+                },
+            },
             "legacy_detected": legacy_detected,
             "migration_state": "canonical-ready",
             # Compatibility aliases for one release.
@@ -172,6 +195,61 @@ def config_show(workspace_root: Path) -> dict[str, object]:
         # Compatibility aliases.
         "workspace_root": str(root),
         "releaseledger_dir": str(layout.data_root) if layout else "",
+    }
+
+
+def config_validate(workspace_root: Path, *, strict: bool = False) -> dict[str, object]:
+    """Validate project configuration and storage without modifying state."""
+    root = Path(workspace_root).resolve()
+    config_path = root / ".ledger" / "releaseledger" / "config.toml"
+    issues: list[dict[str, object]] = []
+    if not config_path.is_file():
+        return {
+            "kind": "config_validation",
+            "valid": False,
+            "passed": False,
+            "strict": strict,
+            "issues": [
+                {
+                    "code": "missing_config",
+                    "message": f"Configuration file does not exist: {config_path}",
+                }
+            ],
+        }
+    try:
+        config = load_project_config(config_path)
+    except LaunchError as exc:
+        issues.append({"code": "invalid_config", "message": exc.message})
+        return {
+            "kind": "config_validation",
+            "valid": False,
+            "passed": False,
+            "strict": strict,
+            "issues": issues,
+        }
+    storage = storage_where(root)
+    if not bool(storage.get("layout_valid", False)):
+        issues.append(
+            {
+                "code": "invalid_storage",
+                "message": "Effective storage topology is not valid.",
+            }
+        )
+    if config.ledger_branch_guard not in {"off", "warn", "on"}:
+        issues.append(
+            {
+                "code": "invalid_branch_guard",
+                "message": f"Unsupported ledger_branch_guard: {config.ledger_branch_guard!r}",
+            }
+        )
+    valid = not issues
+    return {
+        "kind": "config_validation",
+        "valid": valid,
+        "passed": valid,
+        "strict": strict,
+        "config_path": str(config_path),
+        "issues": issues,
     }
 
 

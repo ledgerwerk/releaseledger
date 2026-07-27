@@ -15,6 +15,9 @@ __all__ = [
     "CODE_VALIDATION_ERROR",
     "EXIT_RUNTIME",
     "EXIT_USAGE",
+    "EXIT_UNAVAILABLE",
+    "EXIT_CONFLICT",
+    "EXIT_EXTERNAL",
     "LaunchError",
     "ReleaseledgerError",
     "to_error_payload",
@@ -27,9 +30,29 @@ CODE_CONFIG_ERROR = "CONFIG_ERROR"
 CODE_VALIDATION_ERROR = "VALIDATION_ERROR"
 CODE_CONFLICT = "CONFLICT"
 
-# Exit codes: 2 for usage/config/validation input problems, 1 for runtime.
+# Exit codes follow the shared Ledgerwerk CLI contract. Existing domain code
+# constants remain uppercase for service compatibility; the public envelope
+# maps them to lower-snake-case names in ``to_error_payload``.
 EXIT_USAGE = 2
 EXIT_RUNTIME = 1
+EXIT_UNAVAILABLE = 3
+EXIT_CONFLICT = 4
+EXIT_EXTERNAL = 5
+
+_PUBLIC_CODES = {
+    "USAGE_ERROR": "usage_error",
+    "CONFIG_ERROR": "invalid_input",
+    "INVALID_INPUT": "invalid_input",
+    "NOT_INITIALIZED": "not_initialized",
+    "NOT_FOUND": "not_found",
+    "VALIDATION_ERROR": "validation_failed",
+    "VALIDATION_FAILED": "validation_failed",
+    "CONFLICT": "conflict",
+    "LOCKED": "locked",
+    "UNSAFE_OVERWRITE": "unsafe_overwrite",
+    "EXTERNAL_FAILURE": "external_failure",
+    "RELEASELEDGER_ERROR": "internal_error",
+}
 
 
 class ReleaseledgerError(Exception):
@@ -61,16 +84,7 @@ class ReleaseledgerError(Exception):
 
     def to_payload(self) -> dict[str, object]:
         """Render a deterministic JSON-serializable error payload."""
-        payload: dict[str, object] = {
-            "code": self.code,
-            "message": self.message,
-            "exit_code": self.exit_code,
-        }
-        if self.remediation:
-            payload["remediation"] = list(self.remediation)
-        if self.data:
-            payload["data"] = dict(self.data)
-        return payload
+        return to_error_payload(self)
 
 
 class LaunchError(ReleaseledgerError):
@@ -82,5 +96,14 @@ class LaunchError(ReleaseledgerError):
 
 
 def to_error_payload(error: ReleaseledgerError) -> dict[str, object]:
-    """Return the deterministic JSON-serializable error payload for an error."""
-    return error.to_payload()
+    """Return the stable public error mapping for an internal domain error."""
+    public_code = _PUBLIC_CODES.get(error.code, error.code.lower())
+    details = dict(error.data)
+    if error.code != public_code and "legacy_code" not in details:
+        details["legacy_code"] = error.code
+    return {
+        "code": public_code,
+        "message": error.message,
+        "details": details,
+        "remediation": list(error.remediation),
+    }

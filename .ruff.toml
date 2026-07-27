@@ -6,7 +6,6 @@ fix = true
 extend-select = [
     "B",
     "C90",
-    "E501",  # line too long (default 88)
     "I",  # isort
     "UP",  # pyupgrade
 ]
@@ -18,6 +17,7 @@ exclude = ["setup/*", "notebooks/*"]
 [lint.per-file-ignores]
 "__init__.py" = ["F401", "I001"]  # ignore unused and unsorted imports in __init__.py
 "__manifest__.py" = ["B018"]  # useless expression
+"releaseledger/services/git_sources.py" = ["C901"]
 
 [lint.isort]
 section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]

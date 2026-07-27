@@ -16,9 +16,32 @@ python -m pip install -e ".[dev]"
 
 ```bash
 releaseledger init
+releaseledger status
+releaseledger doctor
 ```
 
-This creates `.releaseledger.toml` and the default state layout:
+This creates a schema-3 `.ledger/ledger.toml`, the Releaseledger tool config,
+and the default state layout:
+
+```text
+.ledger/
+  ledger.toml
+  releaseledger/
+    config.toml
+    data/
+    indexes/
+```
+
+Inspect paths and validate the bindings before mutating state:
+
+```bash
+releaseledger storage where
+releaseledger storage validate --strict
+releaseledger config validate
+```
+
+The legacy layout may still be discovered and migrated; it is not the format
+created by new projects:
 
 ```text
 .releaseledger/
