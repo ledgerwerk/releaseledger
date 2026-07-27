@@ -215,6 +215,7 @@ context_releaseledger.index.json
 *.unpack.py
 workspace/
 .taskledger/
+taskledger.toml
 .pi-lens/
 .code/
 todo.md
