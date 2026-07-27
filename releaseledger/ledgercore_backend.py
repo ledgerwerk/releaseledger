@@ -1027,6 +1027,7 @@ def build_releaseledger_legacy_migration_plan(
     staged_data_root: Path,
     staged_config_path: Path,
     project_uuid: str,
+    migration_id: str | None = None,
 ) -> Any:
     """Build an immutable StorageMigrationPlan from a staged legacy source.
 
@@ -1035,38 +1036,22 @@ def build_releaseledger_legacy_migration_plan(
     canonical target. The plan is built manually (not via the generic
     planner) so the source is always the stage, never the current
     canonical data mount.
+
+    If migration_id is provided, it is used as-is (for shared ID across
+    all layers). Otherwise a new UUID is generated.
     """
     import uuid
 
     from ledgercore.migration import StorageMigrationItem, StorageMigrationPlan
 
-    migration_id = str(uuid.uuid4())
+    if migration_id is None:
+        migration_id = str(uuid.uuid4())
 
-    # Config item: copy the transformed config from stage to canonical
-    config_item = StorageMigrationItem(
-        component="config",
-        tool_name=TOOL_NAME,
-        mount_name="config",
-        source=staged_config_path,
-        destination=prepared_target.config_path,
-        source_binding=prepared_target.config_binding,
-        destination_binding=prepared_target.config_binding,
-        strategy="copy",  # type: ignore[arg-type]
-    )
+    # Execution order: indexes (rebuild, non-durable) → data (durable copy) → config (durable copy).
+    # Config must NOT be first — a failure after config but before data leaves
+    # a config artifact that blocks retry.
 
-    # Data item: copy staged data to canonical data mount
-    data_item = StorageMigrationItem(
-        component="mount",
-        tool_name=TOOL_NAME,
-        mount_name=DATA_MOUNT,
-        source=staged_data_root,
-        destination=prepared_target.data_root,
-        source_binding=prepared_target.data_binding,
-        destination_binding=prepared_target.data_binding,
-        strategy="copy",  # type: ignore[arg-type]
-    )
-
-    # Indexes item: rebuild at destination
+    # Indexes item: rebuild at destination (safe, cache-only, first)
     indexes_item = StorageMigrationItem(
         component="mount",
         tool_name=TOOL_NAME,
@@ -1078,10 +1063,34 @@ def build_releaseledger_legacy_migration_plan(
         strategy="rebuild",  # type: ignore[arg-type]
     )
 
+    # Data item: copy staged data to canonical data mount (durable, second)
+    data_item = StorageMigrationItem(
+        component="mount",
+        tool_name=TOOL_NAME,
+        mount_name=DATA_MOUNT,
+        source=staged_data_root,
+        destination=prepared_target.data_root,
+        source_binding=prepared_target.data_binding,
+        destination_binding=prepared_target.data_binding,
+        strategy="copy",  # type: ignore[arg-type]
+    )
+
+    # Config item: copy the transformed config (durable, last)
+    config_item = StorageMigrationItem(
+        component="config",
+        tool_name=TOOL_NAME,
+        mount_name="config",
+        source=staged_config_path,
+        destination=prepared_target.config_path,
+        source_binding=prepared_target.config_binding,
+        destination_binding=prepared_target.config_binding,
+        strategy="copy",  # type: ignore[arg-type]
+    )
+
     plan = StorageMigrationPlan(
         migration_id=migration_id,
         project_uuid=project_uuid,
-        items=(config_item, data_item, indexes_item),
+        items=(indexes_item, data_item, config_item),
         config_changes=prepared_target.config_changes,
         warnings=(),
     )
@@ -1096,20 +1105,32 @@ def prepare_legacy_migration_target(
     data_storage: str = "project",
     external_root: str | None = None,
     target: str = "project",
+    project_uuid: str | None = None,
 ) -> PreparedReleaseledgerTarget:
     """Prepare the migration target without writing any files.
 
     Reads existing canonical files if they exist but never writes.
     Returns a PreparedReleaseledgerTarget with all computed paths
     and bindings needed to build the migration plan.
+
+    If project_uuid is provided (from a saved plan), it is used as the
+    authoritative identity. Otherwise the existing manifest UUID is used,
+    or a new one is generated for pure-legacy bootstrap.
     """
     import uuid as _uuid
 
     project_root = Path(workspace_root).resolve()
     manifest_path = project_root / ".ledger" / "ledger.toml"
 
-    # Resolve project identity from existing manifest or generate new
-    if manifest_path.is_file():
+    # Resolve project identity: explicit UUID > existing manifest > generate
+    if project_uuid is not None:
+        resolved_uuid = project_uuid
+        resolved_name = project_name
+        if manifest_path.is_file():
+            document = _ledgercore_read_ledger_manifest(manifest_path)
+            if isinstance(document, LedgerProjectManifest):
+                resolved_name = document.project_name or project_name
+    elif manifest_path.is_file():
         document = _ledgercore_read_ledger_manifest(manifest_path)
         if isinstance(document, LedgerProjectManifest):
             resolved_uuid = document.project_uuid
@@ -1189,26 +1210,44 @@ def prepare_legacy_migration_target(
     if target == "project":
         from ledgercore.manifest import MountOverride
 
-        registration = LedgerRegistration(
-            name=TOOL_NAME,
-            mounts={
-                DATA_MOUNT: MountDefinition(
-                    name=DATA_MOUNT,
-                    storage=cast(StorageKind, data_storage),
-                    external_root=external_root,
-                ),
-                INDEXES_MOUNT: MountDefinition(
-                    name=INDEXES_MOUNT,
-                    storage="cache",
-                    external_root=None,
-                ),
-            },
+        # Merge with existing manifest to preserve unrelated ledger registrations.
+        existing_ledgers: dict[str, Any] = {}
+        if manifest_path.is_file():
+            document = _ledgercore_read_ledger_manifest(manifest_path)
+            if isinstance(document, LedgerProjectManifest):
+                for name, reg in document.ledgers.items():
+                    existing_ledgers[name] = LedgerRegistration(
+                        name=reg.name,
+                        mounts={n: m for n, m in reg.mounts.items()},
+                    )
+
+        # Preserve existing Releaseledger mounts not being replaced.
+        existing_releaseledger = existing_ledgers.get(TOOL_NAME)
+        mounts: dict[str, MountDefinition] = {}
+        if existing_releaseledger is not None:
+            for n, m in existing_releaseledger.mounts.items():
+                if n not in (DATA_MOUNT, INDEXES_MOUNT):
+                    mounts[n] = m
+
+        mounts[DATA_MOUNT] = MountDefinition(
+            name=DATA_MOUNT,
+            storage=cast(StorageKind, data_storage),
+            external_root=external_root,
         )
+        mounts[INDEXES_MOUNT] = MountDefinition(
+            name=INDEXES_MOUNT,
+            storage="cache",
+            external_root=None,
+        )
+        existing_ledgers[TOOL_NAME] = LedgerRegistration(
+            name=TOOL_NAME, mounts=mounts
+        )
+
         config_changes = LedgerProjectManifest(
             schema_version=3,
             project_uuid=resolved_uuid,
             project_name=resolved_name,
-            ledgers={TOOL_NAME: registration},
+            ledgers=existing_ledgers,
         )
     else:
         overrides = LedgerLocalOverrides(

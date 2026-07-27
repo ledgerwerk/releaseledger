@@ -95,6 +95,49 @@ class LaunchError(ReleaseledgerError):
     """
 
 
+class MigrationConflictError(LaunchError):
+    """Raised when migration encounters a conflicting destination.
+
+    Includes structured fields for component, path, state, and remediation
+    so the CLI can render actionable diagnostics instead of generic errors.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        component: str,
+        path: str,
+        state: str,
+        expected_binding: dict[str, object] | None = None,
+        actual_binding: dict[str, object] | None = None,
+        expected_hash: str | None = None,
+        actual_hash: str | None = None,
+        retry_safe: bool = False,
+        remediation_command: str | None = None,
+        **kwargs: object,
+    ) -> None:
+        data = dict(kwargs.get("data", {}))
+        data.update({
+            "component": component,
+            "path": path,
+            "destination_state": state,
+            "retry_safe": retry_safe,
+        })
+        if expected_binding:
+            data["expected_binding"] = expected_binding
+        if actual_binding:
+            data["actual_binding"] = actual_binding
+        if expected_hash:
+            data["expected_hash"] = expected_hash
+        if actual_hash:
+            data["actual_hash"] = actual_hash
+        if remediation_command:
+            data["remediation_command"] = remediation_command
+        kwargs["data"] = data
+        super().__init__(message, **kwargs)
+
+
 def to_error_payload(error: ReleaseledgerError) -> dict[str, object]:
     """Return the stable public error mapping for an internal domain error."""
     public_code = _PUBLIC_CODES.get(error.code, error.code.lower())

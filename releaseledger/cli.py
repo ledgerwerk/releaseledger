@@ -3691,6 +3691,7 @@ def storage_migrate_command(
         result_type="storage_migrate",
         json_output=state.json_output,
         produce=produce,
+        branch_guard_policy="if-canonical-project" if subcommand == "apply" else "default",
     )
 
 
@@ -3733,7 +3734,13 @@ def _migration_command_result(
         result = migration_status(root)
         return result, [], f"Migration state: {result.get('state', 'unknown')}"
     if operation == "recover":
-        result = recover_migration(root, journal=journal)
+        result = recover_migration(
+            root,
+            journal=journal,
+            dry_run=dry_run,
+            yes=yes,
+            reason=reason,
+        )
         return result, [], str(result.get("message", "Recovery attempted."))
     if operation == "cleanup":
         result = cleanup_migration(root, yes=yes, dry_run=dry_run, reason=reason)
@@ -3773,6 +3780,13 @@ def _migration_command_result(
         destination = plan.get("destination", {})
         source = plan.get("source", {})
         assert isinstance(destination, dict)
+        # Use the plan's authoritative project UUID.
+        plan_project = plan.get("project", {})
+        plan_uuid = (
+            plan_project.get("uuid")
+            if isinstance(plan_project, dict)
+            else plan.get("project_uuid")
+        )
         request = ReleaseledgerMigrationRequest(
             start=root,
             data_storage=str(destination.get("storage", "project")),  # type: ignore[arg-type]
@@ -3783,6 +3797,8 @@ def _migration_command_result(
             ),
             target=str(destination.get("scope", "project")),  # type: ignore[arg-type]
             mode="copy",
+            project_uuid=str(plan_uuid) if plan_uuid else None,
+            reason=reason,
         )
         result = execute_migration(request)
         result["plan_hash"] = plan.get("plan_hash")
@@ -3797,13 +3813,15 @@ def _migration_command_result(
         external_root=storage_root,
         target=scope,  # type: ignore[arg-type]
         mode="copy",
+        reason=reason,
     )
     plan = plan_migration(request)
     if operation == "plan" or dry_run:
         result = dict(plan)
         result["dry_run"] = dry_run
         if output is not None:
-            write_text_output(output, render_json(result))
+            # Write the plan itself (without extra metadata) to preserve hash.
+            write_text_output(output, render_json(plan))
             result["output"] = str(output)
         return (
             result,
@@ -3934,6 +3952,7 @@ def migrate_apply_command(
         ),
         workspace_root=state.root,
         mutating=not dry_run,
+        branch_guard_policy="if-canonical-project",
     )
 
 
@@ -3941,6 +3960,11 @@ def migrate_apply_command(
 def migrate_recover_command(
     ctx: typer.Context,
     journal: Annotated[Path | None, typer.Option("--journal")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    resume: Annotated[bool, typer.Option("--resume")] = False,
+    rollback_partial: Annotated[bool, typer.Option("--rollback-partial")] = False,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+    reason: Annotated[str | None, typer.Option("--reason")] = None,
 ) -> None:
     """Recover an interrupted storage-layout migration."""
     state = cli_state_from_context(ctx)
@@ -3949,10 +3973,17 @@ def migrate_recover_command(
         result_type="migration_recovery",
         json_output=state.json_output,
         produce=lambda: _migration_command_result(
-            ctx, "recover", migration="storage-layout", journal=journal
+            ctx,
+            "recover",
+            migration="storage-layout",
+            journal=journal,
+            dry_run=dry_run,
+            reason=reason,
+            yes=yes,
         ),
         workspace_root=state.root,
-        mutating=True,
+        mutating=not dry_run,
+        branch_guard_policy="if-canonical-project",
     )
 
 

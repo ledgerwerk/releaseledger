@@ -22,6 +22,24 @@ __all__ = [
 ]
 
 
+def _evaluate_migration_state_for_storage(
+    workspace_root: Path,
+    legacy_detected: bool,
+) -> str:
+    """Evaluate migration state for the storage_where diagnostic.
+
+    Uses the shared state evaluator from migration module when available,
+    falling back to simple heuristics if the evaluator raises.
+    """
+    try:
+        from releaseledger.migration import evaluate_migration_state
+
+        state = evaluate_migration_state(workspace_root)
+        return str(state.get("state", "canonical-ready"))
+    except Exception:
+        return "canonical-ready"
+
+
 def storage_where(workspace_root: Path) -> dict[str, object]:
     """Return a read-only diagnostic dict describing the effective storage location.
 
@@ -98,7 +116,7 @@ def storage_where(workspace_root: Path) -> dict[str, object]:
                 },
             },
             "legacy_detected": legacy_detected,
-            "migration_state": "canonical-ready",
+            "migration_state": _evaluate_migration_state_for_storage(root, legacy_detected),
             # Compatibility aliases for one release.
             "workspace_root": str(layout.project_root),
             "releaseledger_dir": str(layout.data_root),

@@ -276,16 +276,25 @@ def run_command(
     workspace_root: Path | None = None,
     mutating: bool = False,
     check_passed: bool | None = None,
+    branch_guard_policy: str = "default",
 ) -> None:
     """Run a command body, emitting a success or error envelope.
 
     ``produce`` returns ``(result_dict, events, human)``. A
     :class:`ReleaseledgerError` raised by the service layer is turned into the
     error envelope and a non-zero typer exit.
+
+    ``branch_guard_policy`` controls when the branch guard runs:
+    - ``"default"``: always run for mutating commands with workspace_root
+    - ``"if-canonical-project"``: skip guard when no canonical project exists
+      (used by migration commands that can bootstrap from legacy)
     """
     try:
         if mutating and workspace_root is not None:
-            check_mutating_branch_guard(workspace_root, command=command)
+            if branch_guard_policy == "if-canonical-project":
+                _check_migration_branch_guard(workspace_root, command=command)
+            else:
+                check_mutating_branch_guard(workspace_root, command=command)
         if mutating and workspace_root is not None:
             from releaseledger.storage.locking import acquire_write_lock
 
@@ -344,3 +353,25 @@ def check_mutating_branch_guard(
     except Exception:
         # Config not found or not in git: guard is a no-op.
         pass
+
+
+def _check_migration_branch_guard(
+    workspace_root: Path,
+    *,
+    command: str,
+) -> None:
+    """Run branch guard only when a canonical Releaseledger project exists.
+
+    Migration commands use this policy so that bootstrap from a pure-legacy
+    project is not blocked by the branch guard. When a canonical project
+    already exists, the normal guard behavior is preserved.
+    """
+    try:
+        from releaseledger.storage.paths import load_releaseledger_project
+
+        project = load_releaseledger_project(workspace_root)
+    except Exception:
+        # No canonical project: migration is bootstrapping. Skip guard.
+        return
+    # Canonical project exists: run the normal guard.
+    check_mutating_branch_guard(workspace_root, command=command)

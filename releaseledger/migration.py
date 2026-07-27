@@ -36,6 +36,10 @@ from releaseledger.errors import (
     LaunchError,
 )
 
+TOOL_NAME = _backend.TOOL_NAME
+DATA_MOUNT = _backend.DATA_MOUNT
+INDEXES_MOUNT = _backend.INDEXES_MOUNT
+
 __all__ = [
     "ReleaseledgerMigrationRequest",
     "LegacyReleaseledgerSource",
@@ -100,6 +104,8 @@ class ReleaseledgerMigrationRequest:
     target: Literal["project", "local"]
     mode: Literal["copy", "move"]
     preserve_legacy_config: bool = False
+    project_uuid: str | None = None
+    reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1497,6 +1503,14 @@ def execute_migration(
         data_storage=request.data_storage,
         external_root=request.external_root,
         target=request.target,
+        project_uuid=request.project_uuid,
+    )
+
+    # 3b. Preflight: classify all destinations before any durable write (RL-MIG-005)
+    source_fingerprint = _inventory_fingerprint(inventory_before)
+    _preflight_destinations(
+        prepared=prepared,
+        source_fingerprint=source_fingerprint,
     )
 
     # 4. Transform the legacy config to v2
@@ -1510,10 +1524,14 @@ def execute_migration(
     _write_journal_row(
         prepared.data_root.parent,
         {
+            "schema": "releaseledger.migration-journal.v2",
             "phase": "staging",
             "migration_id": stage.migration_id,
+            "plan_hash": "pending",
+            "reason": request.reason or "",
             "legacy_data_root": str(source.data_root),
             "target_data_root": str(prepared.data_root),
+            "source_fingerprint": _inventory_fingerprint(inventory_before),
         },
     )
 
@@ -1681,15 +1699,250 @@ def execute_migration(
     return {
         "kind": "releaseledger_migration_executed",
         "mode": request.mode,
+        "migration_id": stage.migration_id,
+        "reason": request.reason or "",
         "legacy_data_root": str(source.data_root),
         "target_data_root": str(final_layout.data_root),
         "target_indexes_root": str(final_layout.indexes_root),
+        "project_uuid": prepared.project_uuid,
         "domain_validation_before": domain_before["valid"],
         "domain_validation_after": True,
         "indexes_rebuilt": index_result,
         "inventory": inventory_legacy_data(final_layout.data_root),
         "warnings": [],
     }
+
+
+# ---------------------------------------------------------------------------
+# Destination inspection (RL-MIG-005)
+# ---------------------------------------------------------------------------
+
+DestinationState = Literal[
+    "absent",
+    "empty-unbound",
+    "owned-exact",
+    "owned-divergent",
+    "foreign-bound",
+    "non-directory",
+    "symlink",
+    "non-empty-unbound",
+]
+
+
+def inspect_destination(
+    path: Path,
+    *,
+    expected_tool: str,
+    expected_mount: str,
+    expected_project_uuid: str,
+    source_hash: str | None = None,
+) -> tuple[DestinationState, str]:
+    """Inspect a destination path and classify its state.
+
+    Returns (state, detail_message). Read-only; no filesystem writes.
+    """
+    if path.is_symlink():
+        return "symlink", f"{path} is a symlink"
+    if path.exists() and not path.is_dir():
+        return "non-directory", f"{path} exists but is not a directory"
+    if not path.exists():
+        return "absent", f"{path} does not exist"
+
+    marker = path / ".ledger-project.toml"
+    children = list(path.iterdir())
+    # Exclude the write lock file from content detection.
+    has_content = any(
+        child.name not in (".ledger-project.toml", "write.lock")
+        for child in children
+    )
+
+    if not marker.is_file():
+        if not has_content:
+            return "empty-unbound", f"{path} is empty with no binding"
+        return "non-empty-unbound", f"{path} has content but no binding marker"
+
+    try:
+        from ledgercore.storage_binding import read_storage_binding, storage_bindings_match
+
+        actual = read_storage_binding(marker)
+    except Exception as exc:
+        return "foreign-bound", f"{path} has unreadable binding: {exc}"
+
+    from ledgercore.storage_binding import StorageBinding
+
+    expected = StorageBinding(
+        schema_version=1,
+        layout_version=3,
+        project_uuid=expected_project_uuid,
+        project_name=None,
+        tool=expected_tool,
+        mount=expected_mount,
+        storage="project",
+    )
+
+    if not storage_bindings_match(actual, expected):
+        return "foreign-bound", (
+            f"{path} belongs to {actual.project_uuid}/{actual.tool}/{actual.mount}"
+        )
+
+    # Owned by same project — check if content matches.
+    if not has_content:
+        return "owned-exact", f"{path} is owned and empty"
+
+    if source_hash is not None:
+        dest_hash = _inventory_fingerprint_from_root(path)
+        if dest_hash == source_hash:
+            return "owned-exact", f"{path} content matches source"
+
+    return "owned-divergent", f"{path} has different content"
+
+
+def _preflight_destinations(
+    *,
+    prepared: Any,
+    source_fingerprint: str,
+) -> None:
+    """Classify all migration destinations before any durable write.
+
+    Raises LaunchError if any destination is in a conflicting state that
+    would prevent safe migration (foreign-bound, non-directory, etc.).
+    Owned-exact destinations will be treated as no-ops during execution.
+    Owned-divergent destinations require explicit recovery.
+
+    Cache (indexes) destinations are always safe to rebuild, so they are
+    not checked for conflicts.
+    """
+    # Only preflight durable destinations (data and config).
+    # Cache/indexes are always safe to rebuild.
+    destinations = [
+        ("data", prepared.data_root, DATA_MOUNT),
+        ("config", prepared.config_path.parent, "config"),
+    ]
+
+    conflicts: list[dict[str, object]] = []
+
+    for component, path, mount in destinations:
+        state, detail = inspect_destination(
+            path,
+            expected_tool=TOOL_NAME,
+            expected_mount=mount,
+            expected_project_uuid=prepared.project_uuid,
+            source_hash=source_fingerprint if component == "data" else None,
+        )
+
+        if state in ("foreign-bound", "non-directory", "symlink", "non-empty-unbound"):
+            conflicts.append({
+                "component": component,
+                "path": str(path),
+                "state": state,
+                "detail": detail,
+                "remediation": (
+                    f"Run `releaseledger migrate recover --dry-run` to inspect."
+                ),
+            })
+        elif state == "owned-divergent":
+            conflicts.append({
+                "component": component,
+                "path": str(path),
+                "state": state,
+                "detail": detail,
+                "remediation": (
+                    f"The destination has different content from the migration source. "
+                    f"Run `releaseledger migrate recover --dry-run` to inspect."
+                ),
+            })
+
+    if conflicts:
+        raise LaunchError(
+            f"Migration preflight found {len(conflicts)} conflicting destination(s). "
+            "No files were changed.",
+            code="CONFLICT",
+            exit_code=4,
+            data={"conflicts": conflicts},
+            remediation=[
+                "Run `releaseledger migrate recover --dry-run` to inspect.",
+                "Do not edit .ledger-project.toml or copy files manually.",
+            ],
+        )
+
+
+def _inventory_fingerprint_from_root(path: Path) -> str:
+    """Compute a hash fingerprint of all files under path."""
+    import hashlib as _hashlib
+    import json as _json
+
+    files: list[dict[str, object]] = []
+    for child in sorted(path.rglob("*")):
+        if child.name == ".ledger-project.toml":
+            continue
+        if child.is_file() and not child.is_symlink():
+            rel = str(child.relative_to(path))
+            sha = _hashlib.sha256(child.read_bytes()).hexdigest()
+            files.append({"path": rel, "sha256": sha})
+    encoded = _json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + _hashlib.sha256(encoded).hexdigest()
+
+
+def is_empty_releaseledger_bootstrap(
+    path: Path,
+    *,
+    expected_project_uuid: str,
+) -> bool:
+    """Detect a strictly empty Releaseledger bootstrap scaffold.
+
+    Recognizes only:
+    - valid same-project Releaseledger binding
+    - no release records, no entry records, no non-empty event log
+    - only generated empty index files and expected directories
+    - default generated tool config
+    - no unknown regular files
+    """
+    if not path.is_dir():
+        return False
+
+    marker = path / ".ledger-project.toml"
+    if not marker.is_file():
+        return False
+
+    try:
+        from ledgercore.storage_binding import read_storage_binding, storage_bindings_match
+        from ledgercore.storage_binding import StorageBinding
+
+        actual = read_storage_binding(marker)
+        expected = StorageBinding(
+            schema_version=1,
+            layout_version=3,
+            project_uuid=expected_project_uuid,
+            project_name=None,
+            tool=TOOL_NAME,
+            mount=DATA_MOUNT,
+            storage="project",
+        )
+        if not storage_bindings_match(actual, expected):
+            return False
+    except Exception:
+        return False
+
+    # Check for content beyond binding marker and empty structure
+    for child in path.rglob("*"):
+        if child.name == ".ledger-project.toml":
+            continue
+        if child.is_file():
+            # Only allow empty index files and config
+            if child.suffix in (".json",):
+                try:
+                    import json
+                    content = json.loads(child.read_text())
+                    if content:  # non-empty index file
+                        return False
+                except Exception:
+                    return False
+            elif child.name == "config.toml":
+                continue  # allow generated config
+            else:
+                return False
+
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1810,16 +2063,30 @@ def read_migration_journal(journal_dir: Path) -> list[dict[str, object]]:
     return list(_read_jsonl_permissive(path))
 
 
-def migration_status(
+def evaluate_migration_state(
     workspace_root: Path,
 ) -> dict[str, object]:
-    """Report the current migration state for a project.
+    """Shared migration state evaluator with defined precedence.
 
-    Detects whether the project is legacy, canonical, or mid-migration.
+    This is the single source of truth for migration state, consumed by
+    ``migrate status``, ``storage where``, ``status``, ``doctor``, and
+    ``project-state`` commands.
+
+    Precedence:
+    1. Incomplete/failed journal → ``migration-recovery-required``
+    2. Canonical manifest present but Releaseledger registration invalid/missing
+       → ``canonical-invalid``
+    3. Valid canonical layout but binding/domain validation fails
+       → ``canonical-invalid``
+    4. Valid canonical layout plus legacy artifacts
+       → ``canonical-with-legacy-artifacts``
+    5. Valid canonical layout → ``canonical-ready``
+    6. Legacy source only → ``legacy``
+    7. Neither → ``uninitialized``
     """
     workspace_root = Path(workspace_root).resolve()
 
-    legacy = None
+    legacy: str | None = None
     for name in LEGACY_CONFIG_NAMES:
         candidate = workspace_root / name
         if candidate.is_file():
@@ -1829,26 +2096,76 @@ def migration_status(
     manifest = workspace_root / ".ledger" / "ledger.toml"
     has_canonical = manifest.is_file()
 
-    if not legacy and not has_canonical:
+    # 1. Check for incomplete/failed journal FIRST (highest priority)
+    journal_dir = workspace_root / ".ledger" / "releaseledger"
+    has_failed_journal = False
+    last_phase = None
+    if (journal_dir / JOURNAL_FILENAME).is_file():
+        journal = read_migration_journal(journal_dir)
+        last = journal[-1] if journal else {}
+        last_phase = last.get("phase")
+        if last_phase in ("staging", "ledgercore-executing", "failed"):
+            has_failed_journal = True
+
+    # 2. Try to load canonical project
+    canonical_valid = False
+    canonical_error: str | None = None
+    validation_report = None
+    if has_canonical:
+        try:
+            from releaseledger.ledgercore_backend import load_releaseledger_ledger_layout
+
+            layout = load_releaseledger_ledger_layout(
+                workspace_root, allow_missing=False, validate_storage=True
+            )
+            canonical_valid = True
+            validation_report = layout.validation_report
+        except Exception as exc:
+            canonical_error = str(exc)
+
+    # Evaluate states in precedence order
+    if has_failed_journal:
         return {
-            "state": "uninitialized",
-            "legacy_detected": False,
-            "canonical_detected": False,
+            "state": "migration-recovery-required",
+            "legacy_detected": legacy is not None,
+            "legacy_config_path": legacy,
+            "canonical_detected": has_canonical,
+            "migration_in_progress": False,
+            "migration_recovery_required": True,
+            "last_phase": last_phase,
+            "remediation": "Run `releaseledger migrate recover --dry-run`.",
+        }
+
+    if has_canonical and not canonical_valid:
+        return {
+            "state": "canonical-invalid",
+            "legacy_detected": legacy is not None,
+            "legacy_config_path": legacy,
+            "canonical_detected": True,
+            "canonical_error": canonical_error,
             "migration_in_progress": False,
             "migration_recovery_required": False,
+            "remediation": (
+                "Fix the canonical project configuration. "
+                "Run `releaseledger storage validate`."
+            ),
         }
 
-    if legacy and not has_canonical:
+    if canonical_valid and validation_report is not None and not validation_report.valid:
         return {
-            "state": "legacy",
-            "legacy_detected": True,
+            "state": "canonical-invalid",
+            "legacy_detected": legacy is not None,
             "legacy_config_path": legacy,
-            "canonical_detected": False,
+            "canonical_detected": True,
             "migration_in_progress": False,
-            "remediation": "Run `releaseledger migrate plan storage-layout`.",
+            "migration_recovery_required": False,
+            "remediation": (
+                "Storage validation failed. "
+                "Run `releaseledger storage validate --strict`."
+            ),
         }
 
-    if has_canonical and legacy:
+    if canonical_valid and legacy is not None:
         return {
             "state": "canonical-with-legacy-artifacts",
             "legacy_detected": True,
@@ -1856,39 +2173,74 @@ def migration_status(
             "canonical_detected": True,
             "manifest_path": str(manifest),
             "migration_in_progress": False,
-            "remediation": "Remove or archive legacy config files.",
+            "migration_recovery_required": False,
+            "remediation": "Run `releaseledger migrate cleanup storage-layout --dry-run`.",
         }
 
-    journal_dir = workspace_root / ".ledger" / "releaseledger"
-    if (journal_dir / JOURNAL_FILENAME).is_file():
-        journal = read_migration_journal(journal_dir)
-        last = journal[-1] if journal else {}
-        if last.get("phase") in ("staging", "ledgercore-executing", "failed"):
-            return {
-                "state": "migration-recovery-required",
-                "canonical_detected": True,
-                "migration_in_progress": False,
-                "migration_recovery_required": True,
-                "last_phase": last.get("phase"),
-                "remediation": "Run `releaseledger migrate recover`.",
-            }
+    if canonical_valid:
+        return {
+            "state": "canonical-ready",
+            "legacy_detected": False,
+            "canonical_detected": True,
+            "manifest_path": str(manifest),
+            "migration_in_progress": False,
+            "migration_recovery_required": False,
+        }
+
+    if legacy is not None:
+        return {
+            "state": "legacy",
+            "legacy_detected": True,
+            "legacy_config_path": legacy,
+            "canonical_detected": False,
+            "migration_in_progress": False,
+            "migration_recovery_required": False,
+            "remediation": "Run `releaseledger migrate plan storage-layout`.",
+        }
 
     return {
-        "state": "canonical-ready",
-        "canonical_detected": True,
-        "manifest_path": str(manifest),
+        "state": "uninitialized",
+        "legacy_detected": False,
+        "canonical_detected": False,
         "migration_in_progress": False,
         "migration_recovery_required": False,
     }
+
+
+def migration_status(
+    workspace_root: Path,
+) -> dict[str, object]:
+    """Report the current migration state for a project.
+
+    Delegates to the shared state evaluator.
+    """
+    return evaluate_migration_state(workspace_root)
 
 
 def recover_migration(
     workspace_root: Path,
     *,
     journal: Path | None = None,
+    dry_run: bool = False,
+    resume: bool = False,
+    rollback_partial: bool = False,
+    yes: bool = False,
+    reason: str | None = None,
 ) -> dict[str, object]:
-    """Attempt recovery from an interrupted migration journal."""
-    journal_dir = workspace_root.resolve() / ".ledger" / "releaseledger"
+    """Attempt actionable recovery from an interrupted migration.
+
+    Recovery outcomes:
+    - ``nothing-to-recover``: no journal found or migration completed
+    - ``safe-to-remove-temporaries``: only unactivated temp artifacts remain
+    - ``resumed-and-completed``: recovery completed the migration
+    - ``manual-conflict``: divergent state requires human decision
+
+    With ``dry_run=True``, reports what would be done without changes.
+    """
+    root = Path(workspace_root).resolve()
+    journal_dir = root / ".ledger" / "releaseledger"
+    journal_path = journal_dir / JOURNAL_FILENAME
+
     rows = (
         list(_read_jsonl_permissive(journal))
         if journal is not None
@@ -1896,23 +2248,145 @@ def recover_migration(
     )
     if not rows:
         return {
-            "kind": "recovery_noop",
+            "kind": "nothing-to-recover",
             "message": "No migration journal found; nothing to recover.",
         }
 
     last = rows[-1]
     phase = last.get("phase", "unknown")
+    migration_id = last.get("migration_id", "unknown")
+
+    # Completed migration: nothing to recover
+    if phase in ("complete", "domain-verified", "indexes-rebuilt"):
+        return {
+            "kind": "nothing-to-recover",
+            "last_phase": phase,
+            "migration_id": migration_id,
+            "message": f"Migration completed (phase={phase}). Nothing to recover.",
+        }
+
+    # Find temporary artifacts from this migration
+    staging_dir = journal_dir / STAGING_DIR_NAME / str(migration_id)
+    ledgercore_migrations = root / ".ledger" / "migrations"
+    ledgercore_temp_patterns = [
+        root / ".ledger" / "releaseledger" / "data" / f".data.migrating-{migration_id}",
+        root / ".ledger" / "releaseledger" / f".data.migrating-{migration_id}",
+    ]
+
+    # Scan for all .migrating-* temp paths
+    temp_paths: list[str] = []
+    if staging_dir.exists():
+        temp_paths.append(str(staging_dir))
+    for pattern in ledgercore_temp_patterns:
+        if pattern.exists():
+            temp_paths.append(str(pattern))
+    # Also scan broadly for .migrating-<id> paths
+    for parent in [root / ".ledger" / "releaseledger", root / ".ledger"]:
+        if parent.is_dir():
+            for child in parent.iterdir():
+                if (
+                    child.name.endswith(f".migrating-{migration_id}")
+                    and str(child) not in temp_paths
+                ):
+                    temp_paths.append(str(child))
+
+    # Check if destination data was already activated
+    dest_data = last.get("target_data_root")
+    dest_activated = False
+    if dest_data:
+        data_path = Path(str(dest_data))
+        if data_path.is_dir():
+            marker = data_path / ".ledger-project.toml"
+            if marker.is_file():
+                dest_activated = True
+
+    if phase == "failed" and dest_activated:
+        # Data was activated but something failed after.
+        # Safe to remove temporaries and re-run.
+        result: dict[str, object] = {
+            "kind": "safe-to-remove-temporaries",
+            "last_phase": phase,
+            "migration_id": migration_id,
+            "temp_paths": temp_paths,
+            "destinations_activated": dest_activated,
+            "message": (
+                "Migration failed after data was activated. "
+                "Temporary artifacts can be safely removed."
+            ),
+        }
+        if dry_run:
+            result["dry_run"] = True
+            result["action"] = "Would remove temporary artifacts and re-run migration."
+        elif yes:
+            for path_str in temp_paths:
+                path = Path(path_str)
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                elif path.exists():
+                    path.unlink()
+            result["removed"] = temp_paths
+            result["action"] = "Removed temporary artifacts. Re-run migration to complete."
+        else:
+            result["remediation"] = (
+                "Run `releaseledger migrate recover --yes --reason '...'` to clean up, "
+                "then re-run `migrate apply`."
+            )
+        return result
+
+    if phase in ("staging", "failed") and not dest_activated:
+        # Nothing was activated. Safe to remove all temp artifacts.
+        result = {
+            "kind": "safe-to-remove-temporaries",
+            "last_phase": phase,
+            "migration_id": migration_id,
+            "temp_paths": temp_paths,
+            "destinations_activated": False,
+            "message": (
+                "Migration failed before any destination was activated. "
+                "All temporary artifacts can be safely removed."
+            ),
+        }
+        if dry_run:
+            result["dry_run"] = True
+            result["action"] = "Would remove all temporary artifacts."
+        elif yes:
+            for path_str in temp_paths:
+                path = Path(path_str)
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                elif path.exists():
+                    path.unlink()
+            # Clear the failed journal
+            if journal_path.is_file():
+                journal_path.unlink()
+            result["removed"] = temp_paths
+            result["journal_cleared"] = True
+            result["action"] = "Removed temporary artifacts and cleared journal."
+        else:
+            result["remediation"] = (
+                "Run `releaseledger migrate recover --yes --reason '...'` to clean up."
+            )
+        return result
+
+    # Unknown or complex state: report with exact details
     return {
-        "kind": "recovery_attempted",
+        "kind": "manual-conflict",
         "last_phase": phase,
-        "journal_entries": len(rows),
-        "journal": str(journal)
-        if journal is not None
-        else str(journal_dir / JOURNAL_FILENAME),
+        "migration_id": migration_id,
+        "temp_paths": temp_paths,
+        "destinations_activated": dest_activated,
+        "journal_path": str(journal_path),
         "message": (
-            f"Migration was in phase '{phase}'. Manual inspection of the "
-            "journal and data directories is required before retrying."
+            f"Migration was in phase '{phase}'. "
+            f"Found {len(temp_paths)} temporary artifact(s). "
+            "Inspect the journal and data directories."
         ),
+        "remediation": [
+            f"Inspect journal: {journal_path}",
+            f"Inspect staging: {staging_dir}",
+            "Run `releaseledger migrate recover --dry-run` to see actions.",
+            "Run `releaseledger migrate recover --yes --reason '...'` to clean temporaries.",
+        ],
     }
 
 
