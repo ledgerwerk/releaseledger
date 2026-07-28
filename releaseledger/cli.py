@@ -317,7 +317,7 @@ def init_command(
         data_root = Path(str(result["data_root"]))
         try:
             display = data_root.relative_to(workspace_root.resolve())
-            display_str = str(display)
+            display_str = display.as_posix()
         except ValueError:
             display_str = str(data_root)
         human = (

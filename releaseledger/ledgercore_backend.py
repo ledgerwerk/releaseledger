@@ -189,7 +189,17 @@ def _user_namespace() -> UserNamespace:
 
     Honors ``XDG_DATA_HOME`` and ``XDG_CACHE_HOME`` through platformdirs
     so tests can override the machine-local state without monkey-patching.
+    On Windows, platformdirs may resolve the shell known folders through the
+    Windows API, bypassing ``LOCALAPPDATA``.  Honor that environment variable
+    explicitly when it is present so callers can select the same user-local
+    root consistently across platforms.
     """
+
+    if os.name == "nt":
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            root = Path(local_appdata) / USER_NAMESPACE
+            return UserNamespace(user_data=root, user_cache=root / "Cache")
 
     return UserNamespace(
         user_data=Path(user_data_path(USER_NAMESPACE, appauthor=False)),
