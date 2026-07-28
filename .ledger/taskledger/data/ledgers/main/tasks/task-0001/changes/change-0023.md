@@ -5,13 +5,15 @@ file_version: v2
 change_id: change-0023
 task_id: task-0001
 implementation_run: run-0002
-timestamp: '2026-07-28T07:29:11Z'
+timestamp: "2026-07-28T07:29:11Z"
 kind: scan
 path: .
-summary: Reconciled the current workspace against the approved migration ownership
+summary:
+  Reconciled the current workspace against the approved migration ownership
   plan; two release-gate todos remain blocked by external environment contracts.
 git_commit: null
-git_diff_stat: "branch: main\nstatus:\nM .archledger/document-state.json\n M .archledger/storage.yaml\n\
+git_diff_stat:
+  "branch: main\nstatus:\nM .archledger/document-state.json\n M .archledger/storage.yaml\n\
   \ M .ledger/ledger.toml\n M ARCHITECTURE.md\n M CHANGELOG.md\n M README.md\n M docs/commands.md\n\
   \ M docs/quickstart.md\n M docs/storage.md\n M pyproject.toml\n M releaseledger/cli.py\n\
   \ M releaseledger/cli_common.py\n M releaseledger/command_registry.py\n M releaseledger/errors.py\n\
@@ -39,4 +41,5 @@ before_hash: null
 after_hash: null
 exit_code: null
 ---
+
 Reconciled the current workspace against the approved migration ownership plan; two release-gate todos remain blocked by external environment contracts.

@@ -41,19 +41,25 @@ def test_releaseledger_requires_ledgercore_0_6_public_contract() -> None:
         "recover_storage_migration",
     )
     missing_functions = [
-        name for name in required_functions if not callable(getattr(migration, name, None))
+        name
+        for name in required_functions
+        if not callable(getattr(migration, name, None))
     ]
     assert not missing_functions, (
         "Ledgercore 0.6 migration contract is incomplete; missing public functions: "
         + ", ".join(missing_functions)
     )
 
-    execute_parameters = inspect.signature(migration.execute_storage_migration).parameters
+    execute_parameters = inspect.signature(
+        migration.execute_storage_migration
+    ).parameters
     assert "hooks" in execute_parameters, (
         "Ledgercore 0.6 execute_storage_migration must accept lifecycle hooks; "
         "the installed build is transitional"
     )
-    recovery_parameters = inspect.signature(migration.recover_storage_migration).parameters
+    recovery_parameters = inspect.signature(
+        migration.recover_storage_migration
+    ).parameters
     assert "policy" in recovery_parameters, (
         "Ledgercore 0.6 recover_storage_migration must accept an explicit policy; "
         "the installed build is transitional"

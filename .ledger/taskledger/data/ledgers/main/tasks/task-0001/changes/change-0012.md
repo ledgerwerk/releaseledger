@@ -5,7 +5,7 @@ file_version: v2
 change_id: change-0012
 task_id: task-0001
 implementation_run: run-0002
-timestamp: '2026-07-28T07:24:20Z'
+timestamp: "2026-07-28T07:24:20Z"
 kind: edit
 path: README.md
 summary: Document canonical root and copy-first migration lifecycle.
@@ -16,4 +16,5 @@ before_hash: null
 after_hash: null
 exit_code: null
 ---
+
 Document canonical root and copy-first migration lifecycle.

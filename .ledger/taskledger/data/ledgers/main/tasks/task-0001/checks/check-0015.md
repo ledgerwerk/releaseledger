@@ -5,11 +5,11 @@ file_version: v2
 check_id: check-0015
 task_id: task-0001
 implementation_run: run-0002
-timestamp: '2026-07-28T07:29:43Z'
+timestamp: "2026-07-28T07:29:43Z"
 command: mypy releaseledger
 argv:
-- mypy
-- releaseledger
+  - mypy
+  - releaseledger
 exit_code: 0
 status: passed
 category: typecheck
@@ -18,4 +18,3 @@ stdout_ref: null
 stderr_ref: null
 combined_ref: null
 ---
-

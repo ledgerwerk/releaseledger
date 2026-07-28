@@ -5,10 +5,11 @@ file_version: v2
 change_id: change-0018
 task_id: task-0001
 implementation_run: run-0002
-timestamp: '2026-07-28T07:24:27Z'
+timestamp: "2026-07-28T07:24:27Z"
 kind: generated
 path: ARCHITECTURE.md
-summary: Regenerate architecture documentation with Ledgercore migration ownership
+summary:
+  Regenerate architecture documentation with Ledgercore migration ownership
   ADR.
 git_commit: null
 git_diff_stat: null
@@ -17,4 +18,5 @@ before_hash: null
 after_hash: null
 exit_code: null
 ---
+
 Regenerate architecture documentation with Ledgercore migration ownership ADR.

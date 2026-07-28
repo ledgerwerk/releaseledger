@@ -5,12 +5,12 @@ file_version: v2
 check_id: check-0014
 task_id: task-0001
 implementation_run: run-0002
-timestamp: '2026-07-28T07:29:41Z'
+timestamp: "2026-07-28T07:29:41Z"
 command: ruff check .
 argv:
-- ruff
-- check
-- .
+  - ruff
+  - check
+  - .
 exit_code: 0
 status: passed
 category: lint
@@ -19,4 +19,3 @@ stdout_ref: null
 stderr_ref: null
 combined_ref: null
 ---
-
