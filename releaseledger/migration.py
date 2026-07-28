@@ -1517,12 +1517,21 @@ def _fingerprint_payload(fingerprint: Any) -> dict[str, object] | None:
 def _fingerprint_from_bytes(rendered: str) -> object:
     """Fingerprint rendered config bytes through Ledgercore's file contract."""
 
-    from tempfile import NamedTemporaryFile
+    # Close the temporary file before Ledgercore opens it.  Windows does not
+    # permit a second handle to open a NamedTemporaryFile that is still held
+    # by this process, which made otherwise read-only planning fail with
+    # PermissionError.
+    import os
+    from tempfile import mkstemp
 
-    with NamedTemporaryFile("w", encoding="utf-8", delete=True) as handle:
-        handle.write(rendered)
-        handle.flush()
-        return _backend.fingerprint_releaseledger_file(Path(handle.name))
+    fd, raw_path = mkstemp(prefix="releaseledger-plan-", suffix=".toml")
+    path = Path(raw_path)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(rendered)
+        return _backend.fingerprint_releaseledger_file(path)
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def _inventory_fingerprint(inventory: ReleaseledgerDataInventory) -> str:

@@ -253,6 +253,25 @@ status: finalized
 class TestPlannerReceivesLegacySource:
     """Verify that the migration plan correctly identifies the legacy source."""
 
+    def test_config_fingerprint_tempfile_is_closed_before_reopen(self) -> None:
+        """Rendered config fingerprinting is safe on Windows."""
+        from releaseledger.migration import _fingerprint_from_bytes
+
+        observed: dict[str, Path] = {}
+
+        def fingerprint(path: Path) -> str:
+            observed["path"] = path
+            assert path.read_text(encoding="utf-8") == "config = true\n"
+            return "fingerprint"
+
+        with patch(
+            "releaseledger.migration._backend.fingerprint_releaseledger_file",
+            side_effect=fingerprint,
+        ):
+            assert _fingerprint_from_bytes("config = true\n") == "fingerprint"
+
+        assert not observed["path"].exists()
+
     def test_plan_migration_includes_legacy_source(self, legacy_complete: Path) -> None:
         """The plan output names the real .releaseledger source."""
         from releaseledger.migration import (
