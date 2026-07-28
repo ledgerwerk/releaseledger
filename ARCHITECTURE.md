@@ -1,7 +1,7 @@
 ---
 title: "Architecture Documentation"
-version: 1
-generator: "archledger 0.3.1.dev6+g5c58990ed"
+version: 3
+generator: "archledger 0.3.2"
 arc42_template_version: "9.0-EN"
 ---
 
@@ -818,7 +818,21 @@ become changelog prose.
 - ✅ Internal housekeeping stays out of public changelogs by default
 - ❌ One more artifact to maintain (opt-in strict enforcement keeps it optional)
 
-<!-- archledger: no accepted records for this section yet -->
+## Ledgercore 0.6 owns Releaseledger migration state
+
+**Document version:** 3
+
+## Context
+
+Releaseledger's legacy migration path previously mixed domain planning with a competing physical journal and direct owned-destination activation.
+
+## Decision
+
+Ledgercore 0.6.0 is the hard owner of destination inspection, typed source/before/target fingerprints, schema-3 physical journaling, activation, locks, and physical recovery. Releaseledger owns legacy discovery, exact domain/config planning, lifecycle hooks, post-commit receipt creation, and explicit later cleanup.
+
+## Consequences
+
+New migrations use one shared migration ID and one Ledgercore schema-3 journal. Apply is copy-only, recovery policies are explicit, ambiguous legacy JSONL journals are diagnostic-only, and legacy deletion requires a committed journal plus a matching Releaseledger receipt.
 
 # Quality Requirements
 

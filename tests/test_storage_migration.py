@@ -833,10 +833,11 @@ class TestModeBehavior:
             mode="move",
         )
 
-        execute_migration(request)
+        with pytest.raises(Exception) as exc:
+            execute_migration(request)
 
-        # Legacy data should be removed
-        assert not legacy_data.exists(), "Legacy data should be removed in move mode"
+        assert getattr(exc.value, "code", None) == "migration_move_disabled"
+        assert legacy_data.exists(), "Move rejection must preserve legacy data"
 
 
 class TestStrictJsonl:

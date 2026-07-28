@@ -25,7 +25,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from releaseledger import ledgercore_backend as _backend
 from releaseledger.errors import (
@@ -42,6 +42,7 @@ INDEXES_MOUNT = _backend.INDEXES_MOUNT
 
 __all__ = [
     "ReleaseledgerMigrationRequest",
+    "ReleaseledgerMigrationPlan",
     "LegacyReleaseledgerSource",
     "ReleaseledgerDataInventory",
     "LedgerInventory",
@@ -106,6 +107,36 @@ class ReleaseledgerMigrationRequest:
     preserve_legacy_config: bool = False
     project_uuid: str | None = None
     reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseledgerMigrationPlan:
+    """Strict in-memory representation of a v2 user migration plan."""
+
+    schema: str
+    migration_id: str
+    project: dict[str, str]
+    source: dict[str, object]
+    target: dict[str, object]
+    decisions: dict[str, object]
+    required_hooks: dict[str, bool]
+    plan_hash: str
+
+    def as_dict(self) -> dict[str, object]:
+        """Return the canonical JSON-compatible representation."""
+
+        return {
+            "schema": self.schema,
+            "migration": "storage-layout",
+            "kind": "releaseledger_migration_plan",
+            "migration_id": self.migration_id,
+            "project": self.project,
+            "source": self.source,
+            "target": self.target,
+            "decisions": self.decisions,
+            "required_hooks": self.required_hooks,
+            "plan_hash": self.plan_hash,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -1289,6 +1320,16 @@ def plan_migration(request: ReleaseledgerMigrationRequest) -> dict[str, object]:
 
     IMPORTANT: This function is read-only. It must not write any files.
     """
+    if request.mode != "copy":
+        raise LaunchError(
+            "Move mode is disabled; apply is copy-only and cleanup is explicit.",
+            code="migration_move_disabled",
+            exit_code=2,
+            remediation=[
+                "Use `migrate apply` followed by `migrate cleanup --dry-run`.",
+            ],
+        )
+
     config_path, legacy_config = discover_legacy_project(request.start)
     workspace_root = config_path.parent.resolve()
 
@@ -1310,10 +1351,58 @@ def plan_migration(request: ReleaseledgerMigrationRequest) -> dict[str, object]:
         target=request.target,
     )
 
+    migration_id = str(uuid.uuid4())
+    transformed_config = project_config_from_legacy_mapping(
+        legacy_config,
+        source=str(config_path),
+    )
+    from releaseledger.storage.config import load_project_config, render_project_config
+
+    canonical_config = None
+    if target_info.config_path.is_file():
+        canonical_config = load_project_config(target_info.config_path)
+    merged_config, merge_changes = _merge_config_values(
+        transformed_config,
+        canonical_config,
+    )
+    rendered_config = render_project_config(
+        merged_config,
+        existing_path=target_info.config_path if canonical_config is not None else None,
+        preserve_comments=canonical_config is not None,
+    )
+    destinations = _backend.inspect_releaseledger_migration_destinations(target_info)
+    preflight = _preflight_destinations(
+        prepared=target_info,
+        source_fingerprint=_inventory_fingerprint(inventory),
+    )
+
+    def _destination_payload(name: str, policy: str) -> dict[str, object]:
+        inspection = destinations[name]
+        fingerprint = inspection.fingerprint
+        return {
+            "policy": policy,
+            "before_state": inspection.state,
+            "before_fingerprint": _fingerprint_payload(fingerprint),
+            "target_fingerprint": None,
+        }
+
+    source_files = [
+        {
+            "path": item.relative_path,
+            "size": item.size,
+            "sha256": item.sha256,
+        }
+        for item in inventory.files
+    ]
+
     plan: dict[str, object] = {
-        "schema": "releaseledger.migration-plan.v1",
-        "migration": "storage-layout",
-        "kind": "releaseledger_migration_plan",
+        "schema": "releaseledger.storage-migration-plan.v2",
+        "migration_id": migration_id,
+        "project": {
+            "root": str(workspace_root),
+            "uuid": target_info.project_uuid,
+            "name": target_info.project_name or "",
+        },
         "legacy_config_path": str(config_path),
         "legacy_data_root": str(legacy_dir),
         "workspace_root": str(workspace_root),
@@ -1321,8 +1410,6 @@ def plan_migration(request: ReleaseledgerMigrationRequest) -> dict[str, object]:
         "target_indexes_root": str(target_info.indexes_root),
         "target_data_storage": target_data_storage,
         "target_external_root": target_external_root,
-        "mode": request.mode,
-        "preserve_legacy_config": request.preserve_legacy_config,
         "inventory": {
             "ledger_refs": [li.ref for li in inventory.ledgers],
             "total_releases": inventory.total_releases,
@@ -1330,6 +1417,8 @@ def plan_migration(request: ReleaseledgerMigrationRequest) -> dict[str, object]:
             "total_event_rows": inventory.total_event_rows,
             "total_audit_sheets": inventory.total_audit_sheets,
             "total_regular_files": inventory.total_regular_files,
+            "inventory_fingerprint": _inventory_fingerprint(inventory),
+            "files": source_files,
         },
         "selected_paths_count": len(selected.included),
         "excluded_paths_count": len(selected.excluded),
@@ -1339,12 +1428,48 @@ def plan_migration(request: ReleaseledgerMigrationRequest) -> dict[str, object]:
             "data_root": str(legacy_dir),
             "fingerprint": _inventory_fingerprint(inventory),
         },
-        "destination": {
+        "target": {
             "data_root": str(target_info.data_root),
             "indexes_root": str(target_info.indexes_root),
             "storage": target_data_storage,
             "scope": request.target,
             "external_root": target_external_root,
+            "config_path": str(target_info.config_path),
+        },
+        "decisions": {
+            "data": _destination_payload(
+                DATA_MOUNT,
+                "replace-owned"
+                if preflight.get("data_action") == "replace"
+                else "noop-if-exact"
+                if preflight.get("data_action") == "noop"
+                else "create-only",
+            ),
+            "config": _destination_payload(
+                "config",
+                "replace-owned"
+                if preflight.get("config_action") == "merge"
+                else "noop-if-exact"
+                if preflight.get("config_action") == "noop"
+                else "create-only",
+            )
+            | {
+                "target_fingerprint": _fingerprint_payload(
+                    _fingerprint_from_bytes(rendered_config)
+                ),
+                "merge_changes": merge_changes,
+            },
+            "indexes": {
+                "strategy": "rebuild",
+                "policy": "replace-owned"
+                if destinations[INDEXES_MOUNT].state == "owned"
+                else "create-only",
+            },
+        },
+        "required_hooks": {
+            "staged_validation": True,
+            "activated_validation": True,
+            "finalization": True,
         },
         "operations": [
             {
@@ -1374,6 +1499,30 @@ def plan_migration(request: ReleaseledgerMigrationRequest) -> dict[str, object]:
         plan["overlap_detected"] = False
 
     return serialize_migration_plan(plan)
+
+
+def _fingerprint_payload(fingerprint: Any) -> dict[str, object] | None:
+    """Serialize a typed Ledgercore fingerprint without losing its fields."""
+
+    if fingerprint is None:
+        return None
+    return {
+        "algorithm": fingerprint.algorithm,
+        "digest": fingerprint.digest,
+        "file_count": fingerprint.file_count,
+        "total_bytes": fingerprint.total_bytes,
+    }
+
+
+def _fingerprint_from_bytes(rendered: str) -> object:
+    """Fingerprint rendered config bytes through Ledgercore's file contract."""
+
+    from tempfile import NamedTemporaryFile
+
+    with NamedTemporaryFile("w", encoding="utf-8", delete=True) as handle:
+        handle.write(rendered)
+        handle.flush()
+        return _backend.fingerprint_releaseledger_file(Path(handle.name))
 
 
 def _inventory_fingerprint(inventory: ReleaseledgerDataInventory) -> str:
@@ -1406,10 +1555,10 @@ def load_migration_plan(path: Path) -> dict[str, object]:
         ) from exc
     if (
         not isinstance(payload, dict)
-        or payload.get("schema") != "releaseledger.migration-plan.v1"
+        or payload.get("schema") != "releaseledger.storage-migration-plan.v2"
     ):
         raise LaunchError(
-            "Migration plan must use schema releaseledger.migration-plan.v1.",
+            "Migration plan must use schema releaseledger.storage-migration-plan.v2.",
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
         )
@@ -1425,22 +1574,107 @@ def load_migration_plan(path: Path) -> dict[str, object]:
 
 
 def validate_migration_plan(plan: dict[str, object], start: Path) -> dict[str, object]:
-    """Recompute source inventory and reject a stale plan."""
+    """Recompute all authoritative plan preconditions without writing."""
+
+    if plan.get("schema") != "releaseledger.storage-migration-plan.v2":
+        raise LaunchError(
+            "Unsupported migration plan schema.",
+            code="migration_plan_invalid",
+            exit_code=4,
+        )
+    project = plan.get("project")
+    if not isinstance(project, dict):
+        raise LaunchError(
+            "Migration plan is missing project identity.",
+            code="migration_plan_invalid",
+            exit_code=4,
+        )
+    expected_root = Path(str(project.get("root", ""))).resolve()
+    actual_root = Path(start).resolve()
+    if expected_root != actual_root:
+        raise LaunchError(
+            "Migration plan project root does not match the selected root.",
+            code="migration_destination_changed",
+            exit_code=4,
+            data={"expected_root": str(expected_root), "actual_root": str(actual_root)},
+        )
     source = discover_legacy_source(start)
     current = _inventory_fingerprint(source.inventory)
     source_data = plan.get("source", {})
-    expected = source_data.get("fingerprint") if isinstance(source_data, dict) else None
+    expected = (
+        source_data.get("inventory_fingerprint")
+        if isinstance(source_data, dict)
+        else None
+    )
+    if expected is None and isinstance(source_data, dict):
+        expected = source_data.get("fingerprint")
     if expected != current:
         raise LaunchError(
             "Migration plan is stale: the legacy source inventory changed.",
-            code="CONFLICT",
+            code="migration_source_changed",
             exit_code=4,
             remediation=["Run `migrate plan storage-layout` again."],
         )
+    target = plan.get("target")
+    if not isinstance(target, dict):
+        raise LaunchError(
+            "Migration plan is missing target decisions.",
+            code="migration_plan_invalid",
+            exit_code=4,
+        )
+    prepared = _backend.prepare_legacy_migration_target(
+        actual_root,
+        data_storage=str(target.get("storage", "project")),
+        external_root=(
+            str(target["external_root"]) if target.get("external_root") else None
+        ),
+        target=str(target.get("scope", "project")),
+        project_uuid=str(project.get("uuid")),
+    )
+    expected_data_path = Path(str(target.get("data_root", prepared.data_root)))
+    expected_config_path = Path(str(target.get("config_path", prepared.config_path)))
+    if (
+        expected_data_path.resolve() != prepared.data_root.resolve()
+        or expected_config_path.resolve() != prepared.config_path.resolve()
+    ):
+        raise LaunchError(
+            "Migration plan target paths no longer match the selected storage binding.",
+            code="migration_destination_changed",
+            exit_code=4,
+            data={
+                "expected_data_root": str(expected_data_path),
+                "actual_data_root": str(prepared.data_root),
+            },
+        )
+    destinations = _backend.inspect_releaseledger_migration_destinations(prepared)
+    decisions = plan.get("decisions")
+    if isinstance(decisions, dict):
+        for name in (DATA_MOUNT, "config"):
+            decision = decisions.get(name)
+            if not isinstance(decision, dict):
+                continue
+            expected_state = decision.get("before_state")
+            actual_state = destinations[name].state
+            if expected_state != actual_state:
+                raise LaunchError(
+                    f"Migration {name} destination before-state changed.",
+                    code="migration_destination_changed",
+                    exit_code=4,
+                    data={
+                        "component": name,
+                        "expected_state": expected_state,
+                        "actual_state": actual_state,
+                    },
+                )
     return {
         "valid": True,
         "source_fingerprint": current,
         "plan_hash": plan.get("plan_hash"),
+        "migration_id": plan.get("migration_id"),
+        "target": {
+            "data_root": str(prepared.data_root),
+            "config_path": str(prepared.config_path),
+        },
     }
 
 
@@ -1510,6 +1744,36 @@ def execute_migration(
     request: ReleaseledgerMigrationRequest,
     *,
     quiescence_check: Callable[[], object] | None = None,
+    migration_plan: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Execute a migration while guaranteeing a Releaseledger write lock.
+
+    CLI callers pass the callback for their already-held command lock. Direct
+    API callers receive the same lock and quiescence guarantees automatically.
+    """
+
+    if quiescence_check is not None:
+        return _execute_migration_locked(
+            request,
+            quiescence_check=quiescence_check,
+            migration_plan=migration_plan,
+        )
+
+    from releaseledger.storage.locking import acquire_write_lock, quiescence_callback
+
+    with acquire_write_lock(request.start) as lock:
+        return _execute_migration_locked(
+            request,
+            quiescence_check=lambda: quiescence_callback(lock),
+            migration_plan=migration_plan,
+        )
+
+
+def _execute_migration_locked(
+    request: ReleaseledgerMigrationRequest,
+    *,
+    quiescence_check: Callable[[], object] | None = None,
+    migration_plan: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Execute a migration from legacy to schema-3.
 
@@ -1518,6 +1782,21 @@ def execute_migration(
     This function handles the Releaseledger-specific pre-flight and
     post-activation work (index rebuild, domain receipt).
     """
+    if request.mode != "copy":
+        raise LaunchError(
+            "Move mode is disabled; apply is copy-only and cleanup is explicit.",
+            code="migration_move_disabled",
+            exit_code=2,
+        )
+    if migration_plan is None:
+        migration_plan = plan_migration(request)
+    validate_migration_plan(migration_plan, request.start)
+    shared_migration_id = (
+        str(migration_plan.get("migration_id"))
+        if migration_plan.get("migration_id")
+        else None
+    )
+
     # 1. Discover and inventory the legacy source
     source = discover_legacy_source(request.start)
     selection = select_legacy_durable_paths(source.data_root)
@@ -1564,7 +1843,7 @@ def execute_migration(
     )
 
     # 5. Create staging area and copy selected files
-    stage = create_migration_stage(prepared)
+    stage = create_migration_stage(prepared, migration_id=shared_migration_id)
     _write_journal_row(
         prepared.data_root.parent,
         {
@@ -1585,10 +1864,24 @@ def execute_migration(
         relative_paths=selection.included,
     )
 
-    # Write transformed config to stage
-    from releaseledger.storage.config import write_project_config
+    # Write the exact config target planned before activation. Ledgercore will
+    # fingerprint and activate this staged file as a normal file item.
+    from releaseledger.storage.config import (
+        load_project_config,
+        render_project_config,
+    )
 
-    write_project_config(stage.config_path, transformed_config, preserve_comments=False)
+    canonical_config = None
+    if prepared.config_path.is_file():
+        canonical_config = load_project_config(prepared.config_path)
+    merged_config, _ = _merge_config_values(transformed_config, canonical_config)
+    rendered_target = render_project_config(
+        merged_config,
+        existing_path=prepared.config_path if canonical_config is not None else None,
+        preserve_comments=canonical_config is not None,
+    )
+    stage.config_path.parent.mkdir(parents=True, exist_ok=True)
+    stage.config_path.write_text(rendered_target, encoding="utf-8")
 
     # Ledgercore executor handles binding markers during copy
 
@@ -1622,6 +1915,7 @@ def execute_migration(
         staged_data_root=stage.data_root,
         staged_config_path=stage.config_path,
         project_uuid=prepared.project_uuid,
+        migration_id=stage.migration_id,
         data_action=preflight.get("data_action", "create"),  # type: ignore[arg-type]
         config_action=preflight.get("config_action", "create"),  # type: ignore[arg-type]
     )
@@ -1639,48 +1933,65 @@ def execute_migration(
         },
     )
 
-    # 9. Activate: either through Ledgercore or direct shell adoption
+    # 9. Activate exclusively through Ledgercore's schema-3 state machine.
     def _quiescence() -> None:
-        if quiescence_check is not None:
-            quiescence_check()
+        if quiescence_check is None:
+            raise LaunchError(
+                "Migration requires a held Releaseledger write lock.",
+                code="migration_quiescence_required",
+                exit_code=4,
+            )
+        quiescence_check()
 
-    data_action = preflight.get("data_action", "create")
-    config_action = preflight.get("config_action", "create")
+    def _validate_staged(_item_index: int) -> None:
+        result = validate_domain_records(stage.data_root)
+        if not result["valid"]:
+            raise LaunchError(
+                "Staged Releaseledger records failed validation.",
+                code=CODE_VALIDATION_ERROR,
+                exit_code=1,
+                data={"failures": result.get("failures", [])},
+            )
 
-    if data_action in ("replace", "noop") and config_action in ("merge", "noop"):
-        # Shell adoption path: direct filesystem replacement.
-        # This bypasses the Ledgercore executor which refuses to
-        # activate into a non-empty destination.
-        _adopt_canonical_shell(
-            prepared=prepared,
-            stage=stage,
-            source=source,
-            selection=selection,
-            inventory_before=inventory_before,
-            data_action=data_action,
-            config_action=config_action,
-            transformed_config=transformed_config,
-            migration_id=stage.migration_id,
+    def _validate_activated(_item_index: int) -> None:
+        # Ledgercore invokes this hook before its journaled config switch.
+        # Validate the activated data mount directly; resolving the full
+        # Ledgercore layout here would require the manifest that is switched
+        # in the next transaction phase.
+        activated = validate_domain_records(prepared.data_root)
+        if not activated["valid"]:
+            raise LaunchError(
+                "Activated Releaseledger layout failed validation.",
+                code=CODE_VALIDATION_ERROR,
+                exit_code=1,
+                data={"failures": activated.get("failures", [])},
+            )
+
+    def _finalize() -> None:
+        _backend.ensure_releaseledger_config_binding(prepared)
+        final_layout = _backend.load_releaseledger_ledger_layout(
+            source.workspace_root, validate_storage=True, allow_missing=False
         )
-    else:
-        # Standard path: use Ledgercore executor
-        try:
-            _backend.execute_releaseledger_layout_migration(
-                generic_plan,
-                mode="copy",
-                quiescence_check=_quiescence,
-                project_root=source.workspace_root,
-            )
-        except LaunchError:
-            _write_journal_row(
-                prepared.data_root.parent,
-                {
-                    "phase": "failed",
-                    "migration_id": stage.migration_id,
-                },
-            )
-            remove_migration_stage(stage)
-            raise
+        index_result = rebuild_all_indexes(
+            final_layout.data_root, final_layout.indexes_root
+        )
+        assert_index_rebuild_success(index_result)
+
+    try:
+        _backend.execute_releaseledger_layout_migration(
+            generic_plan,
+            quiescence_check=_quiescence,
+            validate_staged=_validate_staged,
+            validate_activated=_validate_activated,
+            finalize=_finalize,
+            project_root=source.workspace_root,
+        )
+    except LaunchError:
+        _write_journal_row(
+            prepared.data_root.parent,
+            {"phase": "failed", "migration_id": stage.migration_id},
+        )
+        raise
 
     _write_journal_row(
         prepared.data_root.parent,
@@ -1747,7 +2058,7 @@ def execute_migration(
         workspace_root=source.workspace_root,
         migration_id=stage.migration_id,
         project_uuid=prepared.project_uuid,
-        plan_hash="pending",
+        plan_hash=str(migration_plan.get("plan_hash", "")),
         source_root=str(source.data_root),
         source_fingerprint=source_fingerprint,
         target_data_root=str(final_layout.data_root),
@@ -1763,22 +2074,8 @@ def execute_migration(
         },
     )
 
-    # 13. Handle move mode: retire legacy source after verification
-
-    if request.mode == "move":
-        retire_legacy_source_after_success(
-            source,
-            preserve_config=request.preserve_legacy_config,
-        )
-        _write_journal_row(
-            prepared.data_root.parent,
-            {
-                "phase": "legacy-retired",
-                "migration_id": stage.migration_id,
-            },
-        )
-
-    # 13. Clean up staging area
+    # 13. Clean up only the Releaseledger preparation workspace. Legacy
+    # source cleanup is a separate explicit command guarded by the receipt.
     remove_migration_stage(stage)
 
     _write_journal_row(
@@ -1793,6 +2090,7 @@ def execute_migration(
         "kind": "releaseledger_migration_executed",
         "mode": request.mode,
         "migration_id": stage.migration_id,
+        "plan_hash": migration_plan.get("plan_hash"),
         "reason": request.reason or "",
         "legacy_data_root": str(source.data_root),
         "target_data_root": str(final_layout.data_root),
@@ -1855,28 +2153,17 @@ def inspect_destination(
         return "non-empty-unbound", f"{path} has content but no binding marker"
 
     try:
-        from ledgercore.storage_binding import (
-            read_storage_binding,
-            storage_bindings_match,
-        )
-
-        actual = read_storage_binding(marker)
+        actual = _backend.read_releaseledger_storage_binding(marker)
     except Exception as exc:
         return "foreign-bound", f"{path} has unreadable binding: {exc}"
 
-    from ledgercore.storage_binding import StorageBinding
-
-    expected = StorageBinding(
-        schema_version=1,
-        layout_version=3,
+    expected = _backend.expected_releaseledger_storage_binding(
         project_uuid=expected_project_uuid,
-        project_name=None,
         tool=expected_tool,
         mount=expected_mount,
-        storage="project",
     )
 
-    if not storage_bindings_match(actual, expected):
+    if not _backend.storage_bindings_match(actual, expected):
         return "foreign-bound", (
             f"{path} belongs to {actual.project_uuid}/{actual.tool}/{actual.mount}"
         )
@@ -1905,16 +2192,11 @@ def _validate_plan_with_ledgercore(plan: Any, project_root: Path) -> None:
     Calls validate_storage_migration_plan to check destination policies,
     fingerprints, bindings, and path overlaps. Raises LaunchError if
     validation fails.
-    Falls back gracefully if Ledgercore validation is not available.
+    Missing or incompatible Ledgercore validation is a hard integration
+    failure. Migration must never continue on a weaker local validator.
     """
     try:
-        from ledgercore.migration import validate_storage_migration_plan
-    except ImportError:
-        # Ledgercore validation not available, skip
-        return
-
-    try:
-        result = validate_storage_migration_plan(plan, project_root=project_root)
+        result = _backend.validate_releaseledger_migration_plan(plan, project_root)
         if not result.valid:
             errors = list(result.errors)
             raise LaunchError(
@@ -1929,13 +2211,19 @@ def _validate_plan_with_ledgercore(plan: Any, project_root: Path) -> None:
             )
     except LaunchError:
         raise
-    except Exception:
-        # Ledgercore validation failed unexpectedly, log but continue
-        # with Releaseledger-only validation
-        pass
+    except Exception as exc:
+        raise LaunchError(
+            "Ledgercore migration plan validation failed unexpectedly.",
+            code="migration_plan_invalid",
+            exit_code=4,
+            data={"ledgercore_error_type": type(exc).__name__},
+            remediation=[
+                "Install the final Ledgercore 0.6 migration contract and retry.",
+            ],
+        ) from exc
 
 
-def _adopt_canonical_shell(
+def _legacy_shell_activation_removed(
     *,
     prepared: Any,
     stage: PreparedMigrationStage,
@@ -1949,8 +2237,9 @@ def _adopt_canonical_shell(
 ) -> None:
     """Adopt an existing canonical shell by direct filesystem replacement.
 
-    This is the Releaseledger-only fallback for when the Ledgercore
-    executor cannot replace an owned destination. It performs:
+    Legacy implementation retained only for source-history diagnostics. It is
+    unreachable for new schema-3 migrations; physical activation is owned by
+    Ledgercore.
     1. Validate the destination binding
     2. Back up the current destination
     3. Rename the staged destination into place
@@ -1970,13 +2259,8 @@ def _adopt_canonical_shell(
         # Validate binding of the existing destination
         marker = data_root / ".ledger-project.toml"
         if marker.is_file():
-            from ledgercore.storage_binding import (
-                read_storage_binding,
-                storage_bindings_match,
-            )
-
-            actual = read_storage_binding(marker)
-            if not storage_bindings_match(actual, prepared.data_binding):
+            actual = _backend.read_releaseledger_storage_binding(marker)
+            if not _backend.storage_bindings_match(actual, prepared.data_binding):
                 raise LaunchError(
                     "Cannot adopt shell: destination binding does not match.",
                     code="CONFLICT",
@@ -2022,7 +2306,7 @@ def _adopt_canonical_shell(
     # --- Config activation ---
     if config_action == "merge":
         # Merge legacy config with canonical config
-        _merge_and_write_config(
+        _legacy_config_activation_removed(
             config_path=config_path,
             config_parent=config_parent,
             transformed_config=transformed_config,
@@ -2037,7 +2321,44 @@ def _adopt_canonical_shell(
     _ensure_binding(config_parent, prepared, binding=prepared.config_binding)
 
 
-def _merge_and_write_config(
+def _merge_config_values(
+    transformed_config: Any,
+    canonical: Any | None,
+) -> tuple[Any, list[dict[str, str]]]:
+    """Compute the exact config merge without reading or writing during activation."""
+
+    if canonical is None:
+        return transformed_config, []
+
+    from releaseledger.storage.config import ProjectConfig
+
+    base = ProjectConfig()
+    base_dict = _config_to_dict(base)
+    canonical_dict = _config_to_dict(canonical)
+    legacy_dict = _config_to_dict(transformed_config)
+    merged_dict: dict[str, object] = {}
+    changes: list[dict[str, str]] = []
+    for field in base_dict:
+        base_val = base_dict[field]
+        canonical_val = canonical_dict.get(field, base_val)
+        legacy_val = legacy_dict.get(field, base_val)
+        if canonical_val == legacy_val:
+            merged_dict[field] = canonical_val
+        elif canonical_val == base_val:
+            merged_dict[field] = legacy_val
+            if legacy_val != base_val:
+                changes.append({"field": field, "source": "legacy"})
+        elif legacy_val == base_val:
+            merged_dict[field] = canonical_val
+        else:
+            # Legacy values are authoritative only when both sides diverge;
+            # the decision is recorded in the user-visible plan.
+            merged_dict[field] = legacy_val
+            changes.append({"field": field, "source": "legacy-conflict"})
+    return _dict_to_config(merged_dict), changes
+
+
+def _legacy_config_activation_removed(
     *,
     config_path: Path,
     config_parent: Path,
@@ -2062,12 +2383,9 @@ def _merge_and_write_config(
     import shutil
 
     from releaseledger.storage.config import (
-        ProjectConfig,
         load_project_config,
         write_project_config,
     )
-
-    base = ProjectConfig()
 
     # Load canonical config if it exists
     canonical = None
@@ -2077,56 +2395,12 @@ def _merge_and_write_config(
         except Exception:
             pass
 
+    merged_config, _ = _merge_config_values(transformed_config, canonical)
+
+    # No canonical config means the transformed config is already exact.
     if canonical is None:
-        # No canonical config, just write the transformed one
-        write_project_config(config_path, transformed_config, preserve_comments=False)
+        write_project_config(config_path, merged_config, preserve_comments=False)
         return
-
-    # Three-way merge
-    base_dict = _config_to_dict(base)
-    canonical_dict = _config_to_dict(canonical)
-    legacy_dict = _config_to_dict(transformed_config)
-
-    merged_dict: dict[str, object] = {}
-    changes: list[dict[str, str]] = []
-
-    for field in base_dict:
-        base_val = base_dict[field]
-        canonical_val = canonical_dict.get(field, base_val)
-        legacy_val = legacy_dict.get(field, base_val)
-
-        if canonical_val == legacy_val:
-            merged_dict[field] = canonical_val
-        elif canonical_val == base_val:
-            merged_dict[field] = legacy_val
-            if legacy_val != base_val:
-                changes.append(
-                    {
-                        "field": field,
-                        "from": str(canonical_val),
-                        "to": str(legacy_val),
-                        "source": "legacy",
-                    }
-                )
-        elif legacy_val == base_val:
-            merged_dict[field] = canonical_val
-        elif canonical_val == legacy_val:
-            merged_dict[field] = canonical_val
-        else:
-            # Both differ from base and from each other.
-            # Take legacy value (the migration source is authoritative).
-            merged_dict[field] = legacy_val
-            changes.append(
-                {
-                    "field": field,
-                    "from": str(canonical_val),
-                    "to": str(legacy_val),
-                    "source": "legacy",
-                }
-            )
-
-    # Build merged config
-    merged_config = _dict_to_config(merged_dict)
 
     # Back up existing config
     backup_suffix = f".migrating-{migration_id}"
@@ -2333,23 +2607,13 @@ def is_empty_releaseledger_bootstrap(
         return False
 
     try:
-        from ledgercore.storage_binding import (
-            StorageBinding,
-            read_storage_binding,
-            storage_bindings_match,
-        )
-
-        actual = read_storage_binding(marker)
-        expected = StorageBinding(
-            schema_version=1,
-            layout_version=3,
+        actual = _backend.read_releaseledger_storage_binding(marker)
+        expected = _backend.expected_releaseledger_storage_binding(
             project_uuid=expected_project_uuid,
-            project_name=None,
             tool=TOOL_NAME,
             mount=DATA_MOUNT,
-            storage="project",
         )
-        if not storage_bindings_match(actual, expected):
+        if not _backend.storage_bindings_match(actual, expected):
             return False
     except Exception:
         return False
@@ -2384,14 +2648,23 @@ def is_empty_releaseledger_bootstrap(
 
 def create_migration_stage(
     prepared: Any,  # PreparedReleaseledgerTarget
+    *,
+    migration_id: str | None = None,
 ) -> PreparedMigrationStage:
     """Create a filtered staging directory for legacy migration."""
-    migration_id = str(uuid.uuid4())
+    migration_id = migration_id or str(uuid.uuid4())
     stage_root = prepared.data_root.parent / STAGING_DIR_NAME / migration_id
     data_root = stage_root / "data"
     config_path = stage_root / "config.toml"
 
-    stage_root.mkdir(parents=True, exist_ok=True)
+    if stage_root.exists():
+        raise LaunchError(
+            f"Migration stage collision at {stage_root}.",
+            code="migration_stage_collision",
+            exit_code=4,
+            data={"path": str(stage_root), "migration_id": migration_id},
+        )
+    stage_root.mkdir(parents=True, exist_ok=False)
     data_root.mkdir(parents=True, exist_ok=True)
 
     return PreparedMigrationStage(
@@ -2827,7 +3100,9 @@ def _write_migration_receipt(
     ]
 
     content = "\n".join(lines) + "\n"
-    receipt_path.write_text(content, encoding="utf-8")
+    import ledgercore
+
+    ledgercore.atomic_write_text(receipt_path, content)
 
     return receipt_path
 
@@ -2874,8 +3149,7 @@ def recover_migration(
     *,
     journal: Path | None = None,
     dry_run: bool = False,
-    resume: bool = False,
-    rollback_partial: bool = False,
+    policy: Literal["auto", "resume", "rollback"] = "auto",
     yes: bool = False,
     reason: str | None = None,
 ) -> dict[str, object]:
@@ -2889,7 +3163,96 @@ def recover_migration(
 
     With ``dry_run=True``, reports what would be done without changes.
     """
+    if policy not in {"auto", "resume", "rollback"}:
+        raise LaunchError(
+            "Recovery policy must be auto, resume, or rollback.",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+        )
+
     root = Path(workspace_root).resolve()
+    schema3_dir = root / ".ledger" / "migrations"
+    schema3_journal = journal
+    if schema3_journal is None and schema3_dir.is_dir():
+        candidates = sorted(schema3_dir.glob("*.toml"))
+        if candidates:
+            schema3_journal = candidates[-1]
+
+    if schema3_journal is not None and schema3_journal.suffix == ".toml":
+        from releaseledger.storage.locking import (
+            acquire_write_lock,
+            quiescence_callback,
+        )
+
+        inspected = _backend.inspect_releaseledger_migration(schema3_journal)
+        result: dict[str, object] = {
+            "kind": "migration_recovery",
+            "journal_path": str(schema3_journal),
+            "migration_id": inspected.migration_id,
+            "phase": inspected.phase,
+            "policy": policy,
+        }
+        if dry_run:
+            result.update({"dry_run": True, "action": "inspect-only"})
+            return result
+        if not reason or not reason.strip():
+            raise LaunchError(
+                "Migration recovery writes require a reason.",
+                code=CODE_USAGE_ERROR,
+                exit_code=2,
+            )
+
+        def _quiescence() -> None:
+            if active_lock is None:
+                raise LaunchError(
+                    "Migration recovery requires the Releaseledger write lock.",
+                    code="migration_quiescence_required",
+                    exit_code=4,
+                )
+            quiescence_callback(active_lock)
+
+        def _validate_activated(_item_index: int) -> None:
+            layout = _backend.load_releaseledger_ledger_layout(
+                root, validate_storage=True, allow_missing=False
+            )
+            if (
+                layout.validation_report is not None
+                and not layout.validation_report.valid
+            ):
+                raise LaunchError(
+                    "Recovered layout failed Releaseledger validation.",
+                    code=CODE_VALIDATION_ERROR,
+                    exit_code=1,
+                )
+
+        def _finalize() -> None:
+            layout = _backend.load_releaseledger_ledger_layout(
+                root, validate_storage=True, allow_missing=False
+            )
+            assert_index_rebuild_success(
+                rebuild_all_indexes(layout.data_root, layout.indexes_root)
+            )
+
+        active_lock = None
+        with acquire_write_lock(root) as acquired_lock:
+            active_lock = acquired_lock
+            recovered = cast(Any, _backend.recover_releaseledger_migration)(
+                schema3_journal,
+                policy=policy,
+                quiescence_check=_quiescence,
+                validate_activated=_validate_activated,
+                finalize=_finalize,
+            )
+        result.update(
+            {
+                "phase": recovered.phase,
+                "items_completed": recovered.items_completed,
+                "committed": recovered.phase in {"committed", "complete"},
+                "reason": reason,
+            }
+        )
+        return result
+
     journal_dir = root / ".ledger" / "releaseledger"
     journal_path = journal_dir / JOURNAL_FILENAME
 
@@ -2904,6 +3267,8 @@ def recover_migration(
             "message": "No migration journal found; nothing to recover.",
         }
 
+    # Legacy Releaseledger JSONL journals are diagnostic-only. Their filename
+    # and binding markers are insufficient to authorize deletion or resume.
     last = rows[-1]
     phase = last.get("phase", "unknown")
     migration_id = last.get("migration_id", "unknown")
@@ -2917,48 +3282,16 @@ def recover_migration(
             "message": f"Migration completed (phase={phase}). Nothing to recover.",
         }
 
-    staging_dir = journal_dir / STAGING_DIR_NAME / str(migration_id)
-    temp_paths = _collect_migration_temp_paths(root, migration_id, staging_dir)
-    dest_activated = _check_dest_activated(last.get("target_data_root"))
-
-    if phase == "failed" and dest_activated:
-        return _recover_after_activation(
-            phase,
-            migration_id,
-            temp_paths,
-            dest_activated,
-            dry_run=dry_run,
-            yes=yes,
-        )
-
-    if phase in ("staging", "failed") and not dest_activated:
-        return _recover_before_activation(
-            phase,
-            migration_id,
-            temp_paths,
-            dry_run=dry_run,
-            yes=yes,
-            journal_path=journal_path,
-        )
-
-    # Unknown or complex state: report with exact details
     return {
         "kind": "manual-conflict",
+        "legacy_journal": True,
         "last_phase": phase,
         "migration_id": migration_id,
-        "temp_paths": temp_paths,
-        "destinations_activated": dest_activated,
-        "journal_path": str(journal_path),
-        "message": (
-            f"Migration was in phase '{phase}'. "
-            f"Found {len(temp_paths)} temporary artifact(s). "
-            "Inspect the journal and data directories."
-        ),
+        "journal_path": str(journal or journal_path),
+        "message": "Legacy Releaseledger JSONL journals are read-only and require manual intervention.",
         "remediation": [
-            f"Inspect journal: {journal_path}",
-            f"Inspect staging: {staging_dir}",
-            "Run `releaseledger migrate recover --dry-run` to see actions.",
-            "Run `releaseledger migrate recover --yes --reason '...'` to clean temporaries.",
+            "Inspect the matching Ledgercore schema-3 journal, if present.",
+            "Do not delete stage or backup paths based only on legacy filenames.",
         ],
     }
 
@@ -3003,7 +3336,7 @@ def _check_dest_activated(dest_data: object) -> bool:
     return False
 
 
-def _recover_after_activation(
+def _legacy_recover_after_activation_diagnostic(
     phase: str,
     migration_id: str | object,
     temp_paths: list[str],
@@ -3044,7 +3377,7 @@ def _recover_after_activation(
     return result
 
 
-def _recover_before_activation(
+def _legacy_recover_before_activation_diagnostic(
     phase: str,
     migration_id: str | object,
     temp_paths: list[str],

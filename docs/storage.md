@@ -30,14 +30,17 @@ releaseledger migrate status
 releaseledger migrate plan storage-layout --output migration-plan.json
 releaseledger migrate apply storage-layout --plan-file migration-plan.json \
   --reason "Adopt the canonical Ledgercore storage layout"
+releaseledger migrate recover --journal PATH --policy auto --dry-run
 releaseledger migrate cleanup storage-layout --dry-run
 releaseledger migrate cleanup storage-layout --yes \
   --reason "Remove verified legacy artifacts"
 ```
 
-Plans are deterministic and hash-protected. Apply rechecks the source
-fingerprint; a changed source is a conflict and must be replanned. Cleanup
-never happens implicitly as part of apply.
+Plans are deterministic and hash-protected. The v2 plan carries one shared
+migration ID, exact source/before/target fingerprints, and the rendered config
+target. Apply is copy-only; physical activation and recovery belong to the
+Ledgercore schema-3 journal. Cleanup never happens implicitly as part of
+apply and requires a committed journal plus Releaseledger receipt.
 
 The examples below document the pre-migration layout retained for discovery;
 they are not the canonical configuration format.

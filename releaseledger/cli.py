@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal, cast
 
 import typer
 import yaml
@@ -180,6 +180,12 @@ def releaseledger_main(
     ] = False,
 ) -> None:
     """Manage project-local release state."""
+    # A CliRunner can reuse the same context across invocations.  Reset the
+    # warning accumulator before the root callback handles an invocation that
+    # may fail before CLIState is stored (notably conflicting --root/--cwd).
+    from releaseledger.cli_common import _warnings
+
+    _warnings.set([])
     resolved_root = resolve_workspace_root(root)
     resolved_cwd = resolve_workspace_root(cwd) if cwd is not None else None
     if root is not None and resolved_cwd is not None and resolved_root != resolved_cwd:
@@ -203,7 +209,12 @@ def releaseledger_main(
         warnings.append(deprecated_option_warning("--cwd", "--root"))
     store_cli_state(
         ctx,
-        CLIState(root=effective_root, json_output=json_output, warnings=warnings),
+        CLIState(
+            root=effective_root,
+            json_output=json_output,
+            legacy_cwd=cwd is not None,
+            warnings=warnings,
+        ),
     )
     if ctx.invoked_subcommand is None:
         typer.echo(ctx.get_help())
@@ -734,6 +745,13 @@ def release_update_command(
         )
 
         def legacy_status() -> CommandResult:
+            if state.legacy_cwd and status == "released":
+                result = update_release(
+                    _paths(ctx).workspace_root,
+                    version=version,
+                    status=status,
+                )
+                return result, _event_ids(result), f"updated release {version} status"
             result = set_release_status(
                 _paths(ctx).workspace_root,
                 version=version,
@@ -1973,6 +1991,7 @@ def entry_lint_command(
         error=lint_error,
         json_output=state.json_output,
         result=result,
+        result_type="entry_lint",
     )
     if not state.json_output:
         issues = result.get("issues", [])
@@ -2005,6 +2024,12 @@ def entry_prompt_command(
         emit_error(command="entry prompt", error=exc, json_output=state.json_output)
         raise typer.Exit(launch_error_exit_code(exc)) from exc
     text = render_json(result) if isinstance(result, dict) else result
+    if format_name == "json" and not state.json_output:
+        # The format option itself is the machine-output request for this
+        # legacy command.  Do not prepend the deprecated --cwd warning to the
+        # JSON document in CliRunner/older Typer environments that merge
+        # stderr into stdout.
+        state.warnings.clear()
     if output is not None:
         target = write_text_output(output, text)
         emit_payload(
@@ -2114,6 +2139,19 @@ def changelog_command(
         text = render_json(content) if isinstance(content, dict) else str(content)
     else:
         text = content if isinstance(content, str) else render_json(content)
+    if (
+        state.legacy_cwd
+        and state.json_output
+        and format_name == "json"
+        and output is None
+        and isinstance(content, dict)
+    ):
+        # Preserve the historical ``changelog VERSION --format json`` shape
+        # for deprecated --cwd callers.  Canonical --root callers get the v1
+        # envelope below.
+        state.warnings.clear()
+        typer.echo(render_json(content))
+        return
     if output is not None:
         out_path = write_text_output(output, text)
         emit_payload(
@@ -2223,7 +2261,9 @@ def review_command(
 
     ok = bool(result.get("ok", False))
     emit_payload(
-        command="release review",
+        command=(
+            "review" if "release review" not in ctx.command_path else "release review"
+        ),
         result_type="release_review",
         result=result,
         human=_render_review_human(version, result),
@@ -2614,7 +2654,11 @@ def build_command(
             human += f"\nInternal-only covered commits: {hidden_commits}"
         result_type = "changelog_build"
     emit_payload(
-        command="changelog build",
+        command=(
+            "build"
+            if state.legacy_cwd and "changelog build" not in ctx.command_path
+            else "changelog build"
+        ),
         result_type=result_type,
         result=result,
         human=human,
@@ -3626,6 +3670,13 @@ def storage_migrate_command(
             migration_status as mig_status,
         )
 
+        if mode == "move":
+            raise LaunchError(
+                "Move mode is disabled; use copy-only migration and explicit cleanup.",
+                code="migration_move_disabled",
+                exit_code=2,
+            )
+
         if subcommand == "status":
             result = mig_status(state.cwd)
             human = f"Migration state: {result.get('state', 'unknown')}"
@@ -3634,10 +3685,12 @@ def storage_migrate_command(
         if subcommand == "plan":
             request = ReleaseledgerMigrationRequest(
                 start=state.cwd,
-                data_storage=data_storage,  # type: ignore[arg-type]
+                data_storage=cast(
+                    Literal["project", "external", "user-data"], data_storage
+                ),
                 external_root=root,
-                target=target,  # type: ignore[arg-type]
-                mode=mode,  # type: ignore[arg-type]
+                target=cast(Literal["project", "local"], target),
+                mode="copy",
                 preserve_legacy_config=preserve_legacy_config,
             )
             result = plan_migration(request)
@@ -3655,10 +3708,12 @@ def storage_migrate_command(
 
             request = ReleaseledgerMigrationRequest(
                 start=state.cwd,
-                data_storage=data_storage,  # type: ignore[arg-type]
+                data_storage=cast(
+                    Literal["project", "external", "user-data"], data_storage
+                ),
                 external_root=root,
-                target=target,  # type: ignore[arg-type]
-                mode=mode,  # type: ignore[arg-type]
+                target=cast(Literal["project", "local"], target),
+                mode="copy",
                 preserve_legacy_config=preserve_legacy_config,
             )
             with acquire_write_lock(state.cwd) as lock:
@@ -3673,7 +3728,7 @@ def storage_migrate_command(
             return result, [], human
 
         if subcommand == "recover":
-            result = recover_migration(state.cwd)
+            result = recover_migration(state.cwd, policy="auto")
             human = result.get("message", "Recovery attempted.")  # type: ignore[assignment]
             return result, [], human
 
@@ -3709,6 +3764,7 @@ def _migration_command_result(
     plan_file: Path | None = None,
     dry_run: bool = False,
     journal: Path | None = None,
+    policy: str = "auto",
     yes: bool = False,
     reason: str | None = None,
 ) -> CommandResult:
@@ -3736,10 +3792,23 @@ def _migration_command_result(
         result = migration_status(root)
         return result, [], f"Migration state: {result.get('state', 'unknown')}"
     if operation == "recover":
+        if policy not in {"auto", "resume", "rollback"}:
+            raise LaunchError(
+                "Recovery policy must be auto, resume, or rollback.",
+                code=CODE_USAGE_ERROR,
+                exit_code=2,
+            )
+        if not dry_run and (not reason or not reason.strip()):
+            raise LaunchError(
+                "Migration recovery writes require a reason.",
+                code=CODE_USAGE_ERROR,
+                exit_code=2,
+            )
         result = recover_migration(
             root,
             journal=journal,
             dry_run=dry_run,
+            policy=cast(Literal["auto", "resume", "rollback"], policy),
             yes=yes,
             reason=reason,
         )
@@ -3779,8 +3848,7 @@ def _migration_command_result(
                 [],
                 "Migration apply validated (dry-run)",
             )
-        destination = plan.get("destination", {})
-        source = plan.get("source", {})
+        destination = plan.get("target", plan.get("destination", {}))
         assert isinstance(destination, dict)
         # Use the plan's authoritative project UUID.
         plan_project = plan.get("project", {})
@@ -3802,11 +3870,17 @@ def _migration_command_result(
             project_uuid=str(plan_uuid) if plan_uuid else None,
             reason=reason,
         )
-        result = execute_migration(request)
-        result["plan_hash"] = plan.get("plan_hash")
-        result["source_fingerprint"] = (
-            source.get("fingerprint") if isinstance(source, dict) else None
+        from releaseledger.storage.locking import (
+            acquire_write_lock,
+            quiescence_callback,
         )
+
+        with acquire_write_lock(root) as lock:
+            result = execute_migration(
+                request,
+                migration_plan=plan,
+                quiescence_check=lambda: quiescence_callback(lock),
+            )
         return result, [], "Migration applied from verified plan"
 
     request = ReleaseledgerMigrationRequest(
@@ -3822,6 +3896,12 @@ def _migration_command_result(
         result = dict(plan)
         result["dry_run"] = dry_run
         if output is not None:
+            if str(output) == "-" and cli_state_from_context(ctx).json_output:
+                raise LaunchError(
+                    "--output - cannot be combined with global --json; choose raw plan output or an envelope.",
+                    code=CODE_USAGE_ERROR,
+                    exit_code=2,
+                )
             # Write the plan itself (without extra metadata) to preserve hash.
             write_text_output(output, render_json(plan))
             result["output"] = str(output)
@@ -3834,7 +3914,13 @@ def _migration_command_result(
                 else "Migration plan ready"
             ),
         )
-    result = execute_migration(request)
+    from releaseledger.storage.locking import acquire_write_lock, quiescence_callback
+
+    with acquire_write_lock(root) as lock:
+        result = execute_migration(
+            request,
+            quiescence_check=lambda: quiescence_callback(lock),
+        )
     return result, [], "Migration applied"
 
 
@@ -3962,9 +4048,11 @@ def migrate_apply_command(
 def migrate_recover_command(
     ctx: typer.Context,
     journal: Annotated[Path | None, typer.Option("--journal")] = None,
+    policy: Annotated[
+        str,
+        typer.Option("--policy", help="Recovery policy: auto, resume, or rollback."),
+    ] = "auto",
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
-    resume: Annotated[bool, typer.Option("--resume")] = False,
-    rollback_partial: Annotated[bool, typer.Option("--rollback-partial")] = False,
     yes: Annotated[bool, typer.Option("--yes")] = False,
     reason: Annotated[str | None, typer.Option("--reason")] = None,
 ) -> None:
@@ -3979,6 +4067,7 @@ def migrate_recover_command(
             "recover",
             migration="storage-layout",
             journal=journal,
+            policy=policy,
             dry_run=dry_run,
             reason=reason,
             yes=yes,

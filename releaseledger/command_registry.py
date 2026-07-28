@@ -190,11 +190,27 @@ def build_command_inventory() -> CommandInventory:
         "Clear a local storage override.",
         effect="workspace-write",
     )
-    add("migrate status", "Show migration status.")
-    add("migrate plan", "Plan a named migration.")
-    add("migrate apply", "Apply a named migration.", effect="workspace-write")
     add(
-        "migrate recover", "Recover an interrupted migration.", effect="workspace-write"
+        "migrate status",
+        "Show migration status.",
+        aliases=("storage migrate", "storage migrate status"),
+    )
+    add(
+        "migrate plan",
+        "Plan a named migration.",
+        aliases=("storage migrate plan",),
+    )
+    add(
+        "migrate apply",
+        "Apply a named migration.",
+        effect="workspace-write",
+        aliases=("storage migrate apply",),
+    )
+    add(
+        "migrate recover",
+        "Recover an interrupted migration.",
+        effect="workspace-write",
+        aliases=("storage migrate recover",),
     )
     add(
         "migrate cleanup",
@@ -209,13 +225,6 @@ def build_command_inventory() -> CommandInventory:
         stability="deprecated",
         deprecated=True,
         replacement="config validate",
-    )
-    add(
-        "storage migrate",
-        "Deprecated compatibility migration entry point.",
-        stability="deprecated",
-        deprecated=True,
-        replacement="migrate",
     )
 
     return CommandInventory(tuple(sorted(entries, key=lambda item: item.path)))

@@ -69,9 +69,10 @@ releaseledger entry import VERSION --file FILE
 releaseledger entry list VERSION
 releaseledger entry lint VERSION --strict
 releaseledger entry prompt VERSION --source-ref REF --context-file FILE
-releaseledger changelog VERSION --format markdown|json
+releaseledger changelog preview VERSION --format markdown|json
+releaseledger changelog build VERSION
 releaseledger build VERSION --dry-run
-releaseledger review VERSION [--strict] [--git] [--git-base REF] [--git-head REF] [--require-audit-sheet]
+releaseledger release review VERSION [--strict] [--git] [--git-base REF] [--git-head REF] [--require-audit-sheet]
 releaseledger git range VERSION [--base REF] [--head REF]
 releaseledger git scaffold VERSION [--base REF] [--head REF] --output PATH
 releaseledger git import VERSION [--base REF] [--head REF] --output PATH
@@ -95,6 +96,7 @@ releaseledger storage validate --strict
 releaseledger migrate status
 releaseledger migrate plan storage-layout --output migration-plan.json
 releaseledger migrate apply storage-layout --plan-file migration-plan.json --reason TEXT
+releaseledger migrate recover --journal PATH --policy auto|resume|rollback [--dry-run]
 releaseledger config show
 releaseledger config validate
 ```
@@ -105,7 +107,7 @@ Root options belong before the subcommand:
 releaseledger --root PATH --json release show VERSION
 ```
 
-`--cwd` remains a deprecated compatibility alias. JSON output uses the
+`--root` is the canonical project selector. `--cwd` remains a deprecated compatibility alias. JSON output uses the
 `ledgerwerk.cli.v1` envelope and structured warnings.
 
 ## Fresh context entry protocol
@@ -238,11 +240,11 @@ For batch imports, verify fields with `releaseledger --json entry add-many VERSI
 Use this when the user wants release-note source material for review or drafting.
 
 ```bash
-releaseledger changelog VERSION --target-changelog CHANGELOG.md --release-date YYYY-MM-DD
-releaseledger changelog VERSION --format json
-releaseledger changelog VERSION --include-internal
-releaseledger changelog VERSION --include-status accepted --include-status draft
-releaseledger changelog VERSION --lint
+releaseledger changelog preview VERSION --target-changelog CHANGELOG.md --release-date YYYY-MM-DD
+releaseledger changelog preview VERSION --format json
+releaseledger changelog preview VERSION --include-internal
+releaseledger changelog preview VERSION --include-status accepted --include-status draft
+releaseledger changelog preview VERSION --lint
 ```
 
 Rules:

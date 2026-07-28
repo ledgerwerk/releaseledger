@@ -56,6 +56,7 @@ __all__ = [
     "render_default_project_config",
     "update_project_config",
     "render_default_releaseledger_toml",
+    "render_project_config",
     "write_project_config",
 ]
 
@@ -850,6 +851,42 @@ def write_project_config(
 
     rendered = tomlkit.dumps(document)
     ledgercore.atomic_write_text(config_path, rendered)
+
+
+def render_project_config(
+    config: ProjectConfig,
+    *,
+    existing_path: Path | None = None,
+    preserve_comments: bool = True,
+) -> str:
+    """Render an exact config target without writing to the filesystem.
+
+    Migration planning uses this pure counterpart to ``write_project_config``
+    so the bytes fingerprinted in the plan are the bytes later staged and
+    activated by Ledgercore.
+    """
+
+    if config.config_version != CONFIG_VERSION:
+        raise LaunchError(
+            "Refusing to render a config whose config_version is not 2.",
+            code=CODE_CONFIG_ERROR,
+            exit_code=2,
+            data={"config_version": config.config_version, "required": CONFIG_VERSION},
+        )
+    if preserve_comments and existing_path is not None and existing_path.is_file():
+        try:
+            document = tomlkit.parse(existing_path.read_text(encoding="utf-8"))
+        except tomlkit.exceptions.TOMLKitError as exc:
+            raise LaunchError(
+                f"Failed to parse {existing_path.name}: {exc}",
+                code=CODE_CONFIG_ERROR,
+                exit_code=2,
+                data={"path": str(existing_path)},
+            ) from exc
+        _apply_config_to_document(document, config)
+    else:
+        document = _config_to_tomlkit(config)
+    return tomlkit.dumps(document)
 
 
 def _apply_config_to_document(

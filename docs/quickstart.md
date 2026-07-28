@@ -169,7 +169,7 @@ releaseledger entry lint 1.2.0 --strict
 Use `changelog` to produce review context:
 
 ```bash
-releaseledger changelog 1.2.0 \
+releaseledger changelog preview 1.2.0 \
   --target-changelog CHANGELOG.md \
   --release-date 2026-06-13
 ```

@@ -98,7 +98,10 @@ def test_migration_plan_is_hashed_and_stale_source_is_conflict(tmp_path: Path) -
         mode="copy",
     )
     plan = plan_migration(request)
-    assert plan["schema"] == "releaseledger.migration-plan.v1"
+    assert plan["schema"] == "releaseledger.storage-migration-plan.v2"
+    assert plan["migration_id"]
+    assert plan["project"]["root"] == str(tmp_path.resolve())
+    assert plan["decisions"]["config"]["target_fingerprint"]
     assert str(plan["plan_hash"]).startswith("sha256:")
 
     plan_file = tmp_path / "migration-plan.json"
@@ -109,7 +112,7 @@ def test_migration_plan_is_hashed_and_stale_source_is_conflict(tmp_path: Path) -
     try:
         validate_migration_plan(plan, tmp_path)
     except Exception as exc:
-        assert getattr(exc, "code", None) == "CONFLICT"
+        assert getattr(exc, "code", None) == "migration_source_changed"
     else:  # pragma: no cover - defensive assertion for the conflict contract
         raise AssertionError("stale migration plan was accepted")
 

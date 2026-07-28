@@ -9,3 +9,9 @@ storage = "project"
 
 [ledgers.releaseledger.mounts.indexes]
 storage = "cache"
+
+[ledgers.taskledger.mounts.data]
+storage = "project"
+
+[ledgers.taskledger.mounts.indexes]
+storage = "cache"

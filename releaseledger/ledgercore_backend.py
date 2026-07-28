@@ -1,4 +1,4 @@
-"""Releaseledger sole adapter for Ledgercore 0.5.x public APIs.
+"""Releaseledger sole adapter for Ledgercore 0.6.x public APIs.
 
 This module is the only place in releaseledger that imports detailed
 Ledgercore manifest, layout, binding, validation, and migration APIs.
@@ -79,7 +79,6 @@ from platformdirs import user_cache_path, user_data_path
 from releaseledger.errors import (
     CODE_CONFIG_ERROR,
     CODE_NOT_FOUND,
-    CODE_VALIDATION_ERROR,
     LaunchError,
 )
 
@@ -94,8 +93,17 @@ __all__ = [
     "build_releaseledger_legacy_migration_plan",
     "clear_releaseledger_data_override",
     "ensure_releaseledger_registration",
+    "ensure_releaseledger_config_binding",
+    "expected_releaseledger_storage_binding",
+    "fingerprint_releaseledger_file",
+    "inspect_releaseledger_migration",
+    "read_releaseledger_storage_binding",
+    "recover_releaseledger_migration",
+    "storage_bindings_match",
+    "validate_releaseledger_migration_plan",
     "execute_releaseledger_layout_migration",
     "initialize_releaseledger_locations",
+    "inspect_releaseledger_migration_destinations",
     "load_releaseledger_ledger_layout",
     "plan_releaseledger_layout_migration",
     "prepare_legacy_migration_target",
@@ -211,10 +219,29 @@ def _map_ledgercore_error(
     }
     if extra_data:
         data.update(dict(extra_data))
+    conflict_codes = {
+        "STORAGE_MIGRATION_PLAN_INVALID": "migration_plan_invalid",
+        "STORAGE_MIGRATION_SOURCE_CHANGED": "migration_source_changed",
+        "STORAGE_MIGRATION_DESTINATION_CHANGED": "migration_destination_changed",
+        "STORAGE_MIGRATION_DESTINATION_FOREIGN": "migration_destination_foreign",
+        "STORAGE_MIGRATION_STAGE_COLLISION": "migration_stage_collision",
+        "STORAGE_MIGRATION_BACKUP_COLLISION": "migration_backup_collision",
+        "STORAGE_MIGRATION_CROSS_FILESYSTEM": "migration_cross_filesystem",
+        "STORAGE_MIGRATION_LOCKED": "locked",
+        "STORAGE_MIGRATION_INCOMPLETE_JOURNAL_EXISTS": "migration_incomplete",
+        "STORAGE_MIGRATION_RECOVERY_AMBIGUOUS": "migration_recovery_ambiguous",
+        "STORAGE_MIGRATION_MANUAL_INTERVENTION_REQUIRED": "manual_intervention_required",
+    }
+    public_code = conflict_codes.get(exc.code, code)
+    exit_code = (
+        4
+        if exc.code in conflict_codes
+        else (2 if exc.code.endswith("INVALID_ARGUMENT") else 1)
+    )
     return LaunchError(
         str(exc),
-        code=code,
-        exit_code=2,
+        code=public_code,
+        exit_code=exit_code,
         data=data,
         remediation=remediation or [],
     )
@@ -796,6 +823,119 @@ def initialize_releaseledger_locations(
     return written
 
 
+def ensure_releaseledger_config_binding(
+    prepared_target: PreparedReleaseledgerTarget,
+) -> Any:
+    """Ensure the Ledgercore binding for the tool-config directory exists.
+
+    The Ledgercore migration executor switches the config file atomically. The
+    directory binding is finalized separately because a file copy does not
+    include the sibling ``.ledger-project.toml`` marker.
+    """
+
+    config_layout = SimpleNamespace(
+        tool_config_path=prepared_target.config_path,
+        project_uuid=prepared_target.project_uuid,
+        ledger_name=TOOL_NAME,
+    )
+    try:
+        return initialize_config_binding(config_layout)
+    except LedgerCoreError as exc:
+        raise _map_ledgercore_error(
+            exc,
+            code=CODE_CONFIG_ERROR,
+            extra_data={
+                "mount": "config",
+                "path": str(prepared_target.config_path),
+            },
+        ) from exc
+
+
+def expected_releaseledger_storage_binding(
+    *,
+    project_uuid: str,
+    tool: str,
+    mount: str,
+    storage: str = "project",
+) -> StorageBinding:
+    """Construct a Ledgercore binding for legacy migration inspection."""
+
+    return StorageBinding(
+        schema_version=1,
+        layout_version=3,
+        project_uuid=project_uuid,
+        project_name=None,
+        tool=tool,
+        mount=mount,
+        storage=cast(StorageKind, storage),
+    )
+
+
+def read_releaseledger_storage_binding(path: Path) -> StorageBinding:
+    """Read a binding marker through the sole Ledgercore adapter."""
+
+    from ledgercore.storage_binding import read_storage_binding
+
+    return read_storage_binding(path)
+
+
+def storage_bindings_match(actual: StorageBinding, expected: StorageBinding) -> bool:
+    """Compare bindings through the sole Ledgercore adapter."""
+
+    from ledgercore.storage_binding import storage_bindings_match as _match
+
+    return _match(actual, expected)
+
+
+def fingerprint_releaseledger_file(path: Path) -> Any:
+    """Fingerprint a migration config file through Ledgercore."""
+
+    from ledgercore.migration import fingerprint_storage_file
+
+    return fingerprint_storage_file(path)
+
+
+def validate_releaseledger_migration_plan(plan: Any, project_root: Path) -> Any:
+    """Validate a migration plan through Ledgercore."""
+
+    from ledgercore.migration import validate_storage_migration_plan
+
+    return validate_storage_migration_plan(plan, project_root=project_root)
+
+
+def inspect_releaseledger_migration(journal_path: Path) -> Any:
+    """Inspect a Ledgercore migration journal through the adapter."""
+
+    from ledgercore.migration import inspect_storage_migration
+
+    return inspect_storage_migration(journal_path)
+
+
+def recover_releaseledger_migration(
+    journal_path: Path,
+    *,
+    policy: Literal["auto", "resume", "rollback"],
+    quiescence_check: Callable[[], None],
+    validate_activated: Callable[[int], None],
+    finalize: Callable[[], None],
+) -> Any:
+    """Recover a Ledgercore journal with Releaseledger lifecycle hooks."""
+
+    from ledgercore.migration import StorageMigrationHooks, recover_storage_migration
+
+    return recover_storage_migration(
+        journal_path,
+        policy=policy,
+        hooks=StorageMigrationHooks(
+            quiescence_check=quiescence_check,
+            validate_activated=validate_activated,
+            finalize=finalize,
+            requires_activated_validation=True,
+            requires_finalization=True,
+        ),
+    )
+
+
 def set_releaseledger_data_target(
     start: Path,
     *,
@@ -1021,6 +1161,32 @@ def plan_releaseledger_layout_migration(
         ) from exc
 
 
+def inspect_releaseledger_migration_destinations(
+    prepared_target: PreparedReleaseledgerTarget,
+) -> dict[str, Any]:
+    """Inspect all Ledgercore-owned migration destinations read-only."""
+
+    from ledgercore.migration import inspect_storage_migration_destination
+
+    return {
+        DATA_MOUNT: inspect_storage_migration_destination(
+            path=prepared_target.data_root,
+            kind="directory",
+            expected_binding=prepared_target.data_binding,
+        ),
+        "config": inspect_storage_migration_destination(
+            path=prepared_target.config_path,
+            kind="file",
+            expected_binding=prepared_target.config_binding,
+        ),
+        INDEXES_MOUNT: inspect_storage_migration_destination(
+            path=prepared_target.indexes_root,
+            kind="directory",
+            expected_binding=prepared_target.indexes_binding,
+        ),
+    }
+
+
 def build_releaseledger_legacy_migration_plan(
     *,
     prepared_target: PreparedReleaseledgerTarget,
@@ -1030,8 +1196,8 @@ def build_releaseledger_legacy_migration_plan(
     migration_id: str | None = None,
     data_action: str = "create",
     config_action: str = "create",
-    expected_data_fingerprint: str | None = None,
-    expected_config_fingerprint: str | None = None,
+    expected_data_fingerprint: Any | None = None,
+    expected_config_fingerprint: Any | None = None,
 ) -> Any:
     """Build an immutable StorageMigrationPlan from a staged legacy source.
 
@@ -1051,7 +1217,13 @@ def build_releaseledger_legacy_migration_plan(
     """
     import uuid
 
-    from ledgercore.migration import StorageMigrationItem, StorageMigrationPlan
+    from ledgercore.migration import (
+        DestinationPrecondition,
+        StorageMigrationItem,
+        StorageMigrationPlan,
+        fingerprint_storage_directory,
+        fingerprint_storage_file,
+    )
 
     if migration_id is None:
         migration_id = str(uuid.uuid4())
@@ -1070,17 +1242,21 @@ def build_releaseledger_legacy_migration_plan(
     elif config_action == "noop":
         config_policy = "noop-if-exact"
 
-    # Compute expected destination fingerprints if not provided
-    # Fall back to create-only if destination doesn't exist
+    # Fingerprints are typed Ledgercore values. The staged source is always
+    # the authoritative target fingerprint; destination fingerprints are
+    # captured independently as exact before-state preconditions.
+    staged_data_fingerprint = fingerprint_storage_directory(staged_data_root)
+    staged_config_fingerprint = fingerprint_storage_file(staged_config_path)
+
     if expected_data_fingerprint is None and data_policy != "create-only":
-        expected_data_fingerprint = _compute_destination_fingerprint(
-            prepared_target.data_root
+        expected_data_fingerprint = _typed_destination_fingerprint(
+            prepared_target.data_root, "directory"
         )
         if expected_data_fingerprint is None and data_policy == "replace-owned":
             data_policy = "create-only"
     if expected_config_fingerprint is None and config_policy != "create-only":
-        expected_config_fingerprint = _compute_config_fingerprint(
-            prepared_target.config_path
+        expected_config_fingerprint = _typed_destination_fingerprint(
+            prepared_target.config_path, "file"
         )
         if expected_config_fingerprint is None and config_policy == "replace-owned":
             config_policy = "create-only"
@@ -1092,7 +1268,9 @@ def build_releaseledger_legacy_migration_plan(
     # Indexes item: rebuild at destination (safe, cache-only, first)
     # Use replace-owned only if destination exists and is owned,
     # otherwise use create-only
-    indexes_fp = _compute_destination_fingerprint(prepared_target.indexes_root)
+    indexes_fp = _typed_destination_fingerprint(
+        prepared_target.indexes_root, "directory"
+    )
     indexes_policy = "replace-owned" if indexes_fp else "create-only"
     indexes_item = StorageMigrationItem(
         component="mount",
@@ -1106,7 +1284,13 @@ def build_releaseledger_legacy_migration_plan(
         destination_policy=cast(
             Literal["create-only", "replace-owned", "noop-if-exact"], indexes_policy
         ),
-        expected_destination_fingerprint=indexes_fp,
+        expected_source_fingerprint=None,
+        expected_before=DestinationPrecondition(
+            state="owned" if indexes_fp is not None else "absent",
+            fingerprint=indexes_fp,
+        ),
+        expected_target_fingerprint=None,
+        destination_kind="directory",
     )
 
     # Data item: copy staged data to canonical data mount (durable, second)
@@ -1122,7 +1306,13 @@ def build_releaseledger_legacy_migration_plan(
         destination_policy=cast(
             Literal["create-only", "replace-owned", "noop-if-exact"], data_policy
         ),
-        expected_destination_fingerprint=expected_data_fingerprint,
+        expected_source_fingerprint=staged_data_fingerprint,
+        expected_before=DestinationPrecondition(
+            state="owned" if expected_data_fingerprint is not None else "absent",
+            fingerprint=expected_data_fingerprint,
+        ),
+        expected_target_fingerprint=staged_data_fingerprint,
+        destination_kind="directory",
     )
 
     # Config item: copy the transformed config (durable, last)
@@ -1138,7 +1328,13 @@ def build_releaseledger_legacy_migration_plan(
         destination_policy=cast(
             Literal["create-only", "replace-owned", "noop-if-exact"], config_policy
         ),
-        expected_destination_fingerprint=expected_config_fingerprint,
+        expected_source_fingerprint=staged_config_fingerprint,
+        expected_before=DestinationPrecondition(
+            state="owned" if expected_config_fingerprint is not None else "absent",
+            fingerprint=expected_config_fingerprint,
+        ),
+        expected_target_fingerprint=staged_config_fingerprint,
+        destination_kind="file",
     )
 
     plan = StorageMigrationPlan(
@@ -1152,38 +1348,20 @@ def build_releaseledger_legacy_migration_plan(
     return plan
 
 
-def _compute_destination_fingerprint(path: Path) -> str | None:
-    """Compute the Ledgercore fingerprint of a destination directory.
+def _typed_destination_fingerprint(path: Path, kind: str) -> Any | None:
+    """Return a typed destination fingerprint or ``None`` when absent."""
 
-    Returns the encoded fingerprint string, or None if the path doesn't
-    exist or can't be fingerprinted.
-    """
-    if not path.is_dir():
-        return None
-    try:
-        from ledgercore.migration import fingerprint_storage_directory
-
-        fp = fingerprint_storage_directory(path)
-        return fp.encoded
-    except Exception:
-        return None
-
-
-def _compute_config_fingerprint(path: Path) -> str | None:
-    """Compute the Ledgercore fingerprint of a config file.
-
-    Returns the encoded fingerprint string, or None if the path doesn't
-    exist or can't be fingerprinted.
-    """
-    if not path.is_file():
-        return None
-    try:
+    if kind == "file":
+        if not path.is_file():
+            return None
         from ledgercore.migration import fingerprint_storage_file
 
-        fp = fingerprint_storage_file(path)
-        return fp.encoded
-    except Exception:
+        return fingerprint_storage_file(path)
+    if not path.is_dir():
         return None
+    from ledgercore.migration import fingerprint_storage_directory
+
+    return fingerprint_storage_directory(path)
 
 
 def prepare_legacy_migration_target(
@@ -1367,37 +1545,65 @@ def prepare_legacy_migration_target(
 def execute_releaseledger_layout_migration(
     plan: Any,
     *,
-    mode: str = "copy",
     verify: str = "sha256",
     quiescence_check: Callable[[], None] | None = None,
+    validate_staged: Callable[[int], None] | None = None,
+    validate_activated: Callable[[int], None] | None = None,
+    finalize: Callable[[], None] | None = None,
     project_root: Path | None = None,
 ) -> Any:
-    """Run a Releaseledger migration plan through :mod:`ledgercore.migration`.
+    """Run a copy-only plan through Ledgercore's schema-3 executor.
 
-    Uses only the ledgercore 0.5.0 executor contract. Does not pass
-    ``staged_transform``, which is not in the declared minimum version.
+    The domain lock callback is mandatory for durable migration. Physical
+    activation, journaling, backup handling, and recovery remain Ledgercore
+    responsibilities; Releaseledger contributes only lifecycle hooks.
     """
 
-    from ledgercore.migration import execute_storage_migration
+    from ledgercore.migration import StorageMigrationHooks, execute_storage_migration
 
-    def _safe_check() -> None:
-        if quiescence_check is None:
-            return
+    if quiescence_check is None:
+        raise LaunchError(
+            "durable migration requires a real Releaseledger quiescence callback",
+            code="migration_quiescence_required",
+            exit_code=4,
+            data={"tool": TOOL_NAME},
+        )
+
+    def _check() -> None:
         try:
             quiescence_check()
         except Exception as exc:  # pragma: no cover - domain-defined
             raise LaunchError(
                 "quiescence check failed",
-                code=CODE_VALIDATION_ERROR,
-                exit_code=1,
+                code="migration_quiescence_failed",
+                exit_code=4,
                 data={"tool": TOOL_NAME},
             ) from exc
 
     try:
+        hooks = StorageMigrationHooks(
+            quiescence_check=_check,
+            validate_staged=validate_staged,
+            validate_activated=validate_activated,
+            finalize=finalize,
+            requires_staged_validation=validate_staged is not None,
+            requires_activated_validation=validate_activated is not None,
+            requires_finalization=finalize is not None,
+        )
+        # Ledgercore activates by same-directory rename.  Some valid mounts
+        # (notably a fresh cache checkout) have a destination whose parent has
+        # not been materialized yet.  Materialize only the empty parent
+        # containers; Ledgercore still owns all destination, stage, backup,
+        # binding, journal, and activation mutations.
+        for item in getattr(plan, "items", ()):
+            if getattr(item, "strategy", None) == "noop":
+                continue
+            destination = getattr(item, "destination", None)
+            if isinstance(destination, Path):
+                destination.parent.mkdir(parents=True, exist_ok=True)
         kwargs: dict[str, object] = {
-            "mode": mode,
             "verify": verify,
-            "quiescence_check": _safe_check,
+            "hooks": hooks,
         }
         if project_root is not None:
             kwargs["project_root"] = project_root
@@ -1406,12 +1612,12 @@ def execute_releaseledger_layout_migration(
         raise _map_ledgercore_error(
             exc,
             code=CODE_CONFIG_ERROR,
-            extra_data={"mode": mode},
+            extra_data={"tool": TOOL_NAME},
         ) from exc
     except (OSError, ValueError) as exc:
         raise LaunchError(
             "storage migration execution failed",
-            code=CODE_VALIDATION_ERROR,
-            exit_code=2,
-            data={"mode": mode},
+            code="migration_activation_failed",
+            exit_code=1,
+            data={"tool": TOOL_NAME},
         ) from exc

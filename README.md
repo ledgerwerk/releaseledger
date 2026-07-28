@@ -23,9 +23,10 @@ releaseledger commands
 releaseledger --root PATH --json doctor
 ```
 
-Legacy `--cwd`, root command aliases, and `storage migrate` remain available
-with structured deprecation warnings. Use `migrate plan/apply/recover/cleanup`
-for the explicit storage migration lifecycle.
+The canonical CLI uses `--root` and the explicit copy-first
+`migrate plan/apply/recover/cleanup` lifecycle. Legacy `--cwd` and
+`storage migrate` remain available only as deprecated compatibility aliases
+with structured warnings.
 
 typed file-storage primitives. It does not import `taskledger`, inspect
 `.taskledger/`, or validate task state. Cross-ledger provenance is represented
@@ -230,7 +231,7 @@ releaseledger entry prompt VERSION [--source-ref REF]...
                                    [--format markdown|json]
                                    [--output PATH]
 
-releaseledger changelog VERSION [--format markdown|json] [--output PATH]
+releaseledger changelog preview VERSION [--format markdown|json] [--output PATH]
                                 [--include-internal]
                                 [--target-changelog PATH]
                                 [--release-date YYYY-MM-DD]
@@ -299,7 +300,7 @@ releaseledger config set releaseledger_dir PATH [--external-dir]
 Root options:
 
 ```text
-releaseledger --cwd PATH ...
+releaseledger --root PATH ...
 releaseledger --json ...
 releaseledger --version
 ```

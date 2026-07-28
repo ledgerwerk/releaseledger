@@ -60,6 +60,7 @@ class CLIState:
 
     root: Path
     json_output: bool = False
+    legacy_cwd: bool = False
     warnings: list[CLIWarning] = field(default_factory=list)
 
     @property
@@ -190,6 +191,20 @@ def emit_payload(
             events=tuple({"id": str(event)} for event in (events or [])),
             warnings=tuple(collected),
         ).as_mapping()
+        # ``--cwd`` is a deprecated compatibility surface.  Keep its legacy
+        # top-level fields available while canonical ``--root`` callers use
+        # the Ledgerwerk v1 envelope exclusively.
+        if any(
+            warning.code == "deprecated_option" and warning.replacement == "--root"
+            for warning in collected
+        ):
+            payload["result_type"] = result_type
+            payload["command"] = command.replace(" ", ".")
+            legacy_events = result.get("events")
+            if isinstance(legacy_events, list):
+                payload["events"] = legacy_events
+        if isinstance(result.get("ok"), bool):
+            payload["ok"] = result["ok"]
         typer.echo(render_json(payload))
         return
     for warning in collected:
@@ -205,6 +220,7 @@ def emit_error(
     json_output: bool,
     human: str | None = None,
     result: dict[str, object] | None = None,
+    result_type: str | None = None,
     events: list[object] | None = None,
     warnings: Sequence[CLIWarning] = (),
 ) -> None:
@@ -228,6 +244,19 @@ def emit_error(
                 result = embedded
         if result is not None:
             payload["result"] = result
+        if any(
+            warning.code == "deprecated_option" and warning.replacement == "--root"
+            for warning in collected
+        ):
+            # Preserve the pre-v1 machine code spelling for deprecated
+            # ``--cwd`` callers.  Canonical callers receive the normalized
+            # public code from ``to_error_payload``.
+            error_payload = payload.get("error")
+            if isinstance(error_payload, dict):
+                error_payload["code"] = error.code
+            payload["command"] = command.replace(" ", ".")
+            if result_type is not None:
+                payload["result_type"] = result_type
         typer.echo(render_json(payload))
         return
     for warning in collected:
@@ -253,6 +282,13 @@ def write_text_output(path: Path, text: str) -> Path:
 
     Used for ``--output`` file rendering (changelogs, JSON dumps).
     """
+    if str(path) == "-":
+        import sys
+
+        sys.stdout.write(text)
+        if not text.endswith("\n"):
+            sys.stdout.write("\n")
+        return path
     try:
         ledgercore.atomic_write_text(path, text)
     except ledgercore.AtomicWriteError as exc:  # pragma: no cover - fs failure

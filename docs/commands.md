@@ -4,7 +4,7 @@
 
 ```text
 releaseledger --root PATH ...
-releaseledger --cwd PATH ...        # deprecated compatibility alias
+releaseledger --root PATH ...
 releaseledger --json ...
 releaseledger --version
 ```
@@ -38,18 +38,20 @@ releaseledger migrate status
 releaseledger migrate plan storage-layout [--storage ...] [--output PLAN.json]
 releaseledger migrate apply storage-layout [--plan-file PLAN.json]
                              --reason TEXT [--dry-run]
-releaseledger migrate recover [--journal PATH]
+releaseledger migrate recover --journal PATH [--policy auto|resume|rollback] [--dry-run]
 releaseledger migrate cleanup storage-layout [--dry-run]
                              [--yes --reason TEXT]
 releaseledger config show
 releaseledger config validate [--strict]
 ```
 
-Migration plans use `releaseledger.migration-plan.v1`, include source and
-destination fingerprints, and are rejected with exit `4` if the source
-changes before apply. Cleanup is explicit, confirmation-gated, and requires
-an audit reason. `storage migrate ...` remains a deprecated compatibility
-entry point for the named migration commands.
+Migration plans use `releaseledger.storage-migration-plan.v2`, carry one shared
+migration ID, exact source/before/target fingerprints, and are rejected with
+exit `4` if source or destination state changes before apply. Physical state
+belongs to the Ledgercore schema-3 journal; Releaseledger writes a completion
+receipt only after commit. Recovery policies are explicit and dry-run is
+read-only. Cleanup is separate, confirmation-gated, and requires a reason.
+`storage migrate ...` remains a deprecated compatibility entry point.
 
 ## Project commands
 

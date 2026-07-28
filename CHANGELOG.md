@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Adopted the Ledgercore 0.6 copy-first migration contract with typed plans, schema-3 recovery, lifecycle hooks, and explicit legacy cleanup.
+
 ## [0.3.4] - 2026-07-14
 
 ### Added
