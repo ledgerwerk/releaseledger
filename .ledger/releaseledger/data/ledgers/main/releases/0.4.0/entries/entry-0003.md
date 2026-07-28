@@ -12,13 +12,13 @@ status: accepted
 audience: null
 scopes: []
 source_refs:
-- git:61707b715f2e737bdbab08bfa1dd0ecd071f536f
+  - git:61707b715f2e737bdbab08bfa1dd0ecd071f536f
 paths:
-- pyproject.toml
+  - pyproject.toml
 issues: []
 prs: []
 sources:
-- git:61707b715f2e737bdbab08bfa1dd0ecd071f536f
+  - git:61707b715f2e737bdbab08bfa1dd0ecd071f536f
 contributors: []
 breaking: false
 internal: false
