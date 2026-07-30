@@ -400,69 +400,89 @@ def ensure_canonical_project(
     adopt_empty: bool = False,
     force_config: bool = False,
 ) -> dict[str, object]:
-    """Create or refresh a schema-3 project with the Releaseledger registration."""
+    """Create or refresh a schema-3 project with the Releaseledger registration.
+
+    State detection:
+    1. No manifest exists: create everything.
+    2. Valid manifest, no Releaseledger registration: add registration only.
+    3. Registration exists, config/bindings missing: complete initialization.
+    4. Complete Releaseledger project: true idempotent no-op.
+    5. Malformed manifest: fail without mutation.
+    """
 
     workspace_root = Path(workspace_root).resolve()
     manifest_path = workspace_root / ".ledger" / "ledger.toml"
 
-    # Guard: refuse to create canonical shell alongside nonempty legacy data.
-    # This prevents the trap where init creates a canonical shell that blocks
-    # migration because the destination is now 'owned-divergent'.
-    if not manifest_path.is_file() or force:
-        _check_legacy_data_before_init(workspace_root, force)
+    # ``force`` is a deprecated alias for ``force_config``. It must never
+    # bypass the legacy-data guard or rewrite existing registration mounts.
+    if force and not force_config:
+        import warnings
 
-    if manifest_path.is_file() and not force:
-        # Idempotent: if both registration and config exist, return a
-        # summary without rewriting anything.
+        warnings.warn(
+            "--force is deprecated; use --force-config instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        force_config = True
+
+    project: ReleaseledgerProject | None = None
+    registration_added = False
+    project_uuid_resolved = project_uuid
+    project_name_resolved = project_name
+
+    if manifest_path.is_file():
         try:
             project = load_releaseledger_project(workspace_root)
         except LaunchError as exc:
-            raise LaunchError(
-                f"existing manifest at {manifest_path} is not a valid "
-                "Releaseledger schema-3 project.",
-                code=CODE_CONFLICT,
-                exit_code=2,
-                data={"path": str(manifest_path), "cause": exc.code},
-            ) from exc
-        config_path = project.config_path
-        # force_config: backup and replace the tool config.
-        if force_config and config_path.is_file():
-            import shutil
+            if exc.code == CODE_NOT_FOUND:
+                # The shared project is valid but Releaseledger is not
+                # registered. Fall through to registration creation after
+                # checking for legacy data.
+                _check_legacy_data_before_init(workspace_root, force=False)
+                # Preserve the existing project identity from the manifest.
+                project_uuid_resolved = project_uuid or exc.data.get(
+                    "project_uuid", project_uuid
+                )
+            else:
+                # Malformed schema, invalid local override, unsupported
+                # mount, etc. These remain failures.
+                raise LaunchError(
+                    f"existing manifest at {manifest_path} is not a valid "
+                    "Ledgercore schema-3 project.",
+                    code=CODE_CONFLICT,
+                    exit_code=2,
+                    data={"path": str(manifest_path), "cause": exc.code},
+                ) from exc
+    else:
+        _check_legacy_data_before_init(workspace_root, force=False)
 
-            backup = config_path.with_suffix(config_path.suffix + ".bak")
-            shutil.copy2(config_path, backup)
-            write_project_config(config_path, ProjectConfig())
-        written: dict[str, object] = {
-            "kind": "project_init_idempotent",
-            "project_root": str(workspace_root),
-            "manifest_path": str(manifest_path),
-            "config_path": str(config_path),
-            "project_uuid": project.project_uuid,
-            "project_name": project.project_name,
-            "data_root": str(project.data_root),
-            "data_storage": str(project.layout.data_storage),
-            "indexes_root": str(project.indexes_root),
-            "ledger_ref": project.config.ledger_ref,
-            "config_version": project.config.config_version,
-        }
-        return written
+    # If the project was not loaded (no manifest or missing registration),
+    # add the Releaseledger registration.
+    if project is None:
+        manifest = _backend.ensure_releaseledger_registration(
+            workspace_root,
+            project_uuid=project_uuid_resolved,
+            project_name=project_name_resolved,
+            data_storage=data_storage,
+            external_root=external_root,
+        )
+        registration_added = True
+        project = load_releaseledger_project(workspace_root)
+    else:
+        manifest = project.layout.loaded.manifest
 
-    manifest = _backend.ensure_releaseledger_registration(
-        workspace_root,
-        project_uuid=project_uuid,
-        project_name=project_name,
+    # Check if the Releaseledger project is already complete.
+    if _is_complete_releaseledger_project(project) and not force_config:
+        return _idempotent_init_result(project)
+
+    # Materialize missing Releaseledger state.
+    _materialize_releaseledger_project(
+        project,
+        force_config=force_config,
+        local_override=local_override,
         data_storage=data_storage,
         external_root=external_root,
     )
-    project = load_releaseledger_project(workspace_root)
-    _backend.initialize_releaseledger_locations(
-        project.layout,
-        initialize_config=True,
-        initialize_data=True,
-        initialize_indexes=True,
-    )
-    if not project.config_path.is_file() or force_config:
-        write_project_config(project.config_path, ProjectConfig())
 
     # If local_override is requested, create it via the adapter.
     if local_override and data_storage != "project":
@@ -484,8 +504,10 @@ def ensure_canonical_project(
     # Write empty indexes.
     rebuild_indexes_for_paths(paths)
 
+    mode = "registered" if registration_added else "repaired"
     return {
         "kind": "project_init",
+        "mode": mode,
         "project_root": str(workspace_root),
         "manifest_path": str(manifest_path),
         "config_path": str(project.config_path),
@@ -497,12 +519,102 @@ def ensure_canonical_project(
         "ledger_ref": project.config.ledger_ref,
         "config_version": CONFIG_VERSION,
         "schema_version": manifest.schema_version,
+        "manifest_changed": registration_added,
+        "config_created": True,
+        "bindings_created": ["config", "data", "indexes"],
+        "preserved_ledgers": [
+            name for name in manifest.ledgers if name != "releaseledger"
+        ],
         "created": {
             "releases_dir": str(paths.releases_dir),
             "events_dir": str(paths.events_dir),
             "indexes_dir": str(paths.indexes_dir),
         },
     }
+
+
+def _is_complete_releaseledger_project(project: ReleaseledgerProject) -> bool:
+    """Return True when all required Releaseledger state exists.
+
+    Checks that the config file, binding markers, and required durable
+    directories are present. Missing cache indexes are tolerated because
+    they can be legitimately rebuilt.
+    """
+    if not project.config_path.is_file():
+        return False
+    if not project.config_binding_path.is_file():
+        return False
+    if not project.data_binding_path.is_file():
+        return False
+    if not project.indexes_binding_path.is_file():
+        return False
+    # Check that the durable directories exist.
+    ledger_ref = project.config.ledger_ref
+    ledger_dir = project.data_root / "ledgers" / ledger_ref
+    if not ledger_dir.is_dir():
+        return False
+    releases_dir = ledger_dir / "releases"
+    if not releases_dir.is_dir():
+        return False
+    events_dir = ledger_dir / "events"
+    if not events_dir.is_dir():
+        return False
+    return True
+
+
+def _idempotent_init_result(project: ReleaseledgerProject) -> dict[str, object]:
+    """Return a true idempotent result for a complete project."""
+    return {
+        "kind": "project_init_idempotent",
+        "mode": "unchanged",
+        "project_root": str(project.project_root),
+        "manifest_path": str(project.layout.manifest_path),
+        "config_path": str(project.config_path),
+        "project_uuid": project.project_uuid,
+        "project_name": project.project_name,
+        "data_root": str(project.data_root),
+        "data_storage": str(project.layout.data_storage),
+        "indexes_root": str(project.indexes_root),
+        "ledger_ref": project.config.ledger_ref,
+        "config_version": project.config.config_version,
+        "manifest_changed": False,
+        "config_created": False,
+        "bindings_created": [],
+        "preserved_ledgers": [
+            name
+            for name in project.layout.loaded.manifest.ledgers
+            if name != "releaseledger"
+        ],
+    }
+
+
+def _materialize_releaseledger_project(
+    project: ReleaseledgerProject,
+    *,
+    force_config: bool,
+    local_override: bool,
+    data_storage: str,
+    external_root: str | None,
+) -> None:
+    """Materialize missing Releaseledger state for an existing project.
+
+    Creates config, bindings, and directories as needed.
+    """
+    _backend.initialize_releaseledger_locations(
+        project.layout,
+        initialize_config=True,
+        initialize_data=True,
+        initialize_indexes=True,
+    )
+    if not project.config_path.is_file() or force_config:
+        if force_config and project.config_path.is_file():
+            import shutil
+
+            backup = project.config_path.with_suffix(
+                project.config_path.suffix + ".bak"
+            )
+            shutil.copy2(project.config_path, backup)
+        write_project_config(project.config_path, ProjectConfig())
 
 
 # ---------------------------------------------------------------------------

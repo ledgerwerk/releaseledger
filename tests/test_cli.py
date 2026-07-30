@@ -137,7 +137,10 @@ class TestPhase2ConfigLayout:
         result = runner.invoke(app, ["--cwd", str(tmp_path), "init"])
         assert result.exit_code == 0, result.stdout
         normalized = result.stdout.replace("\\\\", "/")
-        assert "initialized releaseledger in .ledger/releaseledger/data" in normalized
+        assert (
+            "registered releaseledger in existing Ledger project .ledger/releaseledger/data"
+            in normalized
+        )
         assert "wrote .ledger/ledger.toml" in normalized
 
     def test_init_refuses_overwrite_without_force(self, tmp_path: Path) -> None:
@@ -145,7 +148,7 @@ class TestPhase2ConfigLayout:
         result = runner.invoke(app, ["--cwd", str(tmp_path), "init"])
         # Schema-3 init is idempotent: re-running returns a summary, not an error.
         assert result.exit_code == 0, result.stdout
-        assert "initialized releaseledger in" in result.stdout
+        assert "releaseledger is already initialized in" in result.stdout
 
     def test_init_force_overwrites_config(self, tmp_path: Path) -> None:
         _init_project(tmp_path)

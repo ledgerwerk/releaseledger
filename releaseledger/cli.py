@@ -320,10 +320,24 @@ def init_command(
             display_str = display.as_posix()
         except ValueError:
             display_str = str(data_root)
-        human = (
-            f"initialized releaseledger in {display_str}\n"
-            "wrote .ledger/ledger.toml and .ledger/releaseledger/config.toml"
-        )
+        mode = result.get("mode", "")
+        if mode == "unchanged":
+            human = f"releaseledger is already initialized in {display_str}"
+        elif mode == "registered":
+            human = (
+                f"registered releaseledger in existing Ledger project {display_str}\n"
+                "wrote .ledger/ledger.toml and .ledger/releaseledger/config.toml"
+            )
+        elif mode == "repaired":
+            human = (
+                f"completed releaseledger initialization in {display_str}\n"
+                "wrote .ledger/ledger.toml and .ledger/releaseledger/config.toml"
+            )
+        else:
+            human = (
+                f"initialized releaseledger in {display_str}\n"
+                "wrote .ledger/ledger.toml and .ledger/releaseledger/config.toml"
+            )
         return result, [], human
 
     run_command(

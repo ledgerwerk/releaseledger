@@ -1,19 +1,19 @@
 schema_version: 1
 object_type: active_task
 file_version: v2
-task_id: task-0001
-activated_at: "2026-07-28T06:38:41Z"
+task_id: task-0002
+activated_at: "2026-07-30T17:23:00Z"
 activated_by:
   actor_type: user
   actor_name: u0_a992
   tool: null
   session_id: null
   host: localhost
-  pid: 24265
+  pid: 4647
   actor_id: null
   role: null
   harness_id: null
   command_pid: null
   pid_scope: null
 reason: null
-previous_task_id: null
+previous_task_id: task-0001
