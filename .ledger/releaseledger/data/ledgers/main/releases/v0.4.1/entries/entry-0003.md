@@ -7,7 +7,8 @@ versioning:
 entry_id: entry-0003
 release_version: v0.4.1
 kind: added
-summary: Added mode-specific CLI output messages for init command showing unchanged,
+summary:
+  Added mode-specific CLI output messages for init command showing unchanged,
   registered, repaired, or created status
 status: accepted
 audience: null

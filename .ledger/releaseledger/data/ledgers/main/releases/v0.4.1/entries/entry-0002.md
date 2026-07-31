@@ -7,7 +7,8 @@ versioning:
 entry_id: entry-0002
 release_version: v0.4.1
 kind: changed
-summary: Changed --force flag to a deprecated alias for --force-config that no longer
+summary:
+  Changed --force flag to a deprecated alias for --force-config that no longer
   rewrites existing storage mounts
 status: accepted
 audience: null
