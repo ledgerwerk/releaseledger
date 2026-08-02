@@ -29,7 +29,11 @@ from releaseledger.services.git_sources import (
     resolve_release_snapshot,
 )
 from releaseledger.services.releases import check_release_chain, reconcile_releases
-from releaseledger.storage.store import load_entries, load_release
+from releaseledger.storage.store import (
+    load_commit_audit_sheet,
+    load_entries,
+    load_release,
+)
 
 __all__ = [
     "build_release_review",
@@ -276,7 +280,7 @@ def _compute_git_coverage(
     if git_block is None:
         return True, 0
     git_coverage_ok = all(
-        row["status"] == COVERAGE_COVERED
+        bool(row.get("gate_satisfied", row["status"] == COVERAGE_COVERED))
         for row in coverage
         if str(row.get("source_ref", "")).startswith("git:")
     )
@@ -284,7 +288,7 @@ def _compute_git_coverage(
         1
         for row in coverage
         if str(row.get("source_ref", "")).startswith("git:")
-        and row["status"] != COVERAGE_COVERED
+        and not bool(row.get("gate_satisfied", row["status"] == COVERAGE_COVERED))
     )
     return git_coverage_ok, git_missing_count
 
@@ -435,6 +439,8 @@ def _build_review_recommendations(
     """Build deterministic review recommendations."""
     recommendations: list[str] = []
     for row in coverage:
+        if row.get("gate_satisfied") is True:
+            continue
         rec = _coverage_recommendation(str(row["source_ref"]), str(row["status"]))
         if rec is not None:
             recommendations.append(rec)
@@ -466,6 +472,7 @@ def _compute_coverage(
     include_internal: bool,
     git_block: dict[str, object] | None = None,
     git_ref_map: dict[str, object] | None = None,
+    audit_rows: dict[str, object] | None = None,
 ) -> list[dict[str, object]]:
     """Build coverage rows from expected refs and entries."""
     by_ref: dict[str, list[ReleaseEntryRecord]] = {}
@@ -484,6 +491,65 @@ def _compute_coverage(
             "status": label,
             **breakdown,
         }
+        public_accepted_ids = [
+            entry.entry_id
+            for entry in matching
+            if entry.status == "accepted" and not entry.internal
+        ]
+        internal_accepted_ids = [
+            entry.entry_id
+            for entry in matching
+            if entry.status == "accepted" and entry.internal
+        ]
+        row["public_accepted_entry_ids"] = _dedupe_preserve_order(
+            public_accepted_ids
+        )
+        row["internal_accepted_entry_ids"] = _dedupe_preserve_order(
+            internal_accepted_ids
+        )
+        if ref.startswith("git:") and audit_rows is not None:
+            audit_row = audit_rows.get(ref)
+            decision = getattr(audit_row, "decision", None)
+            inspected = bool(getattr(audit_row, "inspected", False))
+            inspected_paths = tuple(getattr(audit_row, "inspected_paths", ()))
+            observed_behavior = str(getattr(audit_row, "observed_behavior", ""))
+            evidence_complete = bool(
+                audit_row is not None
+                and decision != "needs_review"
+                and inspected
+                and inspected_paths
+                and observed_behavior.strip()
+            )
+            row["audit_decision"] = decision
+            if not evidence_complete:
+                row["coverage_requirement"] = "unresolved"
+                row["gate_satisfied"] = False
+                row["accounted_as"] = "unresolved"
+            elif decision in {"accepted", "grouped"}:
+                row["coverage_requirement"] = "public_entry"
+                row["gate_satisfied"] = bool(public_accepted_ids)
+                row["accounted_as"] = (
+                    "public_entry" if public_accepted_ids else "unresolved"
+                )
+            elif decision == "internal":
+                if include_internal:
+                    row["coverage_requirement"] = "internal_entry"
+                    row["gate_satisfied"] = bool(internal_accepted_ids)
+                    row["accounted_as"] = (
+                        "internal_entry" if internal_accepted_ids else "unresolved"
+                    )
+                else:
+                    row["coverage_requirement"] = "none_for_public"
+                    row["gate_satisfied"] = True
+                    row["accounted_as"] = "internal_audit"
+            elif decision == "rejected":
+                row["coverage_requirement"] = "none_for_public"
+                row["gate_satisfied"] = True
+                row["accounted_as"] = "rejected_audit"
+            else:
+                row["coverage_requirement"] = "unresolved"
+                row["gate_satisfied"] = False
+                row["accounted_as"] = "unresolved"
         if git_block is not None:
             cand_obj = git_ref_map.get(ref) if git_ref_map is not None else None
             if ref.startswith("git:") and cand_obj is not None:
@@ -531,6 +597,12 @@ def build_release_review(
     release = load_release(workspace_root, version)
     statuses = tuple(normalize_entry_status(value) for value in include_statuses)
     entries = load_entries(workspace_root, version)
+    audit_sheet = load_commit_audit_sheet(workspace_root, version)
+    audit_rows = (
+        {row.source_ref: row for row in audit_sheet.rows}
+        if audit_sheet is not None
+        else None
+    )
 
     # 1. Release payload.
     release_block: dict[str, object] = {
@@ -569,6 +641,7 @@ def build_release_review(
         include_internal=include_internal,
         git_block=git_block,
         git_ref_map=git_ref_map,
+        audit_rows=audit_rows,
     )
 
     # 4. Entry counts over all recorded entries (independent of include scope).
@@ -633,7 +706,10 @@ def build_release_review(
     )
     # Coverage is satisfied when every expected ref is covered; with no
     # expected refs, coverage is trivially satisfied.
-    coverage_ok = all(row["status"] == COVERAGE_COVERED for row in coverage)
+    coverage_ok = all(
+        bool(row.get("gate_satisfied", row["status"] == COVERAGE_COVERED))
+        for row in coverage
+    )
     lint_ok = lint_summary["errors"] == 0
     changelog_ok = bool(changelog_block.get("dry_run_ok", False))
 
