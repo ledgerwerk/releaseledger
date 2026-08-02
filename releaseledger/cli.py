@@ -2411,6 +2411,12 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
     coverage_list = coverage if isinstance(coverage, list) else []
     release_block = result.get("release")
     release_dict = release_block if isinstance(release_block, dict) else {}
+    chain_block = result.get("chain", {})
+    chain_dict = chain_block if isinstance(chain_block, dict) else {}
+    reconciliation_block = result.get("reconciliation", {})
+    reconciliation_dict = (
+        reconciliation_block if isinstance(reconciliation_block, dict) else {}
+    )
     audit_evidence_ok = True
     audit_complete_ok = True
     if isinstance(audit_block, dict):
@@ -2429,11 +2435,13 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
             else "no stored snapshot"
         )
     )
-    audit_evidence_text = (
-        f"{audit_block.get('row_count', 0)}/{audit_block.get('row_count', 0)} inspected"
-        if isinstance(audit_block, dict)
-        else "no audit sheet"
-    )
+    audit_evidence_text = "no audit sheet"
+    if isinstance(audit_block, dict):
+        audit_evidence_text = (
+            f"{audit_block.get('inspected_count', 0)}/"
+            f"{audit_block.get('row_count', 0)} inspected; "
+            f"{audit_block.get('unresolved_count', 0)} unresolved"
+        )
     evidence_status = "OK" if audit_evidence_ok else "FAIL"
     lines.append(f"Audit evidence  {evidence_status}  {audit_evidence_text}")
     covered_count = sum(
@@ -2459,7 +2467,13 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
     lines.append(
         f"Changelog       "
         f"{'OK' if bool(checks_dict.get('changelog_ok', False)) else 'FAIL'}  "
-        "dry-run rendered"
+        + str(
+            (
+                "dry-run rendered"
+                if bool(checks_dict.get("changelog_ok", False))
+                else (result.get("changelog", {}) or {}).get("reason", "dry-run failed")
+            )
+        )
     )
     lines.append(
         f"Audit complete  {'OK' if audit_complete_ok else 'FAIL'}  "
@@ -2469,6 +2483,47 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
             else "coverage or summary guard failed"
         )
     )
+    chain_ok = bool(checks_dict.get("chain_ok", chain_dict.get("ok", True)))
+    lines.append(f"Release chain   {'OK' if chain_ok else 'FAIL'}")
+    reconciliation_ok = bool(
+        checks_dict.get("reconciliation_ok", reconciliation_dict.get("ok", True))
+    )
+    problem_count = reconciliation_dict.get("problem_count", 0)
+    lines.append(
+        f"Reconciliation  {'OK' if reconciliation_ok else 'FAIL'}"
+        + (f" ({problem_count} problems)" if not reconciliation_ok else "")
+    )
+    for label, block in (
+        ("Release chain", chain_dict),
+        ("Reconciliation", reconciliation_dict),
+    ):
+        problems = block.get("problems", [])
+        if not isinstance(problems, list):
+            continue
+        for problem in problems:
+            if not isinstance(problem, dict):
+                continue
+            code = problem.get("kind", "problem")
+            detail = ", ".join(
+                f"{key}={value}"
+                for key, value in problem.items()
+                if key != "kind"
+            )
+            lines.append(f"  - {code}" + (f": {detail}" if detail else ""))
+    failed_checks = result.get("failed_checks", [])
+    if isinstance(failed_checks, list) and failed_checks:
+        lines.append("")
+        lines.append("Failed checks:")
+        for check in failed_checks:
+            lines.append(f"  - {check}")
+    next_actions = result.get("next_actions", [])
+    if isinstance(next_actions, list) and next_actions:
+        lines.append("")
+        lines.append("Next actions:")
+        for action in next_actions:
+            if not isinstance(action, dict):
+                continue
+            lines.append(f"  {action.get('command', '')}")
     lines.append(f"Result          {'OK' if result.get('ok') else 'FAIL'}")
     return "\n".join(lines)
 

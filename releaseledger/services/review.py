@@ -289,6 +289,137 @@ def _compute_git_coverage(
     return git_coverage_ok, git_missing_count
 
 
+def _problem_next_action(
+    problem: dict[str, object], *, target_file: str, version: str
+) -> dict[str, str] | None:
+    """Return one deterministic remediation for a reconciliation problem."""
+    kind = str(problem.get("kind", ""))
+    problem_version = str(problem.get("version", version))
+    if kind == "changelog_without_release":
+        return {
+            "code": "remove_stale_changelog_section",
+            "command": (
+                "releaseledger changelog-section remove-section "
+                f"{problem_version} --target-file {target_file}"
+            ),
+        }
+    if kind == "release_without_tag":
+        return {
+            "code": "reconcile_release_tag",
+            "command": "releaseledger release reconcile --strict",
+        }
+    if kind in {"released_without_changelog", "release_changelog_date_mismatch"}:
+        return {
+            "code": "rebuild_release_changelog",
+            "command": (
+                f"releaseledger changelog build {problem_version} "
+                f"--output {target_file} --strict --replace-existing"
+            ),
+        }
+    if kind in {
+        "missing_previous",
+        "future_previous",
+        "root_has_previous",
+        "noncanonical_previous",
+    }:
+        return {
+            "code": "repair_release_chain",
+            "command": "releaseledger release reconcile --strict",
+        }
+    return None
+
+
+def _build_next_actions(
+    *,
+    version: str,
+    target_file: Path | None,
+    chain: dict[str, object],
+    reconciliation: dict[str, object],
+    audit: dict[str, object] | None,
+    changelog: dict[str, object],
+    checks: dict[str, object],
+) -> list[dict[str, str]]:
+    """Build stable, machine-actionable release-check next actions."""
+    target_display = str(target_file or "CHANGELOG.md")
+    actions: list[dict[str, str]] = []
+
+    for block in (chain, reconciliation):
+        problems = block.get("problems", [])
+        if not isinstance(problems, list):
+            continue
+        for problem in problems:
+            if not isinstance(problem, dict):
+                continue
+            action = _problem_next_action(
+                problem, target_file=target_display, version=version
+            )
+            if action is not None and action not in actions:
+                actions.append(action)
+
+    if not bool(checks.get("changelog_ok", True)):
+        action = {
+            "code": "resolve_changelog_dry_run",
+            "command": (
+                f"releaseledger changelog build {version} --output "
+                f"{target_display} --strict"
+            ),
+        }
+        if action not in actions:
+            actions.append(action)
+    if audit is not None and not bool(audit.get("ok", False)):
+        action = {
+            "code": "complete_commit_audit",
+            "command": f"releaseledger audit validate {version} --phase evidence --strict",
+        }
+        if action not in actions:
+            actions.append(action)
+    if not bool(checks.get("entry_lint_ok", True)):
+        action = {
+            "code": "fix_entry_lint",
+            "command": f"releaseledger entry lint {version}",
+        }
+        if action not in actions:
+            actions.append(action)
+    return actions
+
+
+def _failed_checks(
+    *,
+    checks: dict[str, object],
+    audit: dict[str, object] | None,
+    git_block: dict[str, object] | None,
+    strict: bool,
+) -> list[str]:
+    """Return stable identifiers for failed gates included in ``ok``."""
+    failed: list[str] = []
+    always = (
+        ("entry_coverage", "coverage_ok"),
+        ("entry_lint", "lint_ok"),
+    )
+    for identifier, key in always:
+        if not bool(checks.get(key, False)):
+            failed.append(identifier)
+    if strict:
+        for identifier, key in (
+            ("changelog", "changelog_ok"),
+            ("release_state", "release_state_ok"),
+            ("chain", "chain_ok"),
+            ("reconciliation", "reconciliation_ok"),
+        ):
+            if not bool(checks.get(key, False)):
+                failed.append(identifier)
+        if git_block is not None and not bool(checks.get("git_coverage_ok", True)):
+            failed.append("git_coverage")
+    if audit is not None:
+        if not bool(checks.get("audit_evidence_ok", False)):
+            failed.append("audit_evidence")
+        if not bool(checks.get("audit_complete_ok", False)):
+            failed.append("audit_complete")
+    if not bool(checks.get("snapshot_ok", True)):
+        failed.append("snapshot")
+    return failed
+
+
 def _build_review_recommendations(
     *,
     coverage: list[dict[str, object]],
@@ -510,6 +641,26 @@ def build_release_review(
     release_state_ok = not (release.released_at and release.status != "released")
     chain_ok = bool(chain_block.get("ok", False))
     reconciliation_ok = bool(reconciliation_block.get("ok", False))
+    snapshot_ok = not (
+        isinstance(git_block, dict)
+        and isinstance(git_block.get("snapshot_drift"), dict)
+        and git_block["snapshot_drift"].get("status") == "drifted"
+    )
+
+    # Commit audit sheet integration (opt-in via --require-audit-sheet).
+    audit_block = _build_audit_block(
+        workspace_root,
+        version=version,
+        include_internal=include_internal,
+    )
+    audit_evidence_ok = True
+    audit_complete_ok = True
+    if audit_block is not None:
+        evidence = audit_block.get("evidence", {})
+        complete = audit_block.get("complete", {})
+        audit_evidence_ok = isinstance(evidence, dict) and bool(evidence.get("ok"))
+        audit_complete_ok = isinstance(complete, dict) and bool(complete.get("ok"))
+
     checks: dict[str, object] = {
         "coverage_ok": coverage_ok,
         "lint_ok": lint_ok,
@@ -517,6 +668,9 @@ def build_release_review(
         "release_state_ok": release_state_ok,
         "chain_ok": chain_ok,
         "reconciliation_ok": reconciliation_ok,
+        "snapshot_ok": snapshot_ok,
+        "audit_evidence_ok": audit_evidence_ok,
+        "audit_complete_ok": audit_complete_ok,
     }
     if git_block is not None:
         checks["git_coverage_ok"] = git_coverage_ok
@@ -530,6 +684,8 @@ def build_release_review(
     )
     if strict and git_block is not None:
         ok = ok and git_coverage_ok
+    if audit_block is not None:
+        ok = ok and audit_evidence_ok and audit_complete_ok
 
     recommendations = _build_review_recommendations(
         coverage=coverage,
@@ -556,6 +712,22 @@ def build_release_review(
             "Run release reconcile and resolve release/tag/changelog mismatches."
         )
 
+    failed_checks = _failed_checks(
+        checks=checks,
+        audit=audit_block,
+        git_block=git_block,
+        strict=strict,
+    )
+    next_actions = _build_next_actions(
+        version=version,
+        target_file=target_file,
+        chain=chain_block,
+        reconciliation=reconciliation_block,
+        audit=audit_block,
+        changelog=changelog_block,
+        checks=checks,
+    )
+
     result: dict[str, object] = {
         "kind": "release_review",
         "version": version,
@@ -573,21 +745,14 @@ def build_release_review(
         "recommendations": recommendations,
         "chain": chain_block,
         "reconciliation": reconciliation_block,
+        "failed_checks": failed_checks,
+        "next_actions": next_actions,
     }
     if git_block is not None:
         result["git"] = git_block
 
-    # Commit audit sheet integration (opt-in via --require-audit-sheet).
-    audit_block = _build_audit_block(
-        workspace_root,
-        version=version,
-        include_internal=include_internal,
-    )
     if audit_block is not None:
         result["audit"] = audit_block
-        if not audit_block["ok"]:
-            ok = False
-            result["ok"] = False
     elif require_audit_sheet:
         raise LaunchError(
             f"--require-audit-sheet set but no commit audit sheet exists "
@@ -630,11 +795,27 @@ def _build_audit_block(
     needs_raw = report["needs_review_count"]
     uninsp_raw = report["uninspected_count"]
     violations_raw = complete["subject_summary_violations"]
+    row_count = row_count_raw if isinstance(row_count_raw, int) else 0
+    uninspected_count = uninsp_raw if isinstance(uninsp_raw, int) else 0
+    evidence_issues = report.get("issues", [])
+    missing_evidence_fields = sorted(
+        {
+            str(issue.get("code"))
+            for issue in evidence_issues
+            if isinstance(issue, dict) and issue.get("code")
+        }
+    )
     return {
         "exists": True,
-        "row_count": row_count_raw if isinstance(row_count_raw, int) else 0,
+        "row_count": row_count,
+        "inspected_count": max(row_count - uninspected_count, 0),
+        "unresolved_count": needs_raw if isinstance(needs_raw, int) else 0,
+        "completed_decision_count": max(
+            row_count - (needs_raw if isinstance(needs_raw, int) else 0), 0
+        ),
+        "missing_evidence_fields": missing_evidence_fields,
         "needs_review_count": (needs_raw if isinstance(needs_raw, int) else 0),
-        "uninspected_count": (uninsp_raw if isinstance(uninsp_raw, int) else 0),
+        "uninspected_count": uninspected_count,
         "subject_summary_violations": [
             str(v) for v in (violations_raw if isinstance(violations_raw, list) else [])
         ],
