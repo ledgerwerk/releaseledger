@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import yaml
 from typer.testing import CliRunner
 
 from releaseledger.cli import _render_release_check_human, app
 from releaseledger.domain.audit import CommitAuditRow, CommitAuditSheetRecord, initial_versioning
 from releaseledger.services.review import build_release_review
-from releaseledger.storage.store import save_commit_audit_sheet
+from releaseledger.storage.store import load_commit_audit_sheet, save_commit_audit_sheet
 
 
 runner = CliRunner()
@@ -357,3 +358,98 @@ def test_entry_source_ref_mutation_conflicts_fail_before_revision_change(
     assert payload["error"]["code"] == "VALIDATION_ERROR"
     shown = _json_run(tmp_path, "entry", "show", "0.2.0", "entry-0001")
     assert shown["result"]["entry"]["source_refs"] == ["tl:task-0009"]
+
+
+def test_audit_decisions_command_generates_curatable_template(tmp_path: Path) -> None:
+    assert _run(tmp_path, "init").exit_code == 0
+    assert _run(tmp_path, "release", "create", "0.2.0").exit_code == 0
+    sha = "a" * 40
+    save_commit_audit_sheet(
+        tmp_path,
+        CommitAuditSheetRecord(
+            release_version="0.2.0",
+            versioning=initial_versioning(),
+            rows=(
+                CommitAuditRow(
+                    sha=sha,
+                    source_ref=f"git:{sha}",
+                    changed_paths=("src/internal.py",),
+                ),
+            ),
+        ),
+        overwrite=True,
+    )
+    output = tmp_path / "audit-decisions.yaml"
+    generated = _run(
+        tmp_path,
+        "audit",
+        "decisions",
+        "0.2.0",
+        "--output",
+        str(output),
+    )
+    assert generated.exit_code == 0, generated.stdout
+    data = yaml.safe_load(output.read_text(encoding="utf-8"))
+    assert data == {
+        "rows": [
+            {
+                "sha": sha,
+                "inspected": False,
+                "inspected_paths": ["src/internal.py"],
+                "observed_behavior": "",
+                "public_impact": "unknown",
+                "decision": "needs_review",
+                "target_entry_key": None,
+                "notes": "",
+            }
+        ]
+    }
+
+
+def test_audit_apply_dry_run_reports_all_completed_row_evidence_deficiencies(
+    tmp_path: Path,
+) -> None:
+    assert _run(tmp_path, "init").exit_code == 0
+    assert _run(tmp_path, "release", "create", "0.2.0").exit_code == 0
+    sha = "b" * 40
+    save_commit_audit_sheet(
+        tmp_path,
+        CommitAuditSheetRecord(
+            release_version="0.2.0",
+            versioning=initial_versioning(),
+            rows=(
+                CommitAuditRow(
+                    sha=sha,
+                    source_ref=f"git:{sha}",
+                    changed_paths=("src/internal.py",),
+                ),
+            ),
+        ),
+        overwrite=True,
+    )
+    decisions = tmp_path / "incomplete-decisions.yaml"
+    decisions.write_text(
+        yaml.safe_dump({"rows": [{"sha": sha, "decision": "internal"}]}),
+        encoding="utf-8",
+    )
+    result = runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(tmp_path),
+            "--json",
+            "audit",
+            "apply",
+            "0.2.0",
+            "--file",
+            str(decisions),
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "inspected" in result.stdout
+    assert "inspected_paths" in result.stdout
+    assert "observed_behavior" in result.stdout
+    saved = load_commit_audit_sheet(tmp_path, "0.2.0")
+    assert saved is not None
+    assert saved.rows[0].decision == "needs_review"

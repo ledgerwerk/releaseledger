@@ -49,6 +49,7 @@ from releaseledger.services.audit import (
     create_commit_audit_sheet,
     guard_entry_summaries,
     refresh_commit_audit_sheet,
+    render_commit_audit_decisions_template,
     render_commit_audit_sheet,
     sync_audit_targets_from_entries,
     update_commit_audit_sheet,
@@ -4486,6 +4487,48 @@ def audit_show_command(
         result_type="commit_audit_sheet",
         result=payload,
         human=human,
+        json_output=state.json_output,
+    )
+
+
+@audit_app.command("decisions")
+def audit_decisions_command(
+    ctx: typer.Context,
+    version: Annotated[str, typer.Argument(help="Release version string.")],
+    output: Annotated[
+        Path,
+        typer.Option("--output", help="YAML worksheet path to write."),
+    ],
+) -> None:
+    """Generate a curated commit-audit decisions worksheet."""
+    state = cli_state_from_context(ctx)
+    try:
+        import yaml as _yaml
+
+        template = render_commit_audit_decisions_template(
+            _paths(ctx).workspace_root,
+            version=version,
+        )
+        text = _yaml.safe_dump(
+            template,
+            sort_keys=False,
+            default_flow_style=False,
+        )
+        written = write_text_output(output, text)
+    except ReleaseledgerError as exc:
+        emit_error(command="audit.decisions", error=exc, json_output=state.json_output)
+        raise typer.Exit(launch_error_exit_code(exc)) from exc
+    result = {
+        "kind": "commit_audit_decisions_template",
+        "version": version,
+        "output": str(written),
+        "row_count": len(template.get("rows", [])),
+    }
+    emit_payload(
+        command="audit.decisions",
+        result_type="commit_audit_decisions_template",
+        result=result,
+        human=f"wrote audit decisions template for {version} to {written}",
         json_output=state.json_output,
     )
 

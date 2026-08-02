@@ -57,6 +57,7 @@ __all__ = [
     "create_commit_audit_sheet",
     "project_audit_entry_coverage",
     "refresh_commit_audit_sheet",
+    "render_commit_audit_decisions_template",
     "render_commit_audit_sheet",
     "sync_audit_sheet_targets",
     "sync_audit_targets_from_entries",
@@ -198,14 +199,36 @@ def _refresh_row_from_existing(
 def _validate_completed_rows(sheet: CommitAuditSheetRecord) -> list[dict[str, object]]:
     issues: list[dict[str, object]] = []
     for row in sheet.rows:
-        if row.decision in _COMPLETED_DECISIONS and not row.observed_behavior.strip():
+        if row.decision not in _COMPLETED_DECISIONS:
+            continue
+        if not row.inspected:
+            issues.append(
+                {
+                    "sha": row.sha,
+                    "source_ref": row.source_ref,
+                    "field": "inspected",
+                    "code": "uninspected",
+                    "message": "Completed audit rows require inspected: true.",
+                }
+            )
+        if not row.inspected_paths:
+            issues.append(
+                {
+                    "sha": row.sha,
+                    "source_ref": row.source_ref,
+                    "field": "inspected_paths",
+                    "code": "missing_inspected_paths",
+                    "message": "Completed audit rows require inspected_paths.",
+                }
+            )
+        if not row.observed_behavior.strip():
             issues.append(
                 {
                     "sha": row.sha,
                     "source_ref": row.source_ref,
                     "field": "observed_behavior",
                     "code": "empty_observed_behavior",
-                    "message": ("Completed audit rows require observed_behavior text."),
+                    "message": "Completed audit rows require observed_behavior text.",
                 }
             )
     return issues
@@ -362,8 +385,12 @@ def update_commit_audit_sheet(
     )
     issues = _validate_completed_rows(candidate)
     if issues:
+        details = "\n".join(
+            f"{str(issue.get('sha', ''))[:7]}: {issue.get('message', '')}"
+            for issue in issues
+        )
         raise LaunchError(
-            f"Audit update for {version} has {len(issues)} invalid completed row(s).",
+            f"Audit update for {version} has {len(issues)} evidence issue(s):\n{details}",
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
             data={"issues": issues},
@@ -487,8 +514,12 @@ def apply_commit_audit_annotations(
     candidate = audit_sheet_from_dict(updated_data)
     issues = _validate_completed_rows(candidate)
     if issues:
+        details = "\n".join(
+            f"{str(issue.get('sha', ''))[:7]}: {issue.get('message', '')}"
+            for issue in issues
+        )
         raise LaunchError(
-            f"Audit apply for {version} has {len(issues)} invalid completed row(s).",
+            f"Audit apply for {version} has {len(issues)} evidence issue(s):\n{details}",
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
             data={"issues": issues},
@@ -673,6 +704,38 @@ def render_commit_audit_sheet(
             exit_code=2,
         )
     return _render_markdown(sheet)
+
+
+def render_commit_audit_decisions_template(
+    workspace_root: Path,
+    *,
+    version: str,
+) -> dict[str, object]:
+    """Return a mutable, directly consumable audit-decision worksheet."""
+    workspace_root = workspace_root.expanduser().resolve()
+    resolve_project_paths(workspace_root)
+    sheet = load_commit_audit_sheet(workspace_root, version)
+    if sheet is None:
+        raise LaunchError(
+            f"No commit audit sheet for {version}.",
+            code=CODE_NOT_FOUND,
+            exit_code=2,
+            remediation=[f"Run `releaseledger audit init {version}` first."],
+        )
+    rows = [
+        {
+            "sha": row.sha,
+            "inspected": False,
+            "inspected_paths": list(row.changed_paths),
+            "observed_behavior": "",
+            "public_impact": "unknown",
+            "decision": "needs_review",
+            "target_entry_key": None,
+            "notes": "",
+        }
+        for row in sheet.rows
+    ]
+    return {"rows": rows}
 
 
 def _render_markdown(sheet: CommitAuditSheetRecord) -> str:
