@@ -1,7 +1,7 @@
 ---
 title: "Architecture Documentation"
 version: 3
-generator: "archledger 0.3.2"
+generator: "archledger 0.4.0"
 arc42_template_version: "9.0-EN"
 ---
 
