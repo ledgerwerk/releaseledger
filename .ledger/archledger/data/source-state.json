@@ -1004,7 +1004,7 @@
     }
   },
   "project_name": "releaseledger",
-  "project_uuid": "37ed5b2b-3d85-4e3e-847d-46e91cefe025",
+  "project_uuid": "9ec5f921-b2c6-41db-8ffd-bea03b583741",
   "reason": "after-architecture-rebuild",
   "scanner": {
     "exclude": [

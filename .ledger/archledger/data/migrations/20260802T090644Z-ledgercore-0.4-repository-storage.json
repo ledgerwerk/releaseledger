@@ -1,0 +1,43 @@
+{
+  "backup": "/data/data/com.termux/files/home/src/releaseledger/.ledger/backups/archledger-20260802T090644Z",
+  "copied": [
+    "/data/data/com.termux/files/home/src/releaseledger/.ledger/archledger/.archledger-migration-20260802T090644Z/archledger/document-state.json",
+    "/data/data/com.termux/files/home/src/releaseledger/.ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0001.md",
+    "/data/data/com.termux/files/home/src/releaseledger/.ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0002.md",
+    "/data/data/com.termux/files/home/src/releaseledger/.ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0003.md",
+    "/data/data/com.termux/files/home/src/releaseledger/.ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0004.md",
+    "/data/data/com.termux/files/home/src/releaseledger/.ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0005.md",
+    "/data/data/com.termux/files/home/src/releaseledger/.ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0006.md",
+    "/data/data/com.termux/files/home/src/releaseledger/.ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0007.md",
+    "/data/data/com.termux/files/home/src/releaseledger/.ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0008.md",
+    "/data/data/com.termux/files/home/src/releaseledger/.ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0009.md",
+    "/data/data/com.termux/files/home/src/releaseledger/.ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0010.md",
+    "/data/data/com.termux/files/home/src/releaseledger/.ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0011.md",
+    "/data/data/com.termux/files/home/src/releaseledger/.ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0012.md",
+    "/data/data/com.termux/files/home/src/releaseledger/.ledger/archledger/.archledger-migration-20260802T090644Z/archledger/records/decisions/adr-0013.md",
+    "/data/data/com.termux/files/home/src/releaseledger/.ledger/archledger/.archledger-migration-20260802T090644Z/archledger/source-state.json",
+    "/data/data/com.termux/files/home/src/releaseledger/.ledger/archledger/.archledger-migration-20260802T090644Z/archledger/storage.yaml"
+  ],
+  "kind": "archledger_project_migration",
+  "source": "/data/data/com.termux/files/home/src/releaseledger/.archledger",
+  "target": "/data/data/com.termux/files/home/src/releaseledger/.ledger/archledger/data",
+  "uuid_evidence": [
+    [
+      "/data/data/com.termux/files/home/src/releaseledger/.ledger/ledger.toml",
+      "9ec5f921-b2c6-41db-8ffd-bea03b583741"
+    ],
+    [
+      "/data/data/com.termux/files/home/src/releaseledger/.archledger.toml",
+      "9ec5f921-b2c6-41db-8ffd-bea03b583741"
+    ],
+    [
+      "/data/data/com.termux/files/home/src/releaseledger/.archledger/storage.yaml",
+      "9ec5f921-b2c6-41db-8ffd-bea03b583741"
+    ],
+    [
+      "/data/data/com.termux/files/home/src/releaseledger/.archledger/source-state.json",
+      "9ec5f921-b2c6-41db-8ffd-bea03b583741"
+    ]
+  ],
+  "version": 1
+}

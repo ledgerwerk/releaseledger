@@ -15,3 +15,6 @@ storage = "project"
 
 [ledgers.taskledger.mounts.indexes]
 storage = "cache"
+
+[ledgers.archledger.mounts.data]
+storage = "project"

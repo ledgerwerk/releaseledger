@@ -1,0 +1,31 @@
+{
+  "migration_id": "",
+  "migration": "project-layout",
+  "completed_at": "2026-08-02T09:06:44.242749+00:00",
+  "project_uuid_before": "9ec5f921-b2c6-41db-8ffd-bea03b583741",
+  "project_uuid_after": "9ec5f921-b2c6-41db-8ffd-bea03b583741",
+  "source_fingerprint": "sha256:bc2178fa0334a7a1d9035b203d53735498a9a4e86883b3656ed83154eb71804b",
+  "canonical_fingerprint": "sha256:bc2178fa0334a7a1d9035b203d53735498a9a4e86883b3656ed83154eb71804b",
+  "legacy_source_preserved": true,
+  "cleanup_available": true,
+  "cleanup_command": "archledger migrate cleanup project-layout --dry-run",
+  "copied_paths": [
+    ".ledger/archledger/.archledger-migration-20260802T090644Z/archledger/document-state.json",
+    ".ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0001.md",
+    ".ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0002.md",
+    ".ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0003.md",
+    ".ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0004.md",
+    ".ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0005.md",
+    ".ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0006.md",
+    ".ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0007.md",
+    ".ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0008.md",
+    ".ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0009.md",
+    ".ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0010.md",
+    ".ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0011.md",
+    ".ledger/archledger/.archledger-migration-20260802T090644Z/archledger/profiles/arc42/sections/content-0012.md",
+    ".ledger/archledger/.archledger-migration-20260802T090644Z/archledger/records/decisions/adr-0013.md",
+    ".ledger/archledger/.archledger-migration-20260802T090644Z/archledger/source-state.json",
+    ".ledger/archledger/.archledger-migration-20260802T090644Z/archledger/storage.yaml"
+  ],
+  "rewritten_paths": []
+}
