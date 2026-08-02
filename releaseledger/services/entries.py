@@ -430,6 +430,9 @@ def update_release_entry(
     audience: str | None = None,
     scopes: tuple[str, ...] | None = None,
     source_refs: tuple[str, ...] | None = None,
+    add_source_refs: tuple[str, ...] = (),
+    remove_source_refs: tuple[str, ...] = (),
+    clear_source_refs: bool = False,
     paths: tuple[str, ...] | None = None,
     issues: tuple[str, ...] | None = None,
     prs: tuple[str, ...] | None = None,
@@ -437,7 +440,50 @@ def update_release_entry(
     internal: bool | None = None,
     reason: str | None = None,
 ) -> dict[str, object]:
+    if source_refs is not None and (
+        add_source_refs or remove_source_refs or clear_source_refs
+    ):
+        raise LaunchError(
+            "--source-ref cannot be combined with additive, removal, or clear source-ref modes.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
+    if clear_source_refs and (add_source_refs or remove_source_refs):
+        raise LaunchError(
+            "--clear-source-refs cannot be combined with --add-source-ref or --remove-source-ref.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
+    normalized_add = validate_source_refs(add_source_refs)
+    normalized_remove = validate_source_refs(remove_source_refs)
+    overlap = sorted(set(normalized_add) & set(normalized_remove))
+    if overlap:
+        raise LaunchError(
+            "The same source ref cannot be added and removed in one update: "
+            + ", ".join(overlap),
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
     existing = _find_entry(workspace_root, release_version, entry_id)
+    if source_refs is not None:
+        final_source_refs = validate_source_refs(source_refs)
+        source_refs_mode = "replace"
+    elif clear_source_refs:
+        final_source_refs = ()
+        source_refs_mode = "clear"
+    elif normalized_add or normalized_remove:
+        current_refs = list(existing.source_refs)
+        final_source_refs_list = [
+            ref for ref in current_refs if ref not in set(normalized_remove)
+        ]
+        for ref in normalized_add:
+            if ref not in final_source_refs_list:
+                final_source_refs_list.append(ref)
+        final_source_refs = tuple(final_source_refs_list)
+        source_refs_mode = "merge"
+    else:
+        final_source_refs = existing.source_refs
+        source_refs_mode = "unchanged"
     candidate = _candidate(
         entry_id=existing.entry_id,
         release_version=existing.release_version,
@@ -448,7 +494,7 @@ def update_release_entry(
         status=status if status is not None else existing.status,
         audience=audience if audience is not None else existing.audience,
         scopes=scopes if scopes is not None else existing.scopes,
-        source_refs=(source_refs if source_refs is not None else existing.source_refs),
+        source_refs=final_source_refs,
         paths=paths if paths is not None else existing.paths,
         issues=issues if issues is not None else existing.issues,
         prs=prs if prs is not None else existing.prs,
@@ -474,11 +520,24 @@ def update_release_entry(
         )
     }
     if all(getattr(existing, field) == value for field, value in changes.items()):
-        raise LaunchError(
-            "Entry update did not change any fields.",
-            code=CODE_CONFLICT,
-            exit_code=2,
+        result = _payload(
+            workspace_root,
+            release_version,
+            existing,
+            written=False,
         )
+        result.update(
+            {
+                "source_refs_mode": source_refs_mode,
+                "added_source_refs": [],
+                "removed_source_refs": [],
+                "source_refs": list(existing.source_refs),
+                "reason": reason,
+            }
+        )
+        return result
+    added_source_refs = [ref for ref in final_source_refs if ref not in existing.source_refs]
+    removed_source_refs = [ref for ref in existing.source_refs if ref not in final_source_refs]
     updated = replace(
         existing,
         kind=candidate.kind,
@@ -510,11 +569,24 @@ def update_release_entry(
                 for field, value in changes.items()
                 if getattr(existing, field) != value
             ),
+            "source_refs_mode": source_refs_mode,
+            "added_source_refs": added_source_refs,
+            "removed_source_refs": removed_source_refs,
             **({"reason": reason} if reason else {}),
         },
     )
     rebuild_indexes(workspace_root)
-    return _payload(workspace_root, release_version, updated, events=[event.event_id])
+    result = _payload(workspace_root, release_version, updated, events=[event.event_id])
+    result.update(
+        {
+            "source_refs_mode": source_refs_mode,
+            "added_source_refs": added_source_refs,
+            "removed_source_refs": removed_source_refs,
+            "source_refs": list(updated.source_refs),
+            "reason": reason,
+        }
+    )
+    return result
 
 
 def set_entry_status(

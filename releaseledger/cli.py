@@ -1579,7 +1579,31 @@ def entry_update_command(
     status: Annotated[str | None, typer.Option("--status")] = None,
     audience: Annotated[str | None, typer.Option("--audience")] = None,
     scopes: Annotated[list[str] | None, typer.Option("--scope")] = None,
-    source_refs: Annotated[list[str] | None, typer.Option("--source-ref")] = None,
+    source_refs: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--source-ref",
+            help="Replace the entire source_refs list. Repeat for multiple refs.",
+        ),
+    ] = None,
+    add_source_refs: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--add-source-ref",
+            help="Add source ref(s), preserving existing refs.",
+        ),
+    ] = None,
+    remove_source_refs: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--remove-source-ref",
+            help="Remove source ref(s) without changing other refs.",
+        ),
+    ] = None,
+    clear_source_refs: Annotated[
+        bool,
+        typer.Option("--clear-source-refs", help="Clear all source refs explicitly."),
+    ] = False,
     paths: Annotated[list[str] | None, typer.Option("--path")] = None,
     issues: Annotated[list[str] | None, typer.Option("--issue")] = None,
     prs: Annotated[list[str] | None, typer.Option("--pr")] = None,
@@ -1599,6 +1623,9 @@ def entry_update_command(
             audience,
             scopes,
             source_refs,
+            add_source_refs,
+            remove_source_refs,
+            clear_source_refs,
             paths,
             issues,
             prs,
@@ -1642,13 +1669,32 @@ def entry_update_command(
             audience=audience,
             scopes=tuple(scopes) if scopes is not None else None,
             source_refs=(tuple(source_refs) if source_refs is not None else None),
+            add_source_refs=tuple(add_source_refs or ()),
+            remove_source_refs=tuple(remove_source_refs or ()),
+            clear_source_refs=clear_source_refs,
             paths=tuple(paths) if paths is not None else None,
             issues=tuple(issues) if issues is not None else None,
             prs=tuple(prs) if prs is not None else None,
             breaking=breaking,
             internal=internal,
+            reason=reason,
         )
-        return result, _event_ids(result), f"updated entry {entry_id}"
+        mode = str(result.get("source_refs_mode", "unchanged"))
+        added = result.get("added_source_refs", [])
+        removed = result.get("removed_source_refs", [])
+        details = []
+        if isinstance(added, list) and added:
+            details.append("added " + ", ".join(str(ref) for ref in added))
+        if isinstance(removed, list) and removed:
+            details.append("removed " + ", ".join(str(ref) for ref in removed))
+        if mode == "merge" and not details:
+            details.append("preserved existing refs (no change)")
+        human = f"updated entry {entry_id}"
+        if mode != "unchanged":
+            human += f"; source refs {mode}"
+            if details:
+                human += ": " + "; ".join(details)
+        return result, _event_ids(result), human
 
     run_command(
         command="entry.update",

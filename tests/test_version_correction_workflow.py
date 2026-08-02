@@ -215,3 +215,116 @@ def test_release_coverage_projects_audit_decisions_without_fake_public_refs(
     assert coverage[refs["needs_review"]]["coverage_requirement"] == "unresolved"
     assert coverage[refs["needs_review"]]["gate_satisfied"] is False
     assert result["checks"]["coverage_ok"] is False
+
+
+def test_entry_source_ref_mutations_preserve_and_report_operation_intent(
+    tmp_path: Path,
+) -> None:
+    assert _run(tmp_path, "init").exit_code == 0
+    assert _run(tmp_path, "release", "create", "0.2.0").exit_code == 0
+    assert (
+        _run(
+            tmp_path,
+            "entry",
+            "add",
+            "0.2.0",
+            "--summary",
+            "Existing entry",
+            "--source-ref",
+            "tl:task-0009",
+        ).exit_code
+        == 0
+    )
+    git_ref = "git:" + "a" * 40
+
+    added = _json_run(
+        tmp_path,
+        "entry",
+        "update",
+        "0.2.0",
+        "entry-0001",
+        "--add-source-ref",
+        git_ref,
+        "--reason",
+        "Attach reviewed commit provenance.",
+    )
+    added_entry = added["result"]["entry"]
+    assert added["result"]["source_refs_mode"] == "merge"
+    assert added_entry["source_refs"] == ["tl:task-0009", git_ref]
+    assert added["result"]["added_source_refs"] == [git_ref]
+
+    repeated = _json_run(
+        tmp_path,
+        "entry",
+        "update",
+        "0.2.0",
+        "entry-0001",
+        "--add-source-ref",
+        git_ref,
+    )
+    assert repeated["result"]["source_refs"] == ["tl:task-0009", git_ref]
+    assert repeated["result"]["written"] is False
+
+    removed = _json_run(
+        tmp_path,
+        "entry",
+        "update",
+        "0.2.0",
+        "entry-0001",
+        "--remove-source-ref",
+        git_ref,
+    )
+    assert removed["result"]["source_refs"] == ["tl:task-0009"]
+    assert removed["result"]["removed_source_refs"] == [git_ref]
+
+    cleared = _json_run(
+        tmp_path,
+        "entry",
+        "update",
+        "0.2.0",
+        "entry-0001",
+        "--clear-source-refs",
+    )
+    assert cleared["result"]["source_refs"] == []
+    assert cleared["result"]["source_refs_mode"] == "clear"
+
+
+def test_entry_source_ref_mutation_conflicts_fail_before_revision_change(
+    tmp_path: Path,
+) -> None:
+    assert _run(tmp_path, "init").exit_code == 0
+    assert _run(tmp_path, "release", "create", "0.2.0").exit_code == 0
+    assert (
+        _run(
+            tmp_path,
+            "entry",
+            "add",
+            "0.2.0",
+            "--summary",
+            "Existing entry",
+            "--source-ref",
+            "tl:task-0009",
+        ).exit_code
+        == 0
+    )
+    conflict = runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(tmp_path),
+            "--json",
+            "entry",
+            "update",
+            "0.2.0",
+            "entry-0001",
+            "--source-ref",
+            "git:" + "b" * 40,
+            "--add-source-ref",
+            "git:" + "c" * 40,
+        ],
+    )
+    assert conflict.exit_code != 0
+    payload = json.loads(conflict.stdout)
+    assert payload["error"]["code"] == "VALIDATION_ERROR"
+    shown = _json_run(tmp_path, "entry", "show", "0.2.0", "entry-0001")
+    assert shown["result"]["entry"]["source_refs"] == ["tl:task-0009"]
