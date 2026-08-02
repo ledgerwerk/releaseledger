@@ -377,7 +377,7 @@ def _build_next_actions(
         }
         if action not in actions:
             actions.append(action)
-    if not bool(checks.get("entry_lint_ok", True)):
+    if not bool(checks.get("lint_ok", True)):
         action = {
             "code": "fix_entry_lint",
             "command": f"releaseledger entry lint {version}",
@@ -422,6 +422,28 @@ def _failed_checks(
     if not bool(checks.get("snapshot_ok", True)):
         failed.append("snapshot")
     return failed
+
+
+def _phase_reconciliation(
+    block: dict[str, object], *, phase: str
+) -> dict[str, object]:
+    """Apply release-check phase severity to reconciliation findings."""
+    raw_problems = block.get("problems", [])
+    problems = [problem for problem in raw_problems if isinstance(problem, dict)]
+    filtered: list[dict[str, object]] = []
+    for problem in problems:
+        kind = str(problem.get("kind", ""))
+        if phase == "finalize" and kind == "release_without_tag":
+            continue
+        annotated = dict(problem)
+        annotated["severity"] = "failure"
+        filtered.append(annotated)
+    result = dict(block)
+    result["phase"] = phase
+    result["problems"] = filtered
+    result["problem_count"] = len(filtered)
+    result["ok"] = not filtered
+    return result
 
 
 def _build_review_recommendations(
@@ -576,6 +598,8 @@ def build_release_review(
     include_merges: str = "nontrivial",
     require_audit_sheet: bool = False,
     include_history_health: bool = False,
+    phase: str = "current",
+    proposed_released_at: str | None = None,
 ) -> dict[str, object]:
     """Build a deterministic, read-only release review for ``version``.
 
@@ -593,6 +617,13 @@ def build_release_review(
     Raises :class:`LaunchError` when the release does not exist (re-uses
     :func:`load_release`).
     """
+    if phase not in {"current", "finalize", "published"}:
+        raise LaunchError(
+            f"Unsupported release check phase {phase!r}. "
+            "Use current, finalize, or published.",
+            code="USAGE_ERROR",
+            exit_code=2,
+        )
     workspace_root = workspace_root.expanduser().resolve()
     release = load_release(workspace_root, version)
     statuses = tuple(normalize_entry_status(value) for value in include_statuses)
@@ -703,6 +734,7 @@ def build_release_review(
         statuses=statuses,
         target_file=target_file,
         strict=strict,
+        release_date=proposed_released_at if phase == "finalize" else None,
     )
     # Coverage is satisfied when every expected ref is covered; with no
     # expected refs, coverage is trivially satisfied.
@@ -714,7 +746,18 @@ def build_release_review(
     changelog_ok = bool(changelog_block.get("dry_run_ok", False))
 
     git_coverage_ok, git_missing_count = _compute_git_coverage(coverage, git_block)
-    release_state_ok = not (release.released_at and release.status != "released")
+    if phase == "finalize":
+        release_state_ok = release.status in {
+            "planned",
+            "draft",
+            "candidate",
+        } and bool(proposed_released_at or release.released_at)
+    elif phase == "published":
+        release_state_ok = release.status == "released" and bool(
+            release.released_at
+        )
+    else:
+        release_state_ok = not (release.released_at and release.status != "released")
     chain_ok = bool(chain_block.get("ok", False))
     reconciliation_ok = bool(reconciliation_block.get("ok", False))
     snapshot_ok = not (
@@ -737,6 +780,11 @@ def build_release_review(
         audit_evidence_ok = isinstance(evidence, dict) and bool(evidence.get("ok"))
         audit_complete_ok = isinstance(complete, dict) and bool(complete.get("ok"))
 
+    if phase in {"finalize", "published"}:
+        reconciliation_block = _phase_reconciliation(
+            reconciliation_block, phase=phase
+        )
+        reconciliation_ok = bool(reconciliation_block.get("ok", False))
     checks: dict[str, object] = {
         "coverage_ok": coverage_ok,
         "lint_ok": lint_ok,
@@ -747,6 +795,7 @@ def build_release_review(
         "snapshot_ok": snapshot_ok,
         "audit_evidence_ok": audit_evidence_ok,
         "audit_complete_ok": audit_complete_ok,
+        "phase": phase,
     }
     if git_block is not None:
         checks["git_coverage_ok"] = git_coverage_ok
@@ -818,6 +867,8 @@ def build_release_review(
         "strict": strict,
         "include_internal": bool(include_internal),
         "include_statuses": list(statuses),
+        "phase": phase,
+        "proposed_released_at": proposed_released_at,
         "recommendations": recommendations,
         "chain": chain_block,
         "reconciliation": reconciliation_block,
@@ -910,6 +961,7 @@ def _run_changelog_dry_run(
     statuses: tuple[str, ...],
     target_file: Path | None,
     strict: bool,
+    release_date: str | None = None,
 ) -> dict[str, object]:
     """Run the changelog dry-run without writing and normalize the verdict.
 
@@ -935,6 +987,7 @@ def _run_changelog_dry_run(
             version=version,
             target_file=target_file,
             include_internal=include_internal,
+            release_date=release_date,
             dry_run=True,
             replace_existing=False,
             include_statuses=statuses,

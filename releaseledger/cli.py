@@ -1140,6 +1140,20 @@ def release_check_command(
             "--include-internal", help="Include internal entries in coverage."
         ),
     ] = False,
+    phase: Annotated[
+        str,
+        typer.Option(
+            "--phase",
+            help="Check phase: current, finalize, or published.",
+        ),
+    ] = "current",
+    released_at: Annotated[
+        str | None,
+        typer.Option(
+            "--released-at",
+            help="Proposed release date for --phase finalize.",
+        ),
+    ] = None,
 ) -> None:
     """Run the consolidated read-only release gate."""
     state = cli_state_from_context(ctx)
@@ -1161,6 +1175,8 @@ def release_check_command(
             git=True,
             require_audit_sheet=require_audit_sheet,
             include_history_health=True,
+            phase=phase,
+            proposed_released_at=released_at,
         )
     except ReleaseledgerError as exc:
         emit_error(command="release check", error=exc, json_output=state.json_output)

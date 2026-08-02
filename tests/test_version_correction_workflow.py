@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -453,3 +454,70 @@ def test_audit_apply_dry_run_reports_all_completed_row_evidence_deficiencies(
     saved = load_commit_audit_sheet(tmp_path, "0.2.0")
     assert saved is not None
     assert saved.rows[0].decision == "needs_review"
+
+
+def test_release_check_phases_separate_finalize_readiness_from_publication(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    assert _run(tmp_path, "init").exit_code == 0
+    assert _run(tmp_path, "release", "create", "0.2.0").exit_code == 0
+    assert (
+        _run(
+            tmp_path,
+            "entry",
+            "add",
+            "0.2.0",
+            "--summary",
+            "A reviewed release change",
+        ).exit_code
+        == 0
+    )
+
+    finalize = runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(tmp_path),
+            "--json",
+            "release",
+            "check",
+            "0.2.0",
+            "--phase",
+            "finalize",
+            "--released-at",
+            "2026-08-01",
+            "--strict",
+            "--target-file",
+            "CHANGELOG.md",
+        ],
+    )
+    assert finalize.exit_code == 0, finalize.stdout
+    finalize_payload = json.loads(finalize.stdout)
+    assert finalize_payload["result"]["phase"] == "finalize"
+    assert finalize_payload["result"]["ok"] is True
+
+    assert (
+        _run(tmp_path, "release", "finalize", "0.2.0", "--released-at", "2026-08-01").exit_code
+        == 0
+    )
+    published = runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(tmp_path),
+            "--json",
+            "release",
+            "check",
+            "0.2.0",
+            "--phase",
+            "published",
+            "--strict",
+            "--target-file",
+            "CHANGELOG.md",
+        ],
+    )
+    assert published.exit_code != 0
+    published_payload = json.loads(published.stdout)
+    assert published_payload["result"]["phase"] == "published"
+    assert "reconciliation" in published_payload["result"]["failed_checks"]
