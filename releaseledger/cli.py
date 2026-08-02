@@ -1369,7 +1369,9 @@ def release_rename_command(
                 if next_action:
                     human += f"\nNext:\n  {next_action}"
                 if changelog.get("updated"):
-                    human += f"\nChangelog: renamed section {old_version} to {new_version}"
+                    human += (
+                        f"\nChangelog: renamed section {old_version} to {new_version}"
+                    )
         return (
             result,
             _event_ids(result),
@@ -1656,22 +1658,26 @@ def entry_update_command(
     """Update explicitly supplied entry fields."""
     state = cli_state_from_context(ctx)
 
-    if status is not None and not clear_source_refs and all(
-        value is None
-        for value in (
-            kind,
-            summary,
-            body,
-            audience,
-            scopes,
-            source_refs,
-            add_source_refs,
-            remove_source_refs,
-            paths,
-            issues,
-            prs,
-            breaking,
-            internal,
+    if (
+        status is not None
+        and not clear_source_refs
+        and all(
+            value is None
+            for value in (
+                kind,
+                summary,
+                body,
+                audience,
+                scopes,
+                source_refs,
+                add_source_refs,
+                remove_source_refs,
+                paths,
+                issues,
+                prs,
+                breaking,
+                internal,
+            )
         )
     ):
         add_cli_warning(
@@ -2561,9 +2567,9 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
         f"Changelog       "
         f"{'OK' if bool(checks_dict.get('changelog_ok', False)) else 'FAIL'}  "
         + str(
-                "dry-run rendered"
-                if bool(checks_dict.get("changelog_ok", False))
-                else changelog_reason
+            "dry-run rendered"
+            if bool(checks_dict.get("changelog_ok", False))
+            else changelog_reason
         )
     )
     lines.append(
@@ -2596,9 +2602,7 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
                 continue
             code = problem.get("kind", "problem")
             detail = ", ".join(
-                f"{key}={value}"
-                for key, value in problem.items()
-                if key != "kind"
+                f"{key}={value}" for key, value in problem.items() if key != "kind"
             )
             lines.append(f"  - {code}" + (f": {detail}" if detail else ""))
     failed_checks = result.get("failed_checks", [])

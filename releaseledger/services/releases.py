@@ -902,7 +902,9 @@ def _rename_changelog_plan(
 ) -> tuple[dict[str, object], Path, str | None]:
     """Inspect and preflight the changelog side of a release rename."""
     paths = resolve_project_paths(workspace_root)
-    chosen = target_file or Path(existing.changelog_file or paths.config.changelog_output)
+    chosen = target_file or Path(
+        existing.changelog_file or paths.config.changelog_output
+    )
     target = _resolve_changelog_target(workspace_root, chosen)
     text = target.read_text(encoding="utf-8") if target.is_file() else ""
     old_found = find_release_section(text, old_version) is not None
@@ -932,9 +934,7 @@ def _rename_changelog_plan(
         "would_write": False,
     }
     if old_found and not rename_section:
-        plan["warning"] = (
-            f"old section {old_version} still exists in {target_display}"
-        )
+        plan["warning"] = f"old section {old_version} still exists in {target_display}"
         plan["next_action"] = (
             "releaseledger changelog-section rename-section "
             f"{old_version} {new_version} --target-file {target_display}"

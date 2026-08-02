@@ -536,8 +536,12 @@ def update_release_entry(
             }
         )
         return result
-    added_source_refs = [ref for ref in final_source_refs if ref not in existing.source_refs]
-    removed_source_refs = [ref for ref in existing.source_refs if ref not in final_source_refs]
+    added_source_refs = [
+        ref for ref in final_source_refs if ref not in existing.source_refs
+    ]
+    removed_source_refs = [
+        ref for ref in existing.source_refs if ref not in final_source_refs
+    ]
     updated = replace(
         existing,
         kind=candidate.kind,

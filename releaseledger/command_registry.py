@@ -168,7 +168,11 @@ def build_command_inventory() -> CommandInventory:
 
     for path, summary, effect in (
         ("audit init", "Create an audit sheet.", "ledger-write"),
-        ("audit decisions", "Generate an editable audit decision worksheet.", "external-write"),
+        (
+            "audit decisions",
+            "Generate an editable audit decision worksheet.",
+            "external-write",
+        ),
         ("audit show", "Show an audit sheet.", "read"),
         ("audit apply", "Apply audit annotations.", "ledger-write"),
         ("audit refresh", "Refresh audit coverage.", "ledger-write"),

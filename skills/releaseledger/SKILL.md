@@ -154,15 +154,15 @@ Decision tree:
 3. Prepare the corrected release in one step:
    `releaseledger release prepare NEW --previous PREV --released-at DATE`
    with `--git-base` and `--git-head` when the range is known.
-3. If the wrong version should remain as a visible audit tombstone, use
+4. If the wrong version should remain as a visible audit tombstone, use
    `release cancel --reason "..." --superseded-by VERSION` (sets status
    `canceled`).
-4. When backfilling old releases, always pass `--previous` explicitly, then run
+5. When backfilling old releases, always pass `--previous` explicitly, then run
    `release chain check`. Repair with `release chain repair --dry-run` then
    `--apply`.
-5. Clear an optional field (e.g. a root release's `previous_version`) with
+6. Clear an optional field (e.g. a root release's `previous_version`) with
    `release update VERSION --clear-previous`.
-6. Build the changelog from the net shipped baseline, then bump the package
+7. Build the changelog from the net shipped baseline, then bump the package
    version.
 
 For a complete release-day correction, use this sequence:
@@ -313,8 +313,7 @@ Use this for any git-backed changelog or release-note backfill.
    `releaseledger entry add-many VERSION --file entries.yaml --strict --guard-commit-subjects --sync-audit`.
 10. Validate the complete phase after entries exist:
     `releaseledger audit validate VERSION --phase complete --strict --include-internal`.
-11. Run `releaseledger release check VERSION --phase finalize --released-at DATE --strict
-    --target-file CHANGELOG.md` before any final build. Use the
+11. Run `releaseledger release check VERSION --phase finalize --released-at DATE --strict --target-file CHANGELOG.md` before any final build. Use the
     `published` phase after finalization and tagging.
 
 `audit init` writes one `needs_review` row per git candidate commit. Decisions

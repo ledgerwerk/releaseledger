@@ -424,9 +424,7 @@ def _failed_checks(
     return failed
 
 
-def _phase_reconciliation(
-    block: dict[str, object], *, phase: str
-) -> dict[str, object]:
+def _phase_reconciliation(block: dict[str, object], *, phase: str) -> dict[str, object]:
     """Apply release-check phase severity to reconciliation findings."""
     raw_problems = block.get("problems", [])
     problems = (
@@ -527,9 +525,7 @@ def _compute_coverage(
             for entry in matching
             if entry.status == "accepted" and entry.internal
         ]
-        row["public_accepted_entry_ids"] = _dedupe_preserve_order(
-            public_accepted_ids
-        )
+        row["public_accepted_entry_ids"] = _dedupe_preserve_order(public_accepted_ids)
         row["internal_accepted_entry_ids"] = _dedupe_preserve_order(
             internal_accepted_ids
         )
@@ -757,17 +753,14 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
             "candidate",
         } and bool(proposed_released_at or release.released_at)
     elif phase == "published":
-        release_state_ok = release.status == "released" and bool(
-            release.released_at
-        )
+        release_state_ok = release.status == "released" and bool(release.released_at)
     else:
         release_state_ok = not (release.released_at and release.status != "released")
     chain_ok = bool(chain_block.get("ok", False))
     reconciliation_ok = bool(reconciliation_block.get("ok", False))
     snapshot_drift = git_block.get("snapshot_drift") if git_block else None
     snapshot_ok = not (
-        isinstance(snapshot_drift, dict)
-        and snapshot_drift.get("status") == "drifted"
+        isinstance(snapshot_drift, dict) and snapshot_drift.get("status") == "drifted"
     )
 
     # Commit audit sheet integration (opt-in via --require-audit-sheet).
@@ -785,9 +778,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         audit_complete_ok = isinstance(complete, dict) and bool(complete.get("ok"))
 
     if phase in {"finalize", "published"}:
-        reconciliation_block = _phase_reconciliation(
-            reconciliation_block, phase=phase
-        )
+        reconciliation_block = _phase_reconciliation(reconciliation_block, phase=phase)
         reconciliation_ok = bool(reconciliation_block.get("ok", False))
     checks: dict[str, object] = {
         "coverage_ok": coverage_ok,

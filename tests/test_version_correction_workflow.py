@@ -159,8 +159,7 @@ def test_version_correction_without_changelog_flag_reports_exact_next_action(
     assert renamed.exit_code == 0, renamed.stdout
     assert "old section 0.3.0 still exists" in renamed.stdout
     assert (
-        "releaseledger changelog-section rename-section 0.3.0 0.2.8"
-        in renamed.stdout
+        "releaseledger changelog-section rename-section 0.3.0 0.2.8" in renamed.stdout
     )
 
 
@@ -501,7 +500,9 @@ def test_release_check_phases_separate_finalize_readiness_from_publication(
     assert finalize_payload["result"]["ok"] is True
 
     assert (
-        _run(tmp_path, "release", "finalize", "0.2.0", "--released-at", "2026-08-01").exit_code
+        _run(
+            tmp_path, "release", "finalize", "0.2.0", "--released-at", "2026-08-01"
+        ).exit_code
         == 0
     )
     published = runner.invoke(
