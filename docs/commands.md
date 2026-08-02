@@ -89,6 +89,8 @@ releaseledger release prepare VERSION [--previous VERSION]
                                       [--output-dir PATH]
 releaseledger release check VERSION [--target-file PATH] [--strict]
                                     [--include-internal]
+                                    [--phase current|finalize|published]
+                                    [--released-at YYYY-MM-DD]
 releaseledger release cancel VERSION [--reason TEXT]
                                     [--superseded-by VERSION]
                                     [--force-released-unshipped]
@@ -105,6 +107,7 @@ releaseledger release rename OLD_VERSION NEW_VERSION [--previous VERSION]
                                                       [--target-file PATH]
                                                       [--rename-changelog-section]
                                                       [--replace-existing-section]
+                                                      [--dry-run]
 releaseledger release chain check
 releaseledger release chain repair [--dry-run] [--apply]
 releaseledger release chain check [--strict]
@@ -132,6 +135,10 @@ releaseledger entry add-many VERSION --file FILE [--dry-run] [--strict]
                                     [--guard-commit-subjects]
                                     [--sync-audit]
 releaseledger entry update VERSION ENTRY_ID [entry metadata options]
+                                    [--source-ref REF]...
+                                    [--add-source-ref REF]...
+                                    [--remove-source-ref REF]...
+                                    [--clear-source-refs]
 releaseledger entry delete VERSION ENTRY_ID --reason TEXT [--dry-run]
                                     [--force-accepted] [--detach-audit]
 releaseledger entry show VERSION ENTRY_ID
@@ -362,6 +369,12 @@ of a release correction. Both fail when the source section is missing unless
 `--ignore-missing` is passed, and `rename-section` fails when the
 destination section already exists unless `--replace-existing` is passed.
 
+`release rename --dry-run` previews the bundle move, entry and audit ownership,
+successor rewrites, and changelog action without writing. Planned releases need
+no force flag; title and status are preserved unless explicitly changed. If a
+target changelog contains the old heading and the rename flag is omitted, the
+command reports the stale heading and prints the exact section-rename command.
+
 `release reconcile --strict` is read-only and compares release records, Git tags,
 and changelog headings before finalization.
 
@@ -375,6 +388,8 @@ releaseledger review VERSION [--include-internal]
                         [--require-audit-sheet]
 releaseledger release check VERSION [--target-file PATH] [--strict]
                                [--include-internal]
+                               [--phase current|finalize|published]
+                               [--released-at YYYY-MM-DD]
 ```
 
 Read-only coverage report. It combines release state, entry coverage, orphan
@@ -385,6 +400,18 @@ separately. `--strict` exits non-zero when the release is not OK (uncovered
 source refs, lint errors, a dated `planned` release, or a changelog build that
 would fail). `release check` is the consolidated final gate built on the same
 review machinery.
+
+The `current` phase preserves the existing persisted-state check. `finalize`
+accepts a proposed date, checks readiness to transition to `released`, and does
+not require a tag. `published` requires released status/date, a matching tag
+when Git integration is active, a consistent changelog, and clean
+reconciliation. Every failed gate appears in human output and in JSON
+`failed_checks`, with structured `next_actions` where a safe command exists.
+
+For audit-backed Git coverage, accepted/grouped decisions require accepted
+public-entry coverage. Complete internal and rejected decisions are accounted
+for by audit evidence in public mode; `--include-internal` requires an accepted
+internal entry for internal decisions. Unresolved or incomplete rows block.
 
 With `--git`, review also computes coverage from the git commit range
 (`--git-base`/`--git-head` or the release's stored git metadata). Strict
@@ -424,6 +451,7 @@ refresh.
 
 ```text
 releaseledger audit init VERSION [--base REF] [--head REF] [--overwrite]
+releaseledger audit decisions VERSION --output PATH
 releaseledger audit show VERSION [--format markdown|json|yaml] [--output PATH]
 releaseledger audit apply VERSION --file PATH [--dry-run]
 releaseledger audit refresh VERSION [--base REF] [--head REF] [--allow-remove]
@@ -441,6 +469,10 @@ subjects are evidence-only and must never become changelog prose. Use the
 `evidence` phase before entries exist and the `complete` phase after entries
 exist. When a sheet exists, `review` emits an `audit` block; pass
 `--require-audit-sheet` to gate on a complete sheet.
+
+`audit decisions` generates one mutable YAML row per commit, pre-filling changed
+paths without marking a row inspected. `audit apply --dry-run` reports all
+missing evidence fields for completed decisions before any write.
 
 ## Branch commands
 

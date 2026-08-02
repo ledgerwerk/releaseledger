@@ -440,8 +440,11 @@ def ensure_canonical_project(
                 # checking for legacy data.
                 _check_legacy_data_before_init(workspace_root, force=False)
                 # Preserve the existing project identity from the manifest.
-                project_uuid_resolved = project_uuid or exc.data.get(
-                    "project_uuid", project_uuid
+                manifest_project_uuid = exc.data.get("project_uuid")
+                project_uuid_resolved = project_uuid or (
+                    manifest_project_uuid
+                    if isinstance(manifest_project_uuid, str)
+                    else None
                 )
             else:
                 # Malformed schema, invalid local override, unsupported

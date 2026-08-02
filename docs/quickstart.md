@@ -55,16 +55,15 @@ created by new projects:
 Releaseledger is git-first. The recommended workflow uses git commit ranges
 as the canonical evidence of shipped changes.
 
-## Create a release and pin the git snapshot
+## Prepare a release and pin the git snapshot
 
 ```bash
-releaseledger release create 1.2.0 \
+releaseledger release prepare 1.2.0 \
   --previous 1.1.0 \
-  --released-at 2026-06-14
-
-releaseledger release update 1.2.0 \
+  --released-at 2026-06-14 \
   --git-base v1.1.0 \
-  --git-head HEAD
+  --git-head HEAD \
+  --output-dir .releaseledger/work/1.2.0
 ```
 
 After the snapshot is attached, omit `--head` unless you intentionally want to
@@ -74,8 +73,7 @@ refresh the stored snapshot to a newer commit.
 
 ```bash
 releaseledger git evidence 1.2.0 --output-dir /tmp/1.2.0-evidence
-releaseledger audit init 1.2.0
-releaseledger audit show 1.2.0 --format yaml --output /tmp/1.2.0-audit.yaml
+releaseledger audit decisions 1.2.0 --output /tmp/1.2.0-audit-decisions.yaml
 releaseledger git scaffold 1.2.0 \
   --output /tmp/1.2.0-entries.yaml
 ```
@@ -112,9 +110,41 @@ releaseledger audit validate 1.2.0 --phase complete --strict --include-internal
 
 ```bash
 releaseledger release check 1.2.0 --strict --target-file CHANGELOG.md
+releaseledger release check 1.2.0 --phase finalize \
+  --released-at 2026-06-14 --strict --target-file CHANGELOG.md
 releaseledger release finalize 1.2.0 --released-at 2026-06-14
 releaseledger build 1.2.0 --strict --target-file CHANGELOG.md
 ```
+
+## Correct a recorded version safely
+
+Preview and apply a planned-version correction as one explicit workflow. The
+dry-run verifies bundle, entry, audit, successor, and changelog actions; no
+manual edit to generated `CHANGELOG.md` content is needed.
+
+```bash
+releaseledger release rename 0.3.0 0.2.8 \
+  --previous v0.2.7 \
+  --target-file CHANGELOG.md \
+  --rename-changelog-section \
+  --dry-run
+releaseledger release rename 0.3.0 0.2.8 \
+  --previous v0.2.7 \
+  --target-file CHANGELOG.md \
+  --rename-changelog-section
+releaseledger release prepare 0.2.8 \
+  --previous v0.2.7 \
+  --released-at 2026-08-01 \
+  --git-base v0.2.7 --git-head HEAD \
+  --output-dir .releaseledger/work/0.2.8
+releaseledger audit decisions 0.2.8 \
+  --output .releaseledger/work/0.2.8/audit-decisions.yaml
+```
+
+Use `entry update --add-source-ref REF` for additive provenance. It preserves
+existing refs; `--source-ref` replaces the full list and `--clear-source-refs`
+clears it explicitly. Internal or rejected commits with complete audit evidence
+do not need unrelated public changelog entries.
 
 For a single release section update only, `build VERSION` is the default and
 explicit version intent. Rebuild the whole file only when you really mean all

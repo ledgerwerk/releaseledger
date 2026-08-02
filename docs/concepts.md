@@ -52,6 +52,11 @@ previous-version inference and not built into public changelogs by default.
 Canceled releases may carry `cancel_reason` and `superseded_by` metadata
 and remain visible in `release list` as an audit tombstone.
 
+Version correction is a domain operation across the release identity, bundle,
+entry ownership, predecessor links, audit sheet, changelog identity, and
+indexes. `release rename --dry-run` previews those surfaces; changelog mutation
+remains explicit with `--rename-changelog-section`.
+
 ## Entry
 
 An entry is one release-note item stored under
@@ -108,6 +113,32 @@ Audit validation is phase-aware:
 
 This concept keeps Git as the canonical source of shipped changes while making
 the human or agent review work durable and auditable.
+
+### Coverage and audit accounting
+
+Raw entry coverage records whether an entry directly carries a source ref. The
+release gate additionally accounts for the audit decision on Git commits:
+
+- `accepted` and `grouped` require an accepted public entry.
+- `internal` is satisfied by complete inspected audit evidence in public mode;
+  with `--include-internal`, it requires an accepted internal entry.
+- `rejected` is satisfied by complete inspected rejection evidence.
+- `needs_review`, missing rows, and incomplete evidence are unresolved and block.
+
+This separation keeps internal commits from being attached to unrelated public
+notes merely to satisfy a counter. Coverage JSON retains the raw `status` and
+adds `audit_decision`, `coverage_requirement`, `gate_satisfied`, and
+`accounted_as`.
+
+### Release-check phases
+
+`release check --phase current` evaluates persisted state with the compatible
+default behavior. `--phase finalize --released-at DATE` asks whether a planned,
+draft, or candidate release is ready to transition to released and does not
+require a tag. `--phase published` checks post-release consistency, including a
+release date, matching Git tag when Git is active, changelog presence, and clean
+reconciliation. Human output renders every gate included in the final result;
+JSON exposes stable `failed_checks` and actionable `next_actions`.
 
 ## Versioning
 

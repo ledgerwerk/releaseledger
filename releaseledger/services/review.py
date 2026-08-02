@@ -429,7 +429,11 @@ def _phase_reconciliation(
 ) -> dict[str, object]:
     """Apply release-check phase severity to reconciliation findings."""
     raw_problems = block.get("problems", [])
-    problems = [problem for problem in raw_problems if isinstance(problem, dict)]
+    problems = (
+        [problem for problem in raw_problems if isinstance(problem, dict)]
+        if isinstance(raw_problems, list)
+        else []
+    )
     filtered: list[dict[str, object]] = []
     for problem in problems:
         kind = str(problem.get("kind", ""))
@@ -584,7 +588,7 @@ def _compute_coverage(
     return coverage
 
 
-def build_release_review(
+def build_release_review(  # noqa: C901 - orchestrates the consolidated release gate
     workspace_root: Path,
     *,
     version: str,
@@ -629,7 +633,7 @@ def build_release_review(
     statuses = tuple(normalize_entry_status(value) for value in include_statuses)
     entries = load_entries(workspace_root, version)
     audit_sheet = load_commit_audit_sheet(workspace_root, version)
-    audit_rows = (
+    audit_rows: dict[str, object] | None = (
         {row.source_ref: row for row in audit_sheet.rows}
         if audit_sheet is not None
         else None
@@ -760,10 +764,10 @@ def build_release_review(
         release_state_ok = not (release.released_at and release.status != "released")
     chain_ok = bool(chain_block.get("ok", False))
     reconciliation_ok = bool(reconciliation_block.get("ok", False))
+    snapshot_drift = git_block.get("snapshot_drift") if git_block else None
     snapshot_ok = not (
-        isinstance(git_block, dict)
-        and isinstance(git_block.get("snapshot_drift"), dict)
-        and git_block["snapshot_drift"].get("status") == "drifted"
+        isinstance(snapshot_drift, dict)
+        and snapshot_drift.get("status") == "drifted"
     )
 
     # Commit audit sheet integration (opt-in via --require-audit-sheet).
@@ -924,7 +928,10 @@ def _build_audit_block(
     violations_raw = complete["subject_summary_violations"]
     row_count = row_count_raw if isinstance(row_count_raw, int) else 0
     uninspected_count = uninsp_raw if isinstance(uninsp_raw, int) else 0
-    evidence_issues = report.get("issues", [])
+    raw_evidence_issues = report.get("issues", [])
+    evidence_issues = (
+        raw_evidence_issues if isinstance(raw_evidence_issues, list) else []
+    )
     missing_evidence_fields = sorted(
         {
             str(issue.get("code"))

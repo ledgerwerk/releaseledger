@@ -10,10 +10,13 @@ import yaml
 from typer.testing import CliRunner
 
 from releaseledger.cli import _render_release_check_human, app
-from releaseledger.domain.audit import CommitAuditRow, CommitAuditSheetRecord, initial_versioning
+from releaseledger.domain.audit import (
+    CommitAuditRow,
+    CommitAuditSheetRecord,
+    initial_versioning,
+)
 from releaseledger.services.review import build_release_review
 from releaseledger.storage.store import load_commit_audit_sheet, save_commit_audit_sheet
-
 
 runner = CliRunner()
 

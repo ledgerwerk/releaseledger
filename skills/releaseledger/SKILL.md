@@ -59,12 +59,13 @@ releaseledger release update VERSION
 releaseledger release prepare VERSION
 releaseledger release tag VERSION
 releaseledger release finalize VERSION
-releaseledger release check VERSION [--strict] [--target-file PATH]
+releaseledger release check VERSION [--phase current|finalize|published] [--strict] [--target-file PATH]
 releaseledger entry add VERSION --kind KIND --summary TEXT
 releaseledger entry add-many VERSION --file FILE --dry-run [--strict] [--guard-commit-subjects]
 releaseledger entry add-many VERSION --file FILE [--strict] [--guard-commit-subjects] [--sync-audit]
 releaseledger entry show VERSION ENTRY_ID
 releaseledger entry update VERSION ENTRY_ID
+releaseledger entry update VERSION ENTRY_ID --add-source-ref REF
 releaseledger entry import VERSION --file FILE
 releaseledger entry list VERSION
 releaseledger entry lint VERSION --strict
@@ -79,6 +80,7 @@ releaseledger git import VERSION [--base REF] [--head REF] --output PATH
 releaseledger git evidence VERSION [--base REF] [--head REF] --output-dir DIR
 releaseledger audit init VERSION [--base REF] [--head REF] [--overwrite]
 releaseledger audit show VERSION [--format markdown|json|yaml] [--output PATH]
+releaseledger audit decisions VERSION --output PATH
 releaseledger audit apply VERSION --file PATH [--dry-run]
 releaseledger audit refresh VERSION [--base REF] [--head REF] [--allow-remove]
 releaseledger audit update VERSION --file PATH
@@ -142,12 +144,16 @@ release.
 
 Decision tree:
 
-1. Check shipped evidence first: git tags, existing changelog headings, or an
-   explicit user statement.
-2. If a stored release version was never shipped and the number was wrong, use
-   `release rename`. Pass `--force-released-unshipped` if it is currently marked
-   `released`, `--previous` to set the real predecessor, and
-   `--rename-changelog-section --target-file CHANGELOG.md` to fix the heading.
+1. Preview the correction first; planned releases need no force flag:
+   `releaseledger release rename OLD NEW --previous PREV --target-file CHANGELOG.md`
+   `--rename-changelog-section --dry-run`.
+2. Apply the rename with `--rename-changelog-section` when the old generated
+   heading should move. Without that flag, inspect the reported stale heading
+   and run the exact suggested `changelog-section rename-section` command.
+   The rename preserves title and status unless explicitly overridden.
+3. Prepare the corrected release in one step:
+   `releaseledger release prepare NEW --previous PREV --released-at DATE`
+   with `--git-base` and `--git-head` when the range is known.
 3. If the wrong version should remain as a visible audit tombstone, use
    `release cancel --reason "..." --superseded-by VERSION` (sets status
    `canceled`).
@@ -158,6 +164,31 @@ Decision tree:
    `release update VERSION --clear-previous`.
 6. Build the changelog from the net shipped baseline, then bump the package
    version.
+
+For a complete release-day correction, use this sequence:
+
+```bash
+releaseledger release rename OLD NEW --previous PREV \
+  --target-file CHANGELOG.md --rename-changelog-section --dry-run
+releaseledger release rename OLD NEW --previous PREV \
+  --target-file CHANGELOG.md --rename-changelog-section
+releaseledger release prepare NEW --previous PREV --released-at DATE \
+  --git-base PREV_TAG --git-head HEAD --output-dir .releaseledger/work/NEW
+releaseledger audit decisions NEW --output .releaseledger/work/NEW/audit-decisions.yaml
+releaseledger audit apply NEW --file .releaseledger/work/NEW/audit-decisions.yaml --dry-run
+releaseledger audit apply NEW --file .releaseledger/work/NEW/audit-decisions.yaml
+releaseledger release check NEW --phase finalize --released-at DATE --strict \
+  --target-file CHANGELOG.md
+releaseledger changelog build NEW --output CHANGELOG.md --strict --replace-existing
+releaseledger release finalize NEW --released-at DATE
+releaseledger release check NEW --phase published --strict --target-file CHANGELOG.md
+```
+
+Internal or rejected commits with complete audit evidence are accounted for by
+the audit sheet and do not need unrelated public entry refs. Use
+`--add-source-ref` to add genuine provenance while preserving existing refs;
+`--source-ref` replaces the complete list, and `--clear-source-refs` is the
+explicit clear operation.
 
 Example (canceled v0.4.3, intended v0.5.0 from v0.4.2):
 
@@ -264,10 +295,12 @@ Use this for any git-backed changelog or release-note backfill.
 2. After the snapshot is pinned, omit `--head` unless intentionally refreshing
    the stored snapshot.
 3. Create the sheet with `releaseledger audit init VERSION`.
-4. Export the canonical editable YAML with
-   `releaseledger audit show VERSION --format yaml --output audit.yaml`.
-5. Curate row annotations with a minimal decisions file and apply it with
-   `releaseledger audit apply VERSION --file audit-decisions.yaml [--dry-run]`.
+4. Generate the mutable decisions worksheet with
+   `releaseledger audit decisions VERSION --output audit-decisions.yaml`.
+   It pre-fills changed paths but never marks a commit inspected.
+5. Curate row annotations and run `audit apply --dry-run`; completed decisions
+   must include `inspected: true`, `inspected_paths`, and `observed_behavior`.
+   Apply only after the dry-run reports no evidence deficiencies.
 6. Never copy, paraphrase, title-case, or mechanically convert
    `evidence_subject` into `summary`.
 7. Validate the evidence phase before creating entries:
@@ -280,8 +313,9 @@ Use this for any git-backed changelog or release-note backfill.
    `releaseledger entry add-many VERSION --file entries.yaml --strict --guard-commit-subjects --sync-audit`.
 10. Validate the complete phase after entries exist:
     `releaseledger audit validate VERSION --phase complete --strict --include-internal`.
-11. Run `releaseledger release check VERSION --strict --target-file CHANGELOG.md`
-    before any final build.
+11. Run `releaseledger release check VERSION --phase finalize --released-at DATE --strict
+    --target-file CHANGELOG.md` before any final build. Use the
+    `published` phase after finalization and tagging.
 
 `audit init` writes one `needs_review` row per git candidate commit. Decisions
 are `needs_review`, `accepted`, `grouped`, `internal`, and `rejected`.

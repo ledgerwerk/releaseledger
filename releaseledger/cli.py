@@ -1656,7 +1656,7 @@ def entry_update_command(
     """Update explicitly supplied entry fields."""
     state = cli_state_from_context(ctx)
 
-    if status is not None and all(
+    if status is not None and not clear_source_refs and all(
         value is None
         for value in (
             kind,
@@ -1667,7 +1667,6 @@ def entry_update_command(
             source_refs,
             add_source_refs,
             remove_source_refs,
-            clear_source_refs,
             paths,
             issues,
             prs,
@@ -2148,8 +2147,6 @@ def entry_prompt_command(
         result={"format": format_name, "content": text},
         human=text,
         json_output=state.json_output,
-        workspace_root=_paths(ctx).workspace_root,
-        mutating=not dry_run,
     )
 
 
@@ -2534,6 +2531,12 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
         )
     evidence_status = "OK" if audit_evidence_ok else "FAIL"
     lines.append(f"Audit evidence  {evidence_status}  {audit_evidence_text}")
+    changelog_value = result.get("changelog")
+    changelog_reason = (
+        changelog_value.get("reason", "dry-run failed")
+        if isinstance(changelog_value, dict)
+        else "dry-run failed"
+    )
     covered_count = sum(
         row.get("status") == "covered" for row in coverage_list if isinstance(row, dict)
     )
@@ -2558,11 +2561,9 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
         f"Changelog       "
         f"{'OK' if bool(checks_dict.get('changelog_ok', False)) else 'FAIL'}  "
         + str(
-            (
                 "dry-run rendered"
                 if bool(checks_dict.get("changelog_ok", False))
-                else (result.get("changelog", {}) or {}).get("reason", "dry-run failed")
-            )
+                else changelog_reason
         )
     )
     lines.append(
@@ -2583,7 +2584,7 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
         f"Reconciliation  {'OK' if reconciliation_ok else 'FAIL'}"
         + (f" ({problem_count} problems)" if not reconciliation_ok else "")
     )
-    for label, block in (
+    for _label, block in (
         ("Release chain", chain_dict),
         ("Reconciliation", reconciliation_dict),
     ):
@@ -4534,11 +4535,12 @@ def audit_decisions_command(
     except ReleaseledgerError as exc:
         emit_error(command="audit.decisions", error=exc, json_output=state.json_output)
         raise typer.Exit(launch_error_exit_code(exc)) from exc
+    template_rows = template.get("rows", [])
     result = {
         "kind": "commit_audit_decisions_template",
         "version": version,
         "output": str(written),
-        "row_count": len(template.get("rows", [])),
+        "row_count": len(template_rows) if isinstance(template_rows, list) else 0,
     }
     emit_payload(
         command="audit.decisions",
