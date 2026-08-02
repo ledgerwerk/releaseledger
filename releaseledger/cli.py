@@ -1310,6 +1310,10 @@ def release_rename_command(
             help="Overwrite a destination changelog section if it exists.",
         ),
     ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Preview the rename without writing."),
+    ] = False,
 ) -> None:
     """Rename a release and move its bundle to the new version."""
     state = cli_state_from_context(ctx)
@@ -1329,11 +1333,30 @@ def release_rename_command(
             target_file=target_file,
             rename_changelog_section=rename_changelog_section,
             replace_existing_section=replace_existing_section,
+            dry_run=dry_run,
         )
+        if dry_run:
+            human = (
+                f"previewed rename of release {old_version} to {new_version}\n"
+                f"  bundle move: {result.get('bundle_move')}\n"
+                f"  changelog: {result.get('changelog_action')}"
+            )
+        else:
+            human = f"renamed release {old_version} to {new_version}"
+            changelog = result.get("changelog", {})
+            if isinstance(changelog, dict):
+                warning = changelog.get("warning")
+                next_action = changelog.get("next_action")
+                if warning:
+                    human += f"\nChangelog: {warning}"
+                if next_action:
+                    human += f"\nNext:\n  {next_action}"
+                if changelog.get("updated"):
+                    human += f"\nChangelog: renamed section {old_version} to {new_version}"
         return (
             result,
             _event_ids(result),
-            f"renamed release {old_version} to {new_version}",
+            human,
         )
 
     run_command(
@@ -1341,6 +1364,8 @@ def release_rename_command(
         result_type="release",
         json_output=state.json_output,
         produce=produce,
+        workspace_root=_paths(ctx).workspace_root,
+        mutating=not dry_run,
     )
 
 
@@ -2106,6 +2131,8 @@ def entry_prompt_command(
         result={"format": format_name, "content": text},
         human=text,
         json_output=state.json_output,
+        workspace_root=_paths(ctx).workspace_root,
+        mutating=not dry_run,
     )
 
 

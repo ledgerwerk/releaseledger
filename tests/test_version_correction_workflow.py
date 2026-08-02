@@ -105,7 +105,10 @@ def test_version_correction_dry_run_previews_changelog_and_preserves_metadata(
     assert preview["result"]["old_changelog_section_found"] is True
     assert preview["result"]["changelog_action"] == "rename"
     assert preview["result"]["would_write"] is False
-    assert (tmp_path / ".ledger" / "releaseledger" / "data" / "releases" / "0.3.0").exists()
+    old_release = _json_run(tmp_path, "release", "show", "0.3.0")
+    assert old_release["result"]["release"]["version"] == "0.3.0"
+    new_release = _run(tmp_path, "release", "show", "0.2.8")
+    assert new_release.exit_code != 0
 
     applied = _run(
         tmp_path,
@@ -154,6 +157,32 @@ def test_version_correction_without_changelog_flag_reports_exact_next_action(
         "releaseledger changelog-section rename-section 0.3.0 0.2.8"
         in renamed.stdout
     )
+
+
+def test_version_correction_changelog_destination_conflict_is_preflighted(
+    tmp_path: Path,
+) -> None:
+    assert _run(tmp_path, "init").exit_code == 0
+    assert _run(tmp_path, "release", "create", "0.3.0").exit_code == 0
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## 0.3.0\n\n- Old\n\n## 0.2.8\n\n- Destination\n",
+        encoding="utf-8",
+    )
+
+    conflict = _run(
+        tmp_path,
+        "release",
+        "rename",
+        "0.3.0",
+        "0.2.8",
+        "--target-file",
+        "CHANGELOG.md",
+        "--rename-changelog-section",
+    )
+
+    assert conflict.exit_code != 0
+    assert _run(tmp_path, "release", "show", "0.3.0").exit_code == 0
+    assert _run(tmp_path, "release", "show", "0.2.8").exit_code != 0
 
 
 def test_release_coverage_projects_audit_decisions_without_fake_public_refs(

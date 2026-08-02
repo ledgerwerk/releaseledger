@@ -890,6 +890,58 @@ def _resolve_changelog_target(workspace_root: Path, target_file: Path) -> Path:
     return path if path.is_absolute() else (workspace_root / path)
 
 
+def _rename_changelog_plan(
+    workspace_root: Path,
+    *,
+    existing: ReleaseRecord,
+    old_version: str,
+    new_version: str,
+    target_file: Path | None,
+    rename_section: bool,
+    replace_existing: bool,
+) -> tuple[dict[str, object], Path, str | None]:
+    """Inspect and preflight the changelog side of a release rename."""
+    paths = resolve_project_paths(workspace_root)
+    chosen = target_file or Path(existing.changelog_file or paths.config.changelog_output)
+    target = _resolve_changelog_target(workspace_root, chosen)
+    text = target.read_text(encoding="utf-8") if target.is_file() else ""
+    old_found = find_release_section(text, old_version) is not None
+    new_found = find_release_section(text, new_version) is not None
+    staged: str | None = None
+    if rename_section:
+        # Run the full transformation against the in-memory document before
+        # moving the release bundle so destination conflicts fail pre-write.
+        staged = rename_release_section(
+            text,
+            old_version,
+            new_version,
+            replace_existing=replace_existing,
+        )
+        action = "rename"
+    elif old_found:
+        action = "report_stale"
+    else:
+        action = "none"
+    target_display = str(chosen)
+    plan: dict[str, object] = {
+        "target_file": target_display,
+        "old_changelog_section_found": old_found,
+        "new_changelog_section_found": new_found,
+        "changelog_action": action,
+        "rename_requested": rename_section,
+        "would_write": False,
+    }
+    if old_found and not rename_section:
+        plan["warning"] = (
+            f"old section {old_version} still exists in {target_display}"
+        )
+        plan["next_action"] = (
+            "releaseledger changelog-section rename-section "
+            f"{old_version} {new_version} --target-file {target_display}"
+        )
+    return plan, target, staged
+
+
 def _rewrite_changelog_section(
     target_file: Path,
     old_version: str,
@@ -1200,6 +1252,7 @@ def rename_release(
     target_file: Path | None = None,
     rename_changelog_section: bool = False,
     replace_existing_section: bool = False,
+    dry_run: bool = False,
 ) -> dict[str, object]:
     """Rename a release from ``old_version`` to ``new_version``.
 
@@ -1247,15 +1300,7 @@ def rename_release(
     )
     if resolved_previous is not None:
         resolved_previous = validate_release_version(str(resolved_previous))
-    # Adjust a default tag title ("Release OLD") to the new version; keep a
-    # custom title unless --title overrides it.
-    resolved_title: str | None
-    if title is not None:
-        resolved_title = title
-    elif existing.title == f"Release {old_version}":
-        resolved_title = f"Release {new_version}"
-    else:
-        resolved_title = existing.title
+    resolved_title = title if title is not None else existing.title
     # Successor check: any release pointing at the old version as a predecessor.
     successors = [
         r
@@ -1271,6 +1316,29 @@ def rename_release(
             exit_code=2,
             data={"successors": sorted(r.version for r in successors)},
         )
+    changelog_plan, changelog_target, staged_changelog = _rename_changelog_plan(
+        workspace_root,
+        existing=existing,
+        old_version=old_version,
+        new_version=new_version,
+        target_file=target_file,
+        rename_section=rename_changelog_section,
+        replace_existing=replace_existing_section,
+    )
+    rename_plan: dict[str, object] = {
+        "old_version": old_version,
+        "new_version": new_version,
+        "bundle_move": True,
+        "entries_to_rewrite": len(load_entries(workspace_root, old_version)),
+        "successors_to_rewrite": len(successors) if rewrite_successors else 0,
+        "audit_to_move": load_commit_audit_sheet(workspace_root, old_version)
+        is not None,
+        **changelog_plan,
+        "would_write": not dry_run,
+    }
+    if dry_run:
+        rename_plan["release"] = existing.to_dict()
+        return {"kind": "release_rename_preview", **rename_plan}
     new_record = ReleaseRecord(
         version=new_version,
         status=existing.status,
@@ -1321,15 +1389,27 @@ def rename_release(
     )
     rebuild_indexes(workspace_root)
     payload = _release_payload(workspace_root, new_record, event.event_id)
-    if target_file is not None and rename_changelog_section:
-        changelog_result = _rewrite_changelog_section(
-            _resolve_changelog_target(workspace_root, target_file),
-            old_version,
-            new_version,
-            mode="rename",
-            replace_existing=replace_existing_section,
+    if rename_changelog_section:
+        assert staged_changelog is not None
+        ledgercore.ensure_dir(changelog_target.parent)
+        ledgercore.atomic_write_text(changelog_target, staged_changelog)
+        payload["changelog"] = {
+            **changelog_plan,
+            "updated": True,
+            "section_renamed": True,
+        }
+    else:
+        payload["changelog"] = {**changelog_plan, "updated": False}
+    payload["rename_plan"] = rename_plan
+    if (
+        released_at is not UNSET
+        and released_at is not None
+        and existing.status != "released"
+    ):
+        payload["status_warning"] = (
+            f"released_at set to {resolved_released_at}; status retained as "
+            f"{existing.status}"
         )
-        payload["changelog"] = changelog_result
     return payload
 
 
