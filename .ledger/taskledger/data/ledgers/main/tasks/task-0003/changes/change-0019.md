@@ -5,10 +5,11 @@ file_version: v2
 change_id: change-0019
 task_id: task-0003
 implementation_run: run-0003
-timestamp: '2026-08-02T07:51:18Z'
+timestamp: "2026-08-02T07:51:18Z"
 kind: doc
 path: docs/commands.md
-summary: Documented rename previews, check phases, failed-check JSON, coverage semantics,
+summary:
+  Documented rename previews, check phases, failed-check JSON, coverage semantics,
   and audit worksheet commands.
 git_commit: null
 git_diff_stat: null
@@ -17,4 +18,5 @@ before_hash: null
 after_hash: null
 exit_code: null
 ---
+
 Documented rename previews, check phases, failed-check JSON, coverage semantics, and audit worksheet commands.

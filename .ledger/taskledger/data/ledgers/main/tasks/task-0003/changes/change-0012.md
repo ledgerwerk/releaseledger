@@ -5,7 +5,7 @@ file_version: v2
 change_id: change-0012
 task_id: task-0003
 implementation_run: run-0003
-timestamp: '2026-08-02T07:33:56Z'
+timestamp: "2026-08-02T07:33:56Z"
 kind: edit
 path: releaseledger/services/audit.py
 summary: Added audit decisions worksheet generation and complete-row evidence validation.
@@ -16,4 +16,5 @@ before_hash: null
 after_hash: null
 exit_code: null
 ---
+
 Added audit decisions worksheet generation and complete-row evidence validation.

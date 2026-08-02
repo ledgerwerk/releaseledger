@@ -5,11 +5,11 @@ file_version: v2
 check_id: check-0011
 task_id: task-0003
 implementation_run: run-0003
-timestamp: '2026-08-02T07:49:36Z'
+timestamp: "2026-08-02T07:49:36Z"
 command: python scripts/generate_cli_reference.py
 argv:
-- python
-- scripts/generate_cli_reference.py
+  - python
+  - scripts/generate_cli_reference.py
 exit_code: 0
 status: passed
 category: other
@@ -18,4 +18,3 @@ stdout_ref: null
 stderr_ref: null
 combined_ref: null
 ---
-
