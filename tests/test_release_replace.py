@@ -56,7 +56,9 @@ def test_replace_canceled_target_dry_run_preserves_bundles(tmp_path: Path) -> No
     assert len(load_entries(tmp_path, "0.1.0")) == 1
 
 
-def test_replace_canceled_target_moves_entries_and_removes_source(tmp_path: Path) -> None:
+def test_replace_canceled_target_moves_entries_and_removes_source(
+    tmp_path: Path,
+) -> None:
     _fixture(tmp_path)
     rename_release(
         tmp_path,
@@ -66,9 +68,11 @@ def test_replace_canceled_target_moves_entries_and_removes_source(tmp_path: Path
         reason="Keep the source release bundle.",
     )
 
-    assert not (tmp_path / ".releaseledger").joinpath(
-        "ledgers", "main", "releases", "v0.1.0"
-    ).exists()
+    assert (
+        not (tmp_path / ".releaseledger")
+        .joinpath("ledgers", "main", "releases", "v0.1.0")
+        .exists()
+    )
     entries = load_entries(tmp_path, "0.1.0")
     assert [entry.summary for entry in entries] == ["source one", "source two"]
     assert all(entry.release_version == "0.1.0" for entry in entries)
@@ -82,7 +86,9 @@ def test_replace_canceled_target_rejects_non_canceled_target(tmp_path: Path) -> 
     target = load_release(tmp_path, "0.1.0")
     save_release(
         tmp_path,
-        replace(target, status="released", versioning=bump_versioning(target.versioning)),
+        replace(
+            target, status="released", versioning=bump_versioning(target.versioning)
+        ),
         overwrite=True,
     )
     with pytest.raises(LaunchError):

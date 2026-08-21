@@ -67,9 +67,7 @@ def is_git_symbolic_or_range_ref(ref: str) -> bool:
             return True
     # git:<name> where <name> is not a hex SHA. ``git:HEAD`` is the canonical
     # example; ``git:main``/``git:v1.0.0`` are the same family.
-    if ref.startswith("git:") and not is_git_commit_ref(ref):
-        return True
-    return False
+    return bool(ref.startswith("git:") and not is_git_commit_ref(ref))
 
 
 def normalize_source_ref(raw: str) -> str:
@@ -110,8 +108,10 @@ def normalize_source_ref(raw: str) -> str:
             exit_code=2,
             remediation=[
                 "Resolve the ref to a full SHA with `git rev-parse <ref>`.",
-                "Store range metadata in release git_base_ref/git_head_ref, "
-                "not in source_refs.",
+                (
+                    "Store range metadata in release git_base_ref/git_head_ref, "
+                    "not in source_refs."
+                ),
             ],
         )
     if is_git_commit_ref(value):
@@ -159,7 +159,4 @@ def is_coverable_boundary_ref(ref: str | None) -> bool:
     # git-range:/git-tag:/git-branch: already handled above. Any remaining
     # git:* value is either a commit SHA (coverable) or a symbolic ref. A
     # symbolic ref as a boundary is a range marker -> non-coverable.
-    if value.startswith("git:") and not is_git_commit_ref(value):
-        return False
-    # Everything else is a ledgercore-style global work-item ref (coverable).
-    return True
+    return not value.startswith("git:") or is_git_commit_ref(value)

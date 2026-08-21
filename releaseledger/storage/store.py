@@ -560,7 +560,7 @@ def replace_canceled_release_bundle(
     workspace_root: Path,
     old_version: str,
     new_record: ReleaseRecord,
- ) -> ReleaseRecord:
+) -> ReleaseRecord:
     """Atomically replace an existing target with a rewritten source bundle."""
     paths = _resolve(workspace_root)
     validate_release_version(old_version)

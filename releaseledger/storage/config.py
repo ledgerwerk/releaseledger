@@ -50,13 +50,13 @@ __all__ = [
     "GIT_DEFAULT_REQUIRE_CLEAN_WORKTREE",
     "GIT_INCLUDE_MERGE_POLICIES",
     "KEEPACHANGELOG_PREAMBLE",
-    "ProjectConfig",
     "REMOVED_FIELDS",
+    "ProjectConfig",
     "load_project_config",
     "render_default_project_config",
-    "update_project_config",
     "render_default_releaseledger_toml",
     "render_project_config",
+    "update_project_config",
     "write_project_config",
 ]
 

@@ -248,7 +248,7 @@ class TestFullBuild:
             "added",
             "--summary",
             "Planned two",
-        )  # noqa: E501
+        )
         # A canceled release should be excluded by default.
         result = _run(
             tmp_path,
@@ -259,7 +259,7 @@ class TestFullBuild:
             "2026-03-01",
         )
         assert result.exit_code == 0, _human_error(result)
-        cancel = _run(  # noqa: E501
+        cancel = _run(
             tmp_path,
             "release",
             "cancel",
@@ -295,7 +295,7 @@ class TestFullBuild:
             "added",
             "--summary",
             "Planned two",
-        )  # noqa: E501
+        )
 
         # Default excludes the planned release.
         default = _run(tmp_path, "build", "--dry-run")
@@ -348,7 +348,7 @@ class TestFullBuild:
         assert result.exit_code == 0, _human_error(result)
         _run(
             tmp_path, "entry", "add", "0.1.0", "--kind", "added", "--summary", "Feature"
-        )  # noqa: E501
+        )
         strict = _run(tmp_path, "build", "--strict")
         assert strict.exit_code != 0
         assert "date" in _human_error(strict).lower()
@@ -444,7 +444,7 @@ class TestFullBuild:
         # With a body present, the [Unreleased] link ref is regenerated.
         assert (
             "[Unreleased]: https://example.com/owner/repo/compare/v0.1.0...HEAD" in text
-        )  # noqa: E501
+        )
 
     def test_full_build_dry_run_does_not_write(self, tmp_path: Path) -> None:
         self._seed_two_releases(tmp_path)

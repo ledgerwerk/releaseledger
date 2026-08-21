@@ -86,28 +86,28 @@ __all__ = [
     "DATA_MOUNT",
     "INDEXES_MOUNT",
     "MIGRATION_STRATEGY_REBUILD",
+    "TOOL_NAME",
     "PreparedReleaseledgerTarget",
     "ReleaseledgerLedgerLayout",
-    "TOOL_NAME",
     "UserNamespace",
     "build_releaseledger_legacy_migration_plan",
     "clear_releaseledger_data_override",
-    "ensure_releaseledger_registration",
     "ensure_releaseledger_config_binding",
+    "ensure_releaseledger_registration",
+    "execute_releaseledger_layout_migration",
     "expected_releaseledger_storage_binding",
     "fingerprint_releaseledger_file",
-    "inspect_releaseledger_migration",
-    "read_releaseledger_storage_binding",
-    "recover_releaseledger_migration",
-    "storage_bindings_match",
-    "validate_releaseledger_migration_plan",
-    "execute_releaseledger_layout_migration",
     "initialize_releaseledger_locations",
+    "inspect_releaseledger_migration",
     "inspect_releaseledger_migration_destinations",
     "load_releaseledger_ledger_layout",
     "plan_releaseledger_layout_migration",
     "prepare_legacy_migration_target",
+    "read_releaseledger_storage_binding",
+    "recover_releaseledger_migration",
     "set_releaseledger_data_target",
+    "storage_bindings_match",
+    "validate_releaseledger_migration_plan",
 ]
 
 TOOL_NAME = "releaseledger"
@@ -521,8 +521,10 @@ def load_releaseledger_ledger_layout(
                 "manifest_path": str(loaded.locator.manifest_path),
             },
             remediation=[
-                "Add a [ledgers.releaseledger] registration with 'data' and "
-                "'indexes' mounts.",
+                (
+                    "Add a [ledgers.releaseledger] registration with 'data' and "
+                    "'indexes' mounts."
+                ),
             ],
         )
 

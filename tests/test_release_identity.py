@@ -26,7 +26,9 @@ def test_release_identity_key_normalizes_only_semver_v_prefix() -> None:
     assert release_identity_key("vv1.2.3") == "vv1.2.3"
 
 
-def test_unique_alias_selector_resolves_and_show_uses_raw_bundle(tmp_path: Path) -> None:
+def test_unique_alias_selector_resolves_and_show_uses_raw_bundle(
+    tmp_path: Path,
+) -> None:
     ensure_canonical_project(tmp_path)
     create_release(tmp_path, version="0.1.0")
 

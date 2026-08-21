@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import functools
 import json
+import operator
 import subprocess
 from pathlib import Path
 
@@ -205,7 +207,9 @@ def test_release_coverage_projects_audit_decisions_without_fake_public_refs(
             "release",
             "create",
             "0.2.0",
-            *sum((["--source-ref", ref] for ref in refs.values()), []),
+            *functools.reduce(
+                operator.iadd, (["--source-ref", ref] for ref in refs.values()), []
+            ),
         ).exit_code
         == 0
     )

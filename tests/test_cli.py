@@ -67,7 +67,7 @@ class TestPhase1Shell:
         assert __version__
 
     def test_import_releaseledger_cli(self) -> None:
-        import releaseledger.cli  # noqa: F401
+        import releaseledger.cli
         import releaseledger.launcher  # noqa: F401
 
     def test_version_flag(self) -> None:
@@ -371,7 +371,9 @@ class TestPhase3Releases:
         assert "status: released" in show.stdout
         assert "released_at: 2026-06-13" in show.stdout
 
-    def test_release_finalize_already_released_is_idempotent(self, tmp_path: Path) -> None:
+    def test_release_finalize_already_released_is_idempotent(
+        self, tmp_path: Path
+    ) -> None:
         _init_project(tmp_path)
         _run(tmp_path, "release", "tag", "1.2.0")
         result = _jrun(tmp_path, "release", "finalize", "1.2.0")

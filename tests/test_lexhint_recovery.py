@@ -64,11 +64,13 @@ def test_lexhint_shaped_canceled_release_recovery(tmp_path: Path) -> None:
         tmp_path,
         version="0.1.1",
         status="released",
-        released_at=datetime.date.today().isoformat(),
+        released_at=datetime.datetime.now(tz=datetime.timezone.utc).date().isoformat(),
     )
     _add_entries(tmp_path, "0.1.1", 2)
     changelog = tmp_path / "CHANGELOG.md"
-    changelog.write_text("# Changelog\n\n## Unreleased\n\nold content\n", encoding="utf-8")
+    changelog.write_text(
+        "# Changelog\n\n## Unreleased\n\nold content\n", encoding="utf-8"
+    )
 
     rename_release(
         tmp_path,

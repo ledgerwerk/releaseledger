@@ -220,7 +220,6 @@ releaseledger build 1.2.0 \
   --target-file CHANGELOG.md
 ```
 
-
 ## Recover a canceled release that shipped
 
 If a canceled release has a real Git tag, reconcile first, then use the explicit restore and bundle replacement workflows:

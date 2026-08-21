@@ -80,7 +80,7 @@ def _jrun(repo: Path, *cmd: str) -> dict:
 
 
 def _setup_release(tmp_path: Path) -> tuple[Path, str, str]:
-    """Create a repo with v0.1.0 + two commits, init releaseledger, return (repo, sha_a, sha_b)."""  # noqa: E501
+    """Create a repo with v0.1.0 + two commits, init releaseledger, return (repo, sha_a, sha_b)."""
     repo = _init_repo(tmp_path)
     _commit(repo, "root", "README.md")
     _git(repo, "tag", "v0.1.0")
@@ -100,7 +100,7 @@ def _setup_release(tmp_path: Path) -> tuple[Path, str, str]:
             "0.1.0",
             "--released-at",
             "2026-06-14",
-        ],  # noqa: E501
+        ],
     )
     assert result.exit_code == 0, result.output
     result = runner.invoke(
@@ -115,7 +115,7 @@ def _setup_release(tmp_path: Path) -> tuple[Path, str, str]:
             "v0.1.0",
             "--git-head",
             "HEAD",
-        ],  # noqa: E501
+        ],
     )
     assert result.exit_code == 0, result.output
     return repo, sha_a, sha_b
@@ -278,7 +278,7 @@ def test_git_scaffold_alias_emits_metadata_rich_batch(tmp_path: Path) -> None:
 
 
 def test_git_range_evidence_json_includes_full_fields(tmp_path: Path) -> None:
-    repo, sha_a, sha_b = _setup_release(tmp_path)
+    repo, sha_a, _sha_b = _setup_release(tmp_path)
     data = _jrun(repo, "git", "range", "0.2.0", "--evidence")
     assert data["ok"] is True
     candidates = data["result"]["candidates"]
@@ -299,7 +299,7 @@ def test_git_range_evidence_json_includes_full_fields(tmp_path: Path) -> None:
 
 
 def test_git_range_evidence_human_output_marks_evidence(tmp_path: Path) -> None:
-    repo, sha_a, sha_b = _setup_release(tmp_path)
+    repo, _sha_a, _sha_b = _setup_release(tmp_path)
     result = runner.invoke(
         app,
         ["--cwd", str(repo), "git", "range", "0.2.0", "--evidence"],
@@ -310,7 +310,7 @@ def test_git_range_evidence_human_output_marks_evidence(tmp_path: Path) -> None:
 
 
 def test_git_range_without_evidence_omits_fields(tmp_path: Path) -> None:
-    repo, sha_a, sha_b = _setup_release(tmp_path)
+    repo, _sha_a, _sha_b = _setup_release(tmp_path)
     data = _jrun(repo, "git", "range", "0.2.0")
     candidates = data["result"]["candidates"]
     cand = candidates[0]
@@ -389,7 +389,7 @@ def test_git_range_next_no_release_required(tmp_path: Path) -> None:
             "v0.1.0",
             "--head",
             "HEAD",
-        ],  # noqa: E501
+        ],
     )
     assert result.exit_code == 0, result.output
     assert "GIT RANGE next" in result.output
@@ -504,7 +504,7 @@ def test_git_import_writes_entry_yaml(tmp_path: Path) -> None:
             "--file",
             str(out_file),
             "--dry-run",
-        ],  # noqa: E501
+        ],
     )
     assert result2.exit_code != 0
     assert "Entry batch validation failed" in result2.output
@@ -545,7 +545,7 @@ def test_git_import_next_no_release_required(tmp_path: Path) -> None:
 
 
 def test_release_update_stores_git_metadata(tmp_path: Path) -> None:
-    repo, sha_a, sha_b = _setup_release(tmp_path)
+    repo, _sha_a, _sha_b = _setup_release(tmp_path)
     data = _jrun(repo, "release", "show", "0.2.0")
     release = data["result"]["release"]
     assert release["git_base_ref"] == "v0.1.0"
@@ -557,7 +557,7 @@ def test_release_update_stores_git_metadata(tmp_path: Path) -> None:
 
 
 def test_release_update_clear_git_range(tmp_path: Path) -> None:
-    repo, sha_a, sha_b = _setup_release(tmp_path)
+    repo, _sha_a, _sha_b = _setup_release(tmp_path)
     result = runner.invoke(
         app,
         ["--cwd", str(repo), "release", "update", "0.2.0", "--clear-git-range"],
@@ -592,7 +592,7 @@ def test_git_range_fails_without_base(tmp_path: Path) -> None:
             "0.1.0",
             "--released-at",
             "2026-06-14",
-        ],  # noqa: E501
+        ],
     )
     result = runner.invoke(app, ["--cwd", str(repo), "git", "range", "0.2.0"])
     assert result.exit_code != 0

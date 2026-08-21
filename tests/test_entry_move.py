@@ -94,7 +94,9 @@ def test_entry_move_requires_renumber_for_target_collision(tmp_path: Path) -> No
     assert len(load_entries(tmp_path, "0.2.0")) == 2
 
 
-def test_entry_move_rejects_duplicate_source_reference_ownership(tmp_path: Path) -> None:
+def test_entry_move_rejects_duplicate_source_reference_ownership(
+    tmp_path: Path,
+) -> None:
     ensure_canonical_project(tmp_path)
     create_release(tmp_path, version="0.1.0")
     create_release(tmp_path, version="0.2.0")

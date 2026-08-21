@@ -560,9 +560,7 @@ def _is_complete_releaseledger_project(project: ReleaseledgerProject) -> bool:
     if not releases_dir.is_dir():
         return False
     events_dir = ledger_dir / "events"
-    if not events_dir.is_dir():
-        return False
-    return True
+    return events_dir.is_dir()
 
 
 def _idempotent_init_result(project: ReleaseledgerProject) -> dict[str, object]:
@@ -738,8 +736,10 @@ def resolve_releaseledger_dir(
             "policy": policy,
         },
         remediation=[
-            "Configure the data mount through the canonical Ledger project "
-            "(`releaseledger storage set data --storage ...`).",
+            (
+                "Configure the data mount through the canonical Ledger project "
+                "(`releaseledger storage set data --storage ...`)."
+            ),
         ],
     )
 

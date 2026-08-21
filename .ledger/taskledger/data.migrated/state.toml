@@ -1,4 +1,0 @@
-schema_version = 2
-ledger_ref = "main"
-ledger_parent_ref = ""
-ledger_branch_guard = "off"

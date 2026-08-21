@@ -696,12 +696,14 @@ class TestErrorHandling:
                 exit_code=2,
             )
 
-        with patch(
-            "releaseledger.ledgercore_backend.prepare_legacy_migration_target",
-            side_effect=mock_prepare,
+        with (
+            patch(
+                "releaseledger.ledgercore_backend.prepare_legacy_migration_target",
+                side_effect=mock_prepare,
+            ),
+            pytest.raises(LaunchError),
         ):
-            with pytest.raises(LaunchError):
-                execute_migration(request)
+            execute_migration(request)
 
         assert call_count[0] == 1
 

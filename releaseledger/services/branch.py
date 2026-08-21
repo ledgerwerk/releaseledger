@@ -29,16 +29,16 @@ if TYPE_CHECKING:
     from releaseledger.storage.config import ProjectConfig
 
 __all__ = [
-    "BRANCH_GUARD_POLICIES",
     "BRANCH_GUARD_BLOCK",
-    "BRANCH_GUARD_WARN",
     "BRANCH_GUARD_OFF",
+    "BRANCH_GUARD_POLICIES",
+    "BRANCH_GUARD_WARN",
     "BranchGuardViolation",
+    "branch_merge",
+    "branch_start",
+    "branch_status",
     "check_branch_guard",
     "get_current_git_branch",
-    "branch_status",
-    "branch_start",
-    "branch_merge",
 ]
 
 
@@ -104,8 +104,10 @@ def check_branch_guard(
             code=CODE_USAGE_ERROR,
             exit_code=2,
             remediation=[
-                f"Switch to branch '{ledger_ref}', or set"
-                " ledger_branch_guard='warn' or 'off'.",
+                (
+                    f"Switch to branch '{ledger_ref}', or set"
+                    " ledger_branch_guard='warn' or 'off'."
+                ),
             ],
         )
     return msg + " (ledger_branch_guard='warn')"

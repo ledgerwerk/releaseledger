@@ -347,8 +347,10 @@ def add_release_entry(
             exit_code=2,
             data={"issues": duplicate_issues, "entry": record.to_dict()},
             remediation=[
-                "Use `sources` for supporting provenance when another entry "
-                "already owns the commit in `source_refs`."
+                (
+                    "Use `sources` for supporting provenance when another entry "
+                    "already owns the commit in `source_refs`."
+                )
             ],
         )
     if dry_run:
@@ -1174,7 +1176,7 @@ def move_release_entry(
     renumber: bool = False,
     move_audit_targets: bool = False,
     dry_run: bool = False,
- ) -> dict[str, object]:
+) -> dict[str, object]:
     """Move one entry between release bundles with preflighted ownership."""
     if not isinstance(reason, str) or not reason.strip():
         raise LaunchError(
@@ -1209,11 +1211,7 @@ def move_release_entry(
         if existing_target is not None
         else entry.entry_id
     )
-    target_refs = {
-        ref
-        for candidate in target_entries
-        for ref in candidate.source_refs
-    }
+    target_refs = {ref for candidate in target_entries for ref in candidate.source_refs}
     duplicate_refs = sorted(set(entry.source_refs) & target_refs)
     if duplicate_refs:
         raise LaunchError(
@@ -1230,7 +1228,8 @@ def move_release_entry(
             row
             for row in source_audit.rows
             if row.target_entry_id == entry.entry_id
-            or row.target_entry_key in {
+            or row.target_entry_key
+            in {
                 entry.entry_id,
                 f"{source_release.version}/{entry.entry_id}",
             }
@@ -1258,7 +1257,9 @@ def move_release_entry(
         entry_id=target_entry_id,
         release_version=target_release.version,
         versioning=initial_versioning(),
-        order=(max((candidate.order or 0 for candidate in target_entries), default=0) + 1),
+        order=(
+            max((candidate.order or 0 for candidate in target_entries), default=0) + 1
+        ),
     )
     updated_source = replace(
         source_release,
@@ -1273,14 +1274,17 @@ def move_release_entry(
     moved_source_audit = source_audit
     moved_target_audit = target_audit
     if targeted_rows and move_audit_targets and source_audit is not None:
-        remaining_rows = tuple(row for row in source_audit.rows if row not in targeted_rows)
+        remaining_rows = tuple(
+            row for row in source_audit.rows if row not in targeted_rows
+        )
         moved_rows = tuple(
             replace(
                 row,
                 target_entry_id=target_entry_id,
                 target_entry_key=(
                     f"{target_release.version}/{target_entry_id}"
-                    if row.target_entry_key == f"{source_release.version}/{entry.entry_id}"
+                    if row.target_entry_key
+                    == f"{source_release.version}/{entry.entry_id}"
                     else row.target_entry_key
                 ),
             )
@@ -1321,8 +1325,12 @@ def move_release_entry(
     if dry_run:
         return result
     paths = resolve_project_paths(workspace_root)
-    source_entry_path = release_dir(paths, source_release.version) / "entries" / f"{entry.entry_id}.md"
-    target_entry_path = release_dir(paths, target_release.version) / "entries" / f"{target_entry_id}.md"
+    source_entry_path = (
+        release_dir(paths, source_release.version) / "entries" / f"{entry.entry_id}.md"
+    )
+    target_entry_path = (
+        release_dir(paths, target_release.version) / "entries" / f"{target_entry_id}.md"
+    )
     files = [
         source_entry_path,
         target_entry_path,
@@ -1362,13 +1370,19 @@ def move_release_entry(
             f"release:{target_release.version}": updated_target.versioning.revision,
             f"entry:{target_release.version}/{target_entry_id}": moved_entry.versioning.revision,
             **(
-                {f"audit:{source_release.version}": moved_source_audit.versioning.revision}
-                if moved_source_audit is not source_audit and moved_source_audit is not None
+                {
+                    f"audit:{source_release.version}": moved_source_audit.versioning.revision
+                }
+                if moved_source_audit is not source_audit
+                and moved_source_audit is not None
                 else {}
             ),
             **(
-                {f"audit:{target_release.version}": moved_target_audit.versioning.revision}
-                if moved_target_audit is not target_audit and moved_target_audit is not None
+                {
+                    f"audit:{target_release.version}": moved_target_audit.versioning.revision
+                }
+                if moved_target_audit is not target_audit
+                and moved_target_audit is not None
                 else {}
             ),
         },

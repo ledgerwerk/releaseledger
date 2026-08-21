@@ -37,6 +37,8 @@ __all__ = [
     "ReleaseledgerLedgerLayout",
     "ReleaseledgerProject",
     "clear_releaseledger_data_override",
+    # Deprecated aliases retained for one release.
+    "config_set_releaseledger_dir",
     "config_show",
     "discover_legacy_project",
     "discover_workspace_root",
@@ -45,14 +47,12 @@ __all__ = [
     "load_releaseledger_ledger_layout",
     "migration_status",
     "render_default_project_config",
+    "render_default_releaseledger_toml",
     "require_project",
     "resolve_project_paths",
     "set_releaseledger_data_target",
     "storage_where",
     "write_project_config",
-    # Deprecated aliases retained for one release.
-    "config_set_releaseledger_dir",
-    "render_default_releaseledger_toml",
 ]
 
 # Deprecated aliases.

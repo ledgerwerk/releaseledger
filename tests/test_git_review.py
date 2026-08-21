@@ -114,7 +114,7 @@ def test_review_git_strict_fails_on_missing_commit(tmp_path: Path) -> None:
     )
     # Add only one entry covering one of the two commits.
     (repo / "entry.yaml").write_text(
-        f"entries:\n- kind: added\n  summary: Added a\n  source_refs:\n  - 'git:{sha_a}'\n  status: accepted\n"  # noqa: E501
+        f"entries:\n- kind: added\n  summary: Added a\n  source_refs:\n  - 'git:{sha_a}'\n  status: accepted\n"
     )
     runner.invoke(
         app,
@@ -126,7 +126,7 @@ def test_review_git_strict_fails_on_missing_commit(tmp_path: Path) -> None:
             "0.2.0",
             "--file",
             str(repo / "entry.yaml"),
-        ],  # noqa: E501
+        ],
     )
     result = runner.invoke(
         app,
@@ -205,7 +205,7 @@ def test_review_git_strict_passes_when_covered(tmp_path: Path) -> None:
             "0.2.0",
             "--file",
             str(repo / "entry.yaml"),
-        ],  # noqa: E501
+        ],
     )
     result = runner.invoke(
         app,
@@ -342,7 +342,7 @@ def test_review_git_works_without_taskledger(tmp_path: Path) -> None:
         ],
     )
     (repo / "entry.yaml").write_text(
-        f"entries:\n- kind: added\n  summary: Added a\n  source_refs:\n  - 'git:{sha_a}'\n  status: accepted\n"  # noqa: E501
+        f"entries:\n- kind: added\n  summary: Added a\n  source_refs:\n  - 'git:{sha_a}'\n  status: accepted\n"
     )
     runner.invoke(
         app,
@@ -354,7 +354,7 @@ def test_review_git_works_without_taskledger(tmp_path: Path) -> None:
             "0.2.0",
             "--file",
             str(repo / "entry.yaml"),
-        ],  # noqa: E501
+        ],
     )
     # No .taskledger.toml — should still work.
     result = runner.invoke(
@@ -371,7 +371,7 @@ def test_review_git_works_without_taskledger(tmp_path: Path) -> None:
 
 
 def test_review_boundary_ref_tl_coverable(tmp_path: Path) -> None:
-    """tl:task-0008 as boundary_ref IS a coverable expected ref (creates a missing row)."""  # noqa: E501
+    """tl:task-0008 as boundary_ref IS a coverable expected ref (creates a missing row)."""
     repo = _init_repo(tmp_path)
     _commit(repo, "root", "README.md")
     runner.invoke(app, ["--cwd", str(repo), "init"])
@@ -399,7 +399,7 @@ def test_review_boundary_ref_tl_coverable(tmp_path: Path) -> None:
             "0.2.0",
             "--boundary-ref",
             "tl:task-0008",
-        ],  # noqa: E501
+        ],
     )
     result = runner.invoke(
         app,
@@ -491,7 +491,7 @@ def test_review_service_git_auto_enables(tmp_path: Path) -> None:
         ],
     )
     (repo / "entry.yaml").write_text(
-        f"entries:\n- kind: added\n  summary: Added a\n  source_refs:\n  - 'git:{sha_a}'\n  status: accepted\n"  # noqa: E501
+        f"entries:\n- kind: added\n  summary: Added a\n  source_refs:\n  - 'git:{sha_a}'\n  status: accepted\n"
     )
     runner.invoke(
         app,
@@ -503,7 +503,7 @@ def test_review_service_git_auto_enables(tmp_path: Path) -> None:
             "0.2.0",
             "--file",
             str(repo / "entry.yaml"),
-        ],  # noqa: E501
+        ],
     )
     # Auto-enable: git=True is NOT passed but release has git metadata.
     result = build_release_review(

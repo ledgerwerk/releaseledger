@@ -479,8 +479,7 @@ def _build_review_recommendations(
     if strict and not bool(changelog_block.get("dry_run_ok", True)):
         reason = str(changelog_block.get("reason") or "changelog build")
         recommendations.append(f"Resolve strict changelog build failure: {reason}.")
-    for warn in git_warnings:
-        recommendations.append(warn)
+    recommendations.extend(git_warnings)
     if strict and git_block is not None and not git_coverage_ok:
         recommendations.append(
             f"{git_missing_count} git commit(s) in the release range"

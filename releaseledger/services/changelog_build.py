@@ -1133,11 +1133,15 @@ def _strict_git_range_coverage(
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
             remediation=[
-                "Run `releaseledger git import VERSION "
-                "--base BASE --head HEAD --output entries.yaml`.",
+                (
+                    "Run `releaseledger git import VERSION "
+                    "--base BASE --head HEAD --output entries.yaml`."
+                ),
                 "Rewrite the generated entry summaries from patch evidence.",
-                "Run `releaseledger entry add-many VERSION "
-                "--file entries.yaml --dry-run`.",
+                (
+                    "Run `releaseledger entry add-many VERSION "
+                    "--file entries.yaml --dry-run`."
+                ),
                 "Run `releaseledger review VERSION --git --strict` before building.",
             ],
         )
@@ -1256,8 +1260,10 @@ def build_changelog_file(
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
             remediation=[
-                "Use `build --all` to rebuild active releases, or pass "
-                "--include-canceled for archival/debug rendering."
+                (
+                    "Use `build --all` to rebuild active releases, or pass "
+                    "--include-canceled for archival/debug rendering."
+                )
             ],
         )
     statuses = tuple(normalize_entry_status(value) for value in include_statuses)
@@ -1948,8 +1954,10 @@ def build_full_changelog_file(  # noqa: C901
                 code=CODE_VALIDATION_ERROR,
                 exit_code=2,
                 remediation=[
-                    "Run with --no-preserve-unreleased if the "
-                    "Unreleased body is stale.",
+                    (
+                        "Run with --no-preserve-unreleased if the "
+                        "Unreleased body is stale."
+                    ),
                     "Or edit the manual Unreleased notes before rebuilding.",
                 ],
             )

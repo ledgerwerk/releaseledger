@@ -302,8 +302,10 @@ def init_command(
                 },
                 remediation=[
                     "Run `releaseledger init` without legacy flags.",
-                    "Use `releaseledger storage set data --storage external` "
-                    "`--root PATH` to change data storage after init.",
+                    (
+                        "Use `releaseledger storage set data --storage external` "
+                        "`--root PATH` to change data storage after init."
+                    ),
                     "to change data storage after init.",
                 ],
             )
@@ -904,27 +906,33 @@ def release_finalize_command(
 def release_restore_command(
     ctx: typer.Context,
     version: Annotated[str, typer.Argument(help="Canceled release version.")],
-    reason: Annotated[str, typer.Option("--reason", help="Why the release is restored.")],
+    reason: Annotated[
+        str, typer.Option("--reason", help="Why the release is restored.")
+    ],
     to_status: Annotated[
         str | None, typer.Option("--to", help="planned|draft|candidate when reopening.")
     ] = None,
     from_tag: Annotated[
-        str | None, typer.Option("--from-tag", help="Matching Git tag for shipped restoration.")
+        str | None,
+        typer.Option("--from-tag", help="Matching Git tag for shipped restoration."),
     ] = None,
     git_base_ref: Annotated[
-        str | None, typer.Option("--git-base", help="Git base ref for restored metadata.")
+        str | None,
+        typer.Option("--git-base", help="Git base ref for restored metadata."),
     ] = None,
     previous_version: Annotated[
-        str | None, typer.Option("--previous", help="Override previous release version.")
+        str | None,
+        typer.Option("--previous", help="Override previous release version."),
     ] = None,
     clear_previous: Annotated[
-        bool, typer.Option("--clear-previous", help="Clear previous_version explicitly.")
+        bool,
+        typer.Option("--clear-previous", help="Clear previous_version explicitly."),
     ] = False,
     released_at: Annotated[
         str | None, typer.Option("--released-at", help="Release date YYYY-MM-DD.")
     ] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
- ) -> None:
+) -> None:
     """Restore a canceled release or correct it from a Git tag."""
     state = cli_state_from_context(ctx)
 
@@ -936,7 +944,9 @@ def release_restore_command(
             to_status=to_status,
             from_tag=from_tag,
             git_base_ref=git_base_ref,
-            previous_version=previous_version if previous_version is not None else UNSET,
+            previous_version=previous_version
+            if previous_version is not None
+            else UNSET,
             clear_previous=clear_previous,
             released_at=released_at,
             dry_run=dry_run,
@@ -1832,12 +1842,17 @@ def entry_move_command(
     entry_id: Annotated[str, typer.Argument(help="Entry ID to move.")],
     target_version: Annotated[str, typer.Argument(help="Target release version.")],
     reason: Annotated[str, typer.Option("--reason", help="Why the entry is moved.")],
-    renumber: Annotated[bool, typer.Option("--renumber", help="Allocate a new target ID on collision.")] = False,
+    renumber: Annotated[
+        bool, typer.Option("--renumber", help="Allocate a new target ID on collision.")
+    ] = False,
     move_audit_targets: Annotated[
-        bool, typer.Option("--move-audit-targets", help="Move audit rows targeting the entry.")
+        bool,
+        typer.Option(
+            "--move-audit-targets", help="Move audit rows targeting the entry."
+        ),
     ] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
- ) -> None:
+) -> None:
     """Move one release entry between release bundles."""
     state = cli_state_from_context(ctx)
 
@@ -1991,12 +2006,7 @@ def entry_add_many_command(
         bool,
         typer.Option(
             "--guard-commit-subjects",
-            help=(", ").join(
-                [
-                    "Reject the batch when an entry summary copies or trivially "
-                    "transforms a commit subject from the audit sheet / git range.",
-                ]
-            ),
+            help="Reject the batch when an entry summary copies or trivially transforms a commit subject from the audit sheet / git range.",
         ),
     ] = False,
     sync_audit: Annotated[
@@ -2848,8 +2858,10 @@ def build_command(
             code="USAGE_ERROR",
             exit_code=2,
             remediation=[
-                "Use `releaseledger build --all` for a full rebuild, or"
-                "`releaseledger build VERSION` for one section.",
+                (
+                    "Use `releaseledger build --all` for a full rebuild, or"
+                    "`releaseledger build VERSION` for one section."
+                ),
             ],
         )
         emit_error(command="changelog build", error=err, json_output=state.json_output)
@@ -3238,8 +3250,7 @@ def _run_git_range(
             include_merges="always",
         )
     ) - len(candidates)
-    if skipped < 0:
-        skipped = 0
+    skipped = max(skipped, 0)
 
     base_ref_display = ":root" if is_root_base_ref(base_display) else base_display
     range_str = (
@@ -4476,8 +4487,10 @@ def config_set_command(
             code=CODE_USAGE_ERROR,
             exit_code=2,
             remediation=[
-                "Use `releaseledger storage set data --storage ...` "
-                "to change data storage.",
+                (
+                    "Use `releaseledger storage set data --storage ...` "
+                    "to change data storage."
+                ),
             ],
         )
         emit_error(command="config.set", error=err, json_output=state.json_output)
@@ -4488,9 +4501,11 @@ def config_set_command(
             code=CODE_USAGE_ERROR,
             exit_code=2,
             remediation=[
-                "Valid keys include: ledger_ref, ledger_code, "
-                "default_status, changelog_output, etc. "
-                "Use `releaseledger config show` to see current values."
+                (
+                    "Valid keys include: ledger_ref, ledger_code, "
+                    "default_status, changelog_output, etc. "
+                    "Use `releaseledger config show` to see current values."
+                )
             ],
         )
         emit_error(command="config.set", error=err, json_output=state.json_output)

@@ -59,11 +59,11 @@ __all__ = [
     "refresh_commit_audit_sheet",
     "render_commit_audit_decisions_template",
     "render_commit_audit_sheet",
+    "subject_matches_evidence_subject",
     "sync_audit_sheet_targets",
     "sync_audit_targets_from_entries",
     "update_commit_audit_sheet",
     "validate_commit_audit_sheet",
-    "subject_matches_evidence_subject",
 ]
 
 _MUTABLE_ROW_FIELDS = frozenset(
@@ -344,8 +344,10 @@ def update_commit_audit_sheet(
             label=f"audit update {version}",
             remediation=[
                 "Export a canonical audit file and edit only the mutable row fields.",
-                f"Run `releaseledger audit show {version}"
-                " --format yaml --output FILE`.",
+                (
+                    f"Run `releaseledger audit show {version}"
+                    " --format yaml --output FILE`."
+                ),
             ],
         )
     )
@@ -366,8 +368,10 @@ def update_commit_audit_sheet(
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
             remediation=[
-                "Keep every original row. Add decisions/behavior but do not "
-                "drop commits. Use --allow-missing when supported."
+                (
+                    "Keep every original row. Add decisions/behavior but do not "
+                    "drop commits. Use --allow-missing when supported."
+                )
             ],
         )
     # Carry range metadata forward when the edited file dropped it.
@@ -799,9 +803,7 @@ def subject_matches_evidence_subject(summary: str, evidence_subject: str) -> boo
     if _normalize_summary(summary) == _normalize_summary(evidence_subject):
         return True
     # Trivial title-case variant: "feat: add x" vs "Feat: Add X".
-    if summary.strip().title().lower() == evidence_subject.strip().lower():
-        return True
-    return False
+    return summary.strip().title().lower() == evidence_subject.strip().lower()
 
 
 def _accepted_source_refs(

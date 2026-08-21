@@ -40,23 +40,23 @@ from releaseledger.domain.release import ReleaseRecord
 from releaseledger.errors import CODE_USAGE_ERROR, LaunchError
 
 __all__ = [
+    "EMPTY_TREE_SHA",
     "GIT_DEFAULT_HEAD",
     "GIT_DEFAULT_INCLUDE_MERGES",
-    "GIT_DEFAULT_MAX_DIFF_CHARS",
     "GIT_DEFAULT_MAX_COMMITS",
-    "GitSourceCandidate",
+    "GIT_DEFAULT_MAX_DIFF_CHARS",
     "MERGE_POLICIES",
+    "GitSourceCandidate",
     "build_git_range_summary",
     "collect_git_candidates",
     "export_git_evidence",
     "generate_git_scaffold_batch",
     "is_git_worktree",
-    "resolve_git_ref",
-    "EMPTY_TREE_SHA",
     "is_root_base_ref",
     "release_snapshot_drift_report",
-    "resolve_release_snapshot",
     "resolve_base_sha",
+    "resolve_git_ref",
+    "resolve_release_snapshot",
 ]
 
 
@@ -106,8 +106,10 @@ def resolve_release_snapshot(
             code=CODE_USAGE_ERROR,
             exit_code=2,
             remediation=[
-                f"Run `releaseledger release update {release.version} --git-base PREV "
-                "--git-head HEAD` first, or pass --base/--head."
+                (
+                    f"Run `releaseledger release update {release.version} --git-base PREV "
+                    "--git-head HEAD` first, or pass --base/--head."
+                )
             ],
         )
 
@@ -475,8 +477,10 @@ def _verify_ancestry(
             code=CODE_USAGE_ERROR,
             exit_code=2,
             remediation=[
-                "Use a base ref that is an ancestor of the head ref, or pass"
-                " --allow-diverged-base.",
+                (
+                    "Use a base ref that is an ancestor of the head ref, or pass"
+                    " --allow-diverged-base."
+                ),
             ],
         )
     _require_git_available(result, what="git merge-base --is-ancestor")
@@ -654,8 +658,10 @@ def _require_clean(workspace_root: Path) -> None:
             code=CODE_USAGE_ERROR,
             exit_code=2,
             remediation=[
-                "Commit or stash changes before scanning, or set"
-                " [git] require_clean_worktree = false.",
+                (
+                    "Commit or stash changes before scanning, or set"
+                    " [git] require_clean_worktree = false."
+                ),
             ],
         )
 
@@ -673,11 +679,10 @@ def _build_candidate(
     # candidate entries but keeps their PR metadata available to the caller via
     # the returned candidate list when include_merges == "always"; for
     # "nontrivial"/"never" the merge is skipped from candidate entries.
-    if is_merge:
-        if include_merges == "never" or include_merges == "nontrivial":
-            # Skipped from candidate entries. PR metadata is preserved on the
-            # commit but not surfaced as a candidate (design §6.5).
-            return None
+    if is_merge and (include_merges == "never" or include_merges == "nontrivial"):
+        # Skipped from candidate entries. PR metadata is preserved on the
+        # commit but not surfaced as a candidate (design §6.5).
+        return None
         # include_merges == "always": fall through and include it.
     paths, additions, deletions = _changed_paths(workspace_root, sha)
     pr_refs, issue_refs = _extract_refs(meta.subject, meta.body)

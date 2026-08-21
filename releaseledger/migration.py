@@ -41,37 +41,37 @@ DATA_MOUNT = _backend.DATA_MOUNT
 INDEXES_MOUNT = _backend.INDEXES_MOUNT
 
 __all__ = [
-    "ReleaseledgerMigrationRequest",
-    "ReleaseledgerMigrationPlan",
-    "LegacyReleaseledgerSource",
-    "ReleaseledgerDataInventory",
     "LedgerInventory",
-    "MigrationFile",
+    "LegacyReleaseledgerSource",
     "MigrationExcludedPath",
-    "PreparedMigrationStage",
+    "MigrationFile",
     "PathSelectionResult",
-    "discover_legacy_project",
-    "discover_legacy_source",
-    "iter_legacy_ledger_roots",
-    "select_legacy_durable_paths",
-    "build_strict_inventory",
-    "inventory_legacy_data",
-    "plan_migration",
-    "serialize_migration_plan",
-    "load_migration_plan",
-    "validate_migration_plan",
-    "execute_migration",
-    "validate_domain_records",
-    "rebuild_all_indexes",
+    "PreparedMigrationStage",
+    "ReleaseledgerDataInventory",
+    "ReleaseledgerMigrationPlan",
+    "ReleaseledgerMigrationRequest",
+    "assert_index_rebuild_success",
     "assert_inventory_preserved",
     "assert_same_source_snapshot",
-    "assert_index_rebuild_success",
-    "transform_legacy_config_v1_to_v2",
+    "build_strict_inventory",
+    "cleanup_migration",
+    "discover_legacy_project",
+    "discover_legacy_source",
+    "execute_migration",
+    "inventory_legacy_data",
+    "iter_legacy_ledger_roots",
+    "load_migration_plan",
+    "migration_status",
+    "plan_migration",
     "project_config_from_legacy_mapping",
     "read_migration_journal",
-    "migration_status",
+    "rebuild_all_indexes",
     "recover_migration",
-    "cleanup_migration",
+    "select_legacy_durable_paths",
+    "serialize_migration_plan",
+    "transform_legacy_config_v1_to_v2",
+    "validate_domain_records",
+    "validate_migration_plan",
 ]
 
 # File names searched when detecting a legacy Releaseledger project.
@@ -1120,8 +1120,7 @@ def validate_domain_records(data_root: Path) -> dict[str, object]:
     for ref, ledger_dir in iter_legacy_ledger_roots(data_root):
         report = _validate_ledger_domain(ledger_dir, ref)
         ledger_reports[ref] = report
-        for f in report.get("failures", []):  # type: ignore[attr-defined]
-            failures.append(f)
+        failures.extend(report.get("failures", []))  # type: ignore[attr-defined]
 
     refs = [r for r, _ in iter_legacy_ledger_roots(data_root)]
 
@@ -2459,10 +2458,9 @@ def _is_empty_shell(path: Path) -> bool:
             continue
         if child.is_dir():
             continue
-        if child.is_file():
+        if child.is_file() and child.stat().st_size > 0:
             # Any non-empty file means it's not an empty shell
-            if child.stat().st_size > 0:
-                return False
+            return False
     return True
 
 

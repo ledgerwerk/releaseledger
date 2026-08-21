@@ -16,7 +16,7 @@ from releaseledger.services.releases import (
     show_release,
     tag_release,
     update_release,
-    )
+)
 
 __all__ = [
     "cancel_release",

@@ -210,27 +210,23 @@ def _tag_run(tags: str):
         if args[-2:] == ["tag", "--list"]:
             return SimpleNamespace(returncode=0, stdout=tags, stderr="")
         return SimpleNamespace(returncode=1, stdout="", stderr="")
-    return fake_run
 
+    return fake_run
 
 
 def test_reconcile_reports_canceled_release_with_matching_tag(
     tmp_path: Path, monkeypatch
- ) -> None:
+) -> None:
     ensure_canonical_project(tmp_path)
     create_release(tmp_path, version="0.1.0", status="canceled")
     monkeypatch.setattr(releases_service.subprocess, "run", _tag_run("v0.1.0\n"))
     result = reconcile_releases(tmp_path)
-    assert any(
-        problem["kind"] == "canceled_with_tag"
-        for problem in result["problems"]
-    )
-
+    assert any(problem["kind"] == "canceled_with_tag" for problem in result["problems"])
 
 
 def test_reconcile_assigns_alias_evidence_to_active_owner(
     tmp_path: Path, monkeypatch
- ) -> None:
+) -> None:
     ensure_canonical_project(tmp_path)
     create_release(tmp_path, version="0.1.0", status="canceled")
     create_release(
@@ -247,10 +243,7 @@ def test_reconcile_assigns_alias_evidence_to_active_owner(
     assert "canceled_with_changelog" not in kinds
 
 
-
-def test_reconcile_reports_multiple_active_aliases(
-    tmp_path: Path, monkeypatch
- ) -> None:
+def test_reconcile_reports_multiple_active_aliases(tmp_path: Path, monkeypatch) -> None:
     ensure_canonical_project(tmp_path)
     create_release(tmp_path, version="0.1.0", status="candidate")
     create_release(tmp_path, version="v0.1.0", status="draft")
@@ -262,10 +255,9 @@ def test_reconcile_reports_multiple_active_aliases(
     )
 
 
-
 def test_import_tags_marks_canceled_alias_for_restore(
     tmp_path: Path, monkeypatch
- ) -> None:
+) -> None:
     ensure_canonical_project(tmp_path)
     create_release(tmp_path, version="v0.1.0", status="canceled")
     monkeypatch.setattr(releases_service.subprocess, "run", _tag_run("v0.1.0\n"))

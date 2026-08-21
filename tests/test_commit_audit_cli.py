@@ -124,7 +124,7 @@ def _seed_range(tmp_path: Path) -> tuple[Path, str, str]:
 
 class TestAuditInit:
     def test_init_creates_one_row_per_commit(self, tmp_path: Path) -> None:
-        repo, sha_a, sha_b = _seed_range(tmp_path)
+        repo, _sha_a, _sha_b = _seed_range(tmp_path)
         payload = _jrun(repo, "audit", "init", "0.2.0")
         assert payload["result_type"] == "commit_audit_sheet_created"
         assert int(payload["result"]["row_count"]) == 2
@@ -247,7 +247,7 @@ class TestAuditShow:
 
 class TestAuditUpdate:
     def test_update_validates_decision_enum(self, tmp_path: Path) -> None:
-        repo, sha_a, _sha_b = _seed_range(tmp_path)
+        repo, _sha_a, _sha_b = _seed_range(tmp_path)
         assert _run(repo, "audit", "init", "0.2.0").exit_code == 0
         # Export, edit with a bad decision, re-import.
         sheet_path = tmp_path / "edited.yaml"
@@ -260,7 +260,7 @@ class TestAuditUpdate:
         assert "decision" in _human_error(result).lower()
 
     def test_update_rejects_missing_rows(self, tmp_path: Path) -> None:
-        repo, sha_a, sha_b = _seed_range(tmp_path)
+        repo, sha_a, _sha_b = _seed_range(tmp_path)
         assert _run(repo, "audit", "init", "0.2.0").exit_code == 0
         sheet_path = tmp_path / "edited.yaml"
         export = _jrun(repo, "audit", "show", "0.2.0", "--format", "json")
@@ -329,14 +329,14 @@ class TestAuditValidate:
             )
 
     def test_strict_fails_uninspected(self, tmp_path: Path) -> None:
-        repo, sha_a, sha_b = _seed_range(tmp_path)
+        repo, _sha_a, _sha_b = _seed_range(tmp_path)
         # init leaves rows uninspected by default.
         assert _run(repo, "audit", "init", "0.2.0").exit_code == 0
         result = _run(repo, "audit", "validate", "0.2.0", "--strict")
         assert result.exit_code != 0
 
     def test_strict_fails_needs_review(self, tmp_path: Path) -> None:
-        repo, sha_a, sha_b = _seed_range(tmp_path)
+        repo, _sha_a, _sha_b = _seed_range(tmp_path)
         assert _run(repo, "audit", "init", "0.2.0").exit_code == 0
         # Mark rows inspected but leave decision=needs_review.
         sheet_path = repo / "edited.yaml"
@@ -485,7 +485,7 @@ class TestAuditRefresh:
     def test_refresh_preserves_reviewed_rows_and_appends_new_commit(
         self, tmp_path: Path
     ) -> None:
-        repo, sha_a, sha_b = _seed_range(tmp_path)
+        repo, sha_a, _sha_b = _seed_range(tmp_path)
         assert _run(repo, "audit", "init", "0.2.0").exit_code == 0
         decisions = {
             "rows": [
@@ -522,7 +522,7 @@ class TestAuditRefresh:
 
 class TestEntryGuardCommitSubjects:
     def test_guard_rejects_summary_matching_subject(self, tmp_path: Path) -> None:
-        repo, sha_a, sha_b = _seed_range(tmp_path)
+        repo, sha_a, _sha_b = _seed_range(tmp_path)
         assert _run(repo, "audit", "init", "0.2.0").exit_code == 0
         # Entry summary copies a commit subject verbatim.
         batch = {
@@ -549,7 +549,7 @@ class TestEntryGuardCommitSubjects:
         assert "commit subjects" in _human_error(result).lower()
 
     def test_guard_allows_distinct_summary(self, tmp_path: Path) -> None:
-        repo, sha_a, sha_b = _seed_range(tmp_path)
+        repo, sha_a, _sha_b = _seed_range(tmp_path)
         assert _run(repo, "audit", "init", "0.2.0").exit_code == 0
         batch = {
             "entries": [

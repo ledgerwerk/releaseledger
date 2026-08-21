@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 
 import ledgercore
-import ledgercore.migration as migration
+from ledgercore import migration
 
 
 def test_releaseledger_requires_ledgercore_0_6_public_contract() -> None:

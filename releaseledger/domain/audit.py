@@ -25,9 +25,9 @@ from releaseledger.domain.versioning import (
 from releaseledger.errors import CODE_VALIDATION_ERROR, LaunchError
 
 __all__ = [
-    "AUDIT_SHEET_SCHEMA_VERSION",
     "AUDIT_DECISIONS",
     "AUDIT_PUBLIC_IMPACTS",
+    "AUDIT_SHEET_SCHEMA_VERSION",
     "CommitAuditRow",
     "CommitAuditSheetRecord",
     "CommitAuditStats",
@@ -399,4 +399,4 @@ def is_git_commit_sha(value: str) -> bool:
 
 
 # Re-export for service-layer callers that prefer this spelling.
-__all__ += ["is_git_commit_sha", "initial_versioning", "is_git_commit_ref"]
+__all__ += ["initial_versioning", "is_git_commit_ref", "is_git_commit_sha"]

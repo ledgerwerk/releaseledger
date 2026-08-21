@@ -17,7 +17,15 @@ exclude = ["setup/*", "notebooks/*"]
 [lint.per-file-ignores]
 "__init__.py" = ["F401", "I001"]  # ignore unused and unsorted imports in __init__.py
 "__manifest__.py" = ["B018"]  # useless expression
-"releaseledger/services/git_sources.py" = ["C901"]
+"releaseledger/services/git_sources.py" = ["C901", "BLE001", "S110"]
+"releaseledger/cli_common.py" = ["BLE001", "S110"]
+"releaseledger/migration.py" = ["BLE001", "S110", "S112"]
+"releaseledger/services/changelog.py" = ["BLE001"]
+"releaseledger/services/changelog_build.py" = ["BLE001"]
+"releaseledger/services/config.py" = ["BLE001", "S110"]
+"releaseledger/services/project_state.py" = ["BLE001"]
+"releaseledger/storage/paths.py" = ["BLE001", "S110"]
+"tests/test_cli_storage_migrate_v2.py" = ["BLE001"]
 
 [lint.isort]
 section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]

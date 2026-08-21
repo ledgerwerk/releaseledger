@@ -24,7 +24,9 @@ def _git(repo: Path, *args: str) -> None:
 
 def test_finalize_already_released_is_compatible_noop(tmp_path: Path) -> None:
     ensure_canonical_project(tmp_path)
-    create_release(tmp_path, version="0.1.0", status="released", released_at="2026-01-01")
+    create_release(
+        tmp_path, version="0.1.0", status="released", released_at="2026-01-01"
+    )
     before = load_release(tmp_path, "0.1.0")
 
     result = finalize_release(tmp_path, version="0.1.0", released_at="2026-01-01")
@@ -32,12 +34,17 @@ def test_finalize_already_released_is_compatible_noop(tmp_path: Path) -> None:
     assert result["already_finalized"] is True
     assert result["written"] is False
     assert result["events"] == []
-    assert load_release(tmp_path, "0.1.0").versioning.revision == before.versioning.revision
+    assert (
+        load_release(tmp_path, "0.1.0").versioning.revision
+        == before.versioning.revision
+    )
 
 
 def test_finalize_already_released_rejects_conflicting_date(tmp_path: Path) -> None:
     ensure_canonical_project(tmp_path)
-    create_release(tmp_path, version="0.1.0", status="released", released_at="2026-01-01")
+    create_release(
+        tmp_path, version="0.1.0", status="released", released_at="2026-01-01"
+    )
 
     with pytest.raises(LaunchError):
         finalize_release(tmp_path, version="0.1.0", released_at="2026-01-02")
@@ -118,4 +125,7 @@ def test_restore_rejects_mismatched_tag_before_writing(tmp_path: Path) -> None:
             reason="Wrong tag should fail.",
         )
 
-    assert load_release(tmp_path, "0.1.0").versioning.revision == before.versioning.revision
+    assert (
+        load_release(tmp_path, "0.1.0").versioning.revision
+        == before.versioning.revision
+    )

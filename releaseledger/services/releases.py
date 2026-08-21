@@ -27,7 +27,7 @@ from releaseledger.domain.event import (
     EVENT_RELEASE_RESTORED,
     EVENT_RELEASE_TAGGED,
     EVENT_RELEASE_UPDATED,
-    )
+)
 from releaseledger.domain.release import (
     ReleaseRecord,
     parse_release_version_tuple,
@@ -138,9 +138,8 @@ def resolve_release_selector(workspace_root: Path, selector: str) -> str:
     return matches[0]
 
 
-
 def _today() -> str:
-    return datetime.date.today().isoformat()
+    return datetime.datetime.now(tz=datetime.timezone.utc).date().isoformat()
 
 
 def _validate_date(value: str, field_name: str) -> str:
@@ -531,7 +530,7 @@ def finalize_release(
     version: str,
     released_at: str | None = None,
     changelog_file: str | None = None,
- ) -> dict[str, object]:
+) -> dict[str, object]:
     """Transition a planned, draft, or candidate release to released."""
     validate_release_version(version)
     resolved_version = resolve_release_selector(workspace_root, version)
@@ -586,7 +585,6 @@ def finalize_release(
     return _release_payload(workspace_root, updated, event.event_id)
 
 
-
 def _git_tag_details(workspace_root: Path, tag: str) -> tuple[str, str]:
     """Return the commit SHA and commit date for an exact Git tag."""
     result = subprocess.run(
@@ -619,7 +617,6 @@ def _git_tag_details(workspace_root: Path, tag: str) -> tuple[str, str]:
     return sha, tag_date
 
 
-
 def restore_release(
     workspace_root: Path,
     *,
@@ -632,7 +629,7 @@ def restore_release(
     clear_previous: bool = False,
     released_at: str | None = None,
     dry_run: bool = False,
- ) -> dict[str, object]:
+) -> dict[str, object]:
     """Restore a canceled release or correct it from a shipped Git tag."""
     if not reason.strip():
         raise LaunchError(
@@ -804,7 +801,7 @@ def _resolve_optional_field(
 def _validate_generic_status_transition(
     existing: ReleaseRecord,
     requested_status: str | None,
- ) -> None:
+) -> None:
     """Keep generic metadata updates out of lifecycle transitions."""
     if requested_status is None or requested_status == existing.status:
         return
@@ -824,7 +821,6 @@ def _validate_generic_status_transition(
             exit_code=2,
             remediation=["Use release finalize, cancel, or the lifecycle command."],
         )
-
 
 
 def update_release(
@@ -1060,8 +1056,7 @@ def show_release(workspace_root: Path, version: str) -> dict[str, object]:
     resolved_version = resolve_release_selector(workspace_root, version)
     record = load_release(workspace_root, resolved_version)
     entries = [
-        entry.to_dict()
-        for entry in load_entries(workspace_root, resolved_version)
+        entry.to_dict() for entry in load_entries(workspace_root, resolved_version)
     ]
     payload = _release_payload(workspace_root, record)
     payload["entries"] = entries
@@ -1370,8 +1365,10 @@ def cancel_release(
             exit_code=2,
             remediation=[
                 "Use release rename if the version number was wrong but it did ship.",
-                "Pass --force-released-unshipped if it was recorded as released "
-                "but never actually shipped.",
+                (
+                    "Pass --force-released-unshipped if it was recorded as released "
+                    "but never actually shipped."
+                ),
             ],
         )
     if superseded_by is not None:
@@ -1599,7 +1596,8 @@ def rename_release(
             record.version
             for record in list_releases(workspace_root)
             if record.version not in {old_version, new_version}
-            and release_identity_key(record.version) == release_identity_key(new_version)
+            and release_identity_key(record.version)
+            == release_identity_key(new_version)
             and record.status != "canceled"
         ]
         if active_aliases:
@@ -1752,7 +1750,7 @@ def rename_release(
 
 def group_releases_by_identity(
     records: list[ReleaseRecord],
- ) -> dict[str, list[ReleaseRecord]]:
+) -> dict[str, list[ReleaseRecord]]:
     """Group stored release records by their external release identity."""
     groups: dict[str, list[ReleaseRecord]] = {}
     for record in records:
@@ -1760,10 +1758,9 @@ def group_releases_by_identity(
     return groups
 
 
-
 def _load_git_tags(
     workspace_root: Path,
- ) -> tuple[dict[str, list[str]], dict[str, str], subprocess.CompletedProcess[str]]:
+) -> tuple[dict[str, list[str]], dict[str, str], subprocess.CompletedProcess[str]]:
     """Load semver Git tags keyed by semantic release identity."""
     git_result = subprocess.run(
         ["git", "-C", str(workspace_root), "tag", "--list"],
@@ -1794,7 +1791,6 @@ def _load_git_tags(
         if tag_result.returncode == 0 and tag_result.stdout.strip():
             tag_dates[tag] = tag_result.stdout.strip()
     return tags_by_identity, tag_dates, git_result
-
 
 
 def _parse_changelog_headings(target: Path) -> dict[str, list[str]]:
@@ -1836,7 +1832,6 @@ def _parse_changelog_headings(target: Path) -> dict[str, list[str]]:
     return headings
 
 
-
 def _check_release_record_problems(
     records: list[ReleaseRecord],
     records_by_identity: dict[str, list[ReleaseRecord]],
@@ -1845,7 +1840,7 @@ def _check_release_record_problems(
     target: Path,
     tag_dates: dict[str, str],
     git_result: subprocess.CompletedProcess[str],
- ) -> list[dict[str, object]]:
+) -> list[dict[str, object]]:
     """Check release records while assigning shared evidence to one owner."""
     problems: list[dict[str, object]] = []
     for record in records:
@@ -1925,12 +1920,11 @@ def _check_release_record_problems(
     return problems
 
 
-
 def reconcile_releases(
     workspace_root: Path,
     *,
     changelog_file: Path | None = None,
- ) -> dict[str, object]:
+) -> dict[str, object]:
     """Compare release records, Git tags, and changelog headings read-only."""
     records = list_releases(workspace_root)
     by_version = {record.version: record for record in records}
@@ -2044,12 +2038,11 @@ def reconcile_releases(
     }
 
 
-
 def import_tags(
     workspace_root: Path,
     *,
     apply: bool = False,
- ) -> dict[str, object]:
+) -> dict[str, object]:
     """Discover Git tags and create only truly missing release identities."""
     tags_by_identity, tag_dates, _git_result = _load_git_tags(workspace_root)
     existing_records = list_releases(workspace_root)
