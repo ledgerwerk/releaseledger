@@ -24,18 +24,21 @@ from releaseledger.domain.event import (
     EVENT_RELEASE_CREATED,
     EVENT_RELEASE_FINALIZED,
     EVENT_RELEASE_RENAMED,
+    EVENT_RELEASE_RESTORED,
     EVENT_RELEASE_TAGGED,
     EVENT_RELEASE_UPDATED,
-)
+    )
 from releaseledger.domain.release import (
     ReleaseRecord,
     parse_release_version_tuple,
+    release_identity_key,
 )
 from releaseledger.domain.source_ref import normalize_source_ref
 from releaseledger.domain.states import RELEASE_STATUSES
 from releaseledger.domain.versioning import bump_versioning
 from releaseledger.errors import (
     CODE_CONFLICT,
+    CODE_NOT_FOUND,
     CODE_USAGE_ERROR,
     CODE_VALIDATION_ERROR,
     LaunchError,
@@ -70,23 +73,27 @@ from releaseledger.storage.store import (
     rebuild_indexes,
     release_markdown_path,
     rename_release_bundle,
+    replace_canceled_release_bundle,
     save_release,
     validate_release_version,
 )
 
 __all__ = [
     "cancel_release",
-    "reconcile_releases",
     "check_release_chain",
     "create_release",
     "finalize_release",
+    "group_releases_by_identity",
     "import_tags",
     "list_release_records",
+    "prepare_release",
+    "reconcile_releases",
     "rename_release",
     "repair_release_chain",
-    "prepare_release",
-    "show_release",
+    "resolve_release_selector",
+    "restore_release",
     "set_release_status",
+    "show_release",
     "tag_release",
     "update_release",
 ]
@@ -100,6 +107,36 @@ _FINALIZABLE_STATUSES = frozenset({"planned", "draft", "candidate"})
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _FINALIZABLE_STATUSES = frozenset({"planned", "draft", "candidate"})
+
+
+def resolve_release_selector(workspace_root: Path, selector: str) -> str:
+    """Resolve a raw release version or its unique semantic alias."""
+    validate_release_version(selector)
+    records = list_releases(workspace_root)
+    exact = next((record for record in records if record.version == selector), None)
+    if exact is not None:
+        return exact.version
+    identity = release_identity_key(selector)
+    matches = [
+        record.version
+        for record in records
+        if release_identity_key(record.version) == identity
+    ]
+    if not matches:
+        raise LaunchError(
+            f"Release not found: {selector}",
+            code=CODE_NOT_FOUND,
+            exit_code=2,
+        )
+    if len(matches) > 1:
+        raise LaunchError(
+            f"Release selector {selector!r} is ambiguous: {', '.join(sorted(matches))}",
+            code=CODE_CONFLICT,
+            exit_code=2,
+            data={"selector": selector, "matches": sorted(matches)},
+        )
+    return matches[0]
+
 
 
 def _today() -> str:
@@ -494,10 +531,31 @@ def finalize_release(
     version: str,
     released_at: str | None = None,
     changelog_file: str | None = None,
-) -> dict[str, object]:
-    """Transition an existing planned/draft/candidate release to 'released'."""
+ ) -> dict[str, object]:
+    """Transition a planned, draft, or candidate release to released."""
     validate_release_version(version)
-    existing = load_release(workspace_root, version)
+    resolved_version = resolve_release_selector(workspace_root, version)
+    existing = load_release(workspace_root, resolved_version)
+    if existing.status == "released":
+        if released_at is not None:
+            _validate_date(released_at, "--released-at")
+            if released_at != existing.released_at:
+                raise LaunchError(
+                    f"Release {version} is already released with date "
+                    f"{existing.released_at!r}; retry metadata conflicts.",
+                    code=CODE_CONFLICT,
+                    exit_code=2,
+                )
+        if changelog_file is not None and changelog_file != existing.changelog_file:
+            raise LaunchError(
+                f"Release {version} is already released with a different "
+                "changelog_file; retry metadata conflicts.",
+                code=CODE_CONFLICT,
+                exit_code=2,
+            )
+        result = _release_payload(workspace_root, existing)
+        result.update({"already_finalized": True, "written": False, "events": []})
+        return result
     if existing.status not in _FINALIZABLE_STATUSES:
         raise LaunchError(
             f"Release {version} is already {existing.status!r}"
@@ -520,12 +578,201 @@ def finalize_release(
     event = append_event(
         workspace_root,
         event=EVENT_RELEASE_FINALIZED,
-        release_version=version,
-        record_revisions={f"release:{version}": updated.versioning.revision},
+        release_version=resolved_version,
+        record_revisions={f"release:{resolved_version}": updated.versioning.revision},
         data={"released_at": released_at},
     )
     rebuild_indexes(workspace_root)
     return _release_payload(workspace_root, updated, event.event_id)
+
+
+
+def _git_tag_details(workspace_root: Path, tag: str) -> tuple[str, str]:
+    """Return the commit SHA and commit date for an exact Git tag."""
+    result = subprocess.run(
+        ["git", "-C", str(workspace_root), "tag", "--list", tag],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    tags = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if tag not in tags:
+        raise LaunchError(
+            f"Git tag not found: {tag}",
+            code=CODE_NOT_FOUND,
+            exit_code=2,
+        )
+    sha = resolve_git_ref(workspace_root, tag)
+    date_result = subprocess.run(
+        ["git", "-C", str(workspace_root), "log", "-1", "--format=%cs", tag],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    tag_date = date_result.stdout.strip() if date_result.returncode == 0 else ""
+    if not tag_date:
+        raise LaunchError(
+            f"Git tag {tag} has no resolvable commit date.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
+    return sha, tag_date
+
+
+
+def restore_release(
+    workspace_root: Path,
+    *,
+    version: str,
+    reason: str,
+    to_status: str | None = None,
+    from_tag: str | None = None,
+    git_base_ref: str | None = None,
+    previous_version: Any = UNSET,
+    clear_previous: bool = False,
+    released_at: str | None = None,
+    dry_run: bool = False,
+ ) -> dict[str, object]:
+    """Restore a canceled release or correct it from a shipped Git tag."""
+    if not reason.strip():
+        raise LaunchError(
+            "--reason is required for release restore.",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+        )
+    resolved_version = resolve_release_selector(workspace_root, version)
+    existing = load_release(workspace_root, resolved_version)
+    if existing.status != "canceled":
+        raise LaunchError(
+            f"Release {version} is {existing.status!r}; only canceled releases "
+            "can be restored.",
+            code=CODE_CONFLICT,
+            exit_code=2,
+        )
+    mode = "from_tag" if from_tag is not None else "reopen"
+    if from_tag is not None and release_identity_key(from_tag) != release_identity_key(
+        existing.version
+    ):
+        raise LaunchError(
+            f"Git tag {from_tag!r} does not match release {existing.version!r}.",
+            code=CODE_CONFLICT,
+            exit_code=2,
+        )
+    if from_tag is not None:
+        tag_sha, tag_date = _git_tag_details(workspace_root, from_tag)
+        target_status = "released"
+        if to_status is not None and to_status != target_status:
+            raise LaunchError(
+                "--to must be 'released' when --from-tag is used.",
+                code=CODE_USAGE_ERROR,
+                exit_code=2,
+            )
+        effective_released_at = released_at or tag_date
+        _validate_date(effective_released_at, "--released-at")
+    else:
+        target_status = to_status or "candidate"
+        if target_status not in _FINALIZABLE_STATUSES:
+            raise LaunchError(
+                "--to must be planned, draft, or candidate when reopening.",
+                code=CODE_USAGE_ERROR,
+                exit_code=2,
+            )
+        if released_at is not None:
+            _validate_date(released_at, "--released-at")
+        effective_released_at = None
+        tag_sha = None
+        tag_date = None
+    resolved_previous = _resolve_optional_field(
+        "previous",
+        previous_version,
+        existing.previous_version,
+        clear=clear_previous,
+    )
+    if resolved_previous is not None:
+        resolved_previous = validate_release_version(str(resolved_previous))
+    resolved_git = {
+        "git_base_ref": existing.git_base_ref,
+        "git_base_sha": existing.git_base_sha,
+        "git_head_ref": existing.git_head_ref,
+        "git_head_sha": existing.git_head_sha,
+        "git_range": existing.git_range,
+        "git_commit_count": existing.git_commit_count,
+    }
+    if from_tag is not None:
+        base = git_base_ref or existing.git_base_ref
+        if base is not None:
+            resolved_git = _resolve_git_range(
+                workspace_root,
+                existing=existing,
+                git_base_ref=base,
+                git_head_ref=from_tag,
+            )
+        else:
+            resolved_git.update(
+                {
+                    "git_head_ref": from_tag,
+                    "git_head_sha": tag_sha,
+                    "git_range": None,
+                    "git_commit_count": None,
+                }
+            )
+    restored = replace(
+        existing,
+        status=target_status,
+        released_at=effective_released_at,
+        previous_version=resolved_previous,
+        cancel_reason=None,
+        superseded_by=None,
+        versioning=bump_versioning(existing.versioning),
+        git_base_ref=cast(str | None, resolved_git["git_base_ref"]),
+        git_base_sha=cast(str | None, resolved_git["git_base_sha"]),
+        git_head_ref=cast(str | None, resolved_git["git_head_ref"]),
+        git_head_sha=cast(str | None, resolved_git["git_head_sha"]),
+        git_range=cast(str | None, resolved_git["git_range"]),
+        git_commit_count=cast(int | None, resolved_git["git_commit_count"]),
+    )
+    preview = {
+        "kind": "release_restore_preview" if dry_run else "release_restore",
+        "release": restored.to_dict(),
+        "mode": mode,
+        "reason": reason,
+        "tag": from_tag,
+        "tag_sha": tag_sha,
+        "tag_date": tag_date,
+        "written": not dry_run,
+    }
+    if dry_run:
+        preview["events"] = []
+        return preview
+    save_release(workspace_root, restored, overwrite=True)
+    event = append_event(
+        workspace_root,
+        event=EVENT_RELEASE_RESTORED,
+        release_version=resolved_version,
+        record_revisions={f"release:{resolved_version}": restored.versioning.revision},
+        data={
+            "reason": reason,
+            "previous_status": existing.status,
+            "previous_cancel_reason": existing.cancel_reason,
+            "previous_superseded_by": existing.superseded_by,
+            "mode": mode,
+            "tag": from_tag,
+            "tag_sha": tag_sha,
+            "released_at": effective_released_at,
+        },
+    )
+    rebuild_indexes(workspace_root)
+    payload = _release_payload(workspace_root, restored, event.event_id)
+    payload.update(
+        {
+            "mode": mode,
+            "reason": reason,
+            "tag": from_tag,
+            "tag_sha": tag_sha,
+            "written": True,
+        }
+    )
+    return payload
 
 
 def _resolve_optional_field(
@@ -552,6 +799,32 @@ def _resolve_optional_field(
     if supplied is UNSET:
         return existing
     return supplied
+
+
+def _validate_generic_status_transition(
+    existing: ReleaseRecord,
+    requested_status: str | None,
+ ) -> None:
+    """Keep generic metadata updates out of lifecycle transitions."""
+    if requested_status is None or requested_status == existing.status:
+        return
+    if existing.status in {"released", "canceled", "yanked"}:
+        raise LaunchError(
+            f"Cannot change terminal release {existing.version} from "
+            f"{existing.status!r} through generic update.",
+            code=CODE_CONFLICT,
+            exit_code=2,
+            remediation=["Use release restore, finalize, or cancel as appropriate."],
+        )
+    if requested_status in {"released", "canceled", "yanked"}:
+        raise LaunchError(
+            f"Cannot set release status to {requested_status!r} through generic "
+            "update.",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+            remediation=["Use release finalize, cancel, or the lifecycle command."],
+        )
+
 
 
 def update_release(
@@ -587,6 +860,7 @@ def update_release(
     release whose effective status is ``released`` is rejected unless
     ``force=True``.
     """
+    version = resolve_release_selector(workspace_root, version)
     existing = load_release(workspace_root, version)
     if status is not None and status not in RELEASE_STATUSES:
         raise LaunchError(
@@ -594,6 +868,7 @@ def update_release(
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
         )
+    _validate_generic_status_transition(existing, status)
     effective_status = status if status is not None else existing.status
     if clear_released_at and effective_status == "released" and not force:
         raise LaunchError(
@@ -782,8 +1057,12 @@ def list_release_records(workspace_root: Path) -> list[dict[str, object]]:
 
 def show_release(workspace_root: Path, version: str) -> dict[str, object]:
     """Return a release with its entries for display."""
-    record = load_release(workspace_root, version)
-    entries = [entry.to_dict() for entry in load_entries(workspace_root, version)]
+    resolved_version = resolve_release_selector(workspace_root, version)
+    record = load_release(workspace_root, resolved_version)
+    entries = [
+        entry.to_dict()
+        for entry in load_entries(workspace_root, resolved_version)
+    ]
     payload = _release_payload(workspace_root, record)
     payload["entries"] = entries
     payload["entry_count"] = len(entries)
@@ -1252,6 +1531,8 @@ def rename_release(
     target_file: Path | None = None,
     rename_changelog_section: bool = False,
     replace_existing_section: bool = False,
+    replace_canceled_target: bool = False,
+    reason: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, object]:
     """Rename a release from ``old_version`` to ``new_version``.
@@ -1283,13 +1564,51 @@ def rename_release(
             ],
         )
     paths = resolve_project_paths(workspace_root)
-    if release_markdown_path(paths, new_version).is_file():
+    target_path = release_markdown_path(paths, new_version)
+    target_record: ReleaseRecord | None = None
+    if target_path.is_file():
+        if not replace_canceled_target:
+            raise LaunchError(
+                f"Release version already exists: {new_version}",
+                code=CODE_CONFLICT,
+                exit_code=2,
+                remediation=[f"Run `releaseledger release show {new_version}`."],
+            )
+        if not reason or not reason.strip():
+            raise LaunchError(
+                "--reason is required when replacing a canceled target.",
+                code=CODE_USAGE_ERROR,
+                exit_code=2,
+            )
+        target_record = load_release(workspace_root, new_version)
+        if target_record.status != "canceled":
+            raise LaunchError(
+                f"Replacement target {new_version} must be canceled; got "
+                f"{target_record.status!r}.",
+                code=CODE_CONFLICT,
+                exit_code=2,
+            )
+    elif replace_canceled_target:
         raise LaunchError(
-            f"Release version already exists: {new_version}",
-            code=CODE_CONFLICT,
+            "--replace-canceled-target requires an existing canceled target.",
+            code=CODE_NOT_FOUND,
             exit_code=2,
-            remediation=[f"Run `releaseledger release show {new_version}`."],
         )
+    if replace_canceled_target:
+        active_aliases = [
+            record.version
+            for record in list_releases(workspace_root)
+            if record.version not in {old_version, new_version}
+            and release_identity_key(record.version) == release_identity_key(new_version)
+            and record.status != "canceled"
+        ]
+        if active_aliases:
+            raise LaunchError(
+                f"Active release aliases would remain ambiguous: "
+                f"{', '.join(sorted(active_aliases))}.",
+                code=CODE_CONFLICT,
+                exit_code=2,
+            )
     if released_at is not UNSET and released_at is not None:
         _validate_date(str(released_at), "--released-at")
     resolved_released_at = (
@@ -1329,10 +1648,23 @@ def rename_release(
         "old_version": old_version,
         "new_version": new_version,
         "bundle_move": True,
+        "replace_canceled_target": replace_canceled_target,
+        "reason": reason,
         "entries_to_rewrite": len(load_entries(workspace_root, old_version)),
+        "source_entry_count": len(load_entries(workspace_root, old_version)),
+        "displaced_target_entry_count": (
+            len(load_entries(workspace_root, new_version)) if target_record else 0
+        ),
         "successors_to_rewrite": len(successors) if rewrite_successors else 0,
         "audit_to_move": load_commit_audit_sheet(workspace_root, old_version)
         is not None,
+        "source_audit_present": load_commit_audit_sheet(workspace_root, old_version)
+        is not None,
+        "target_audit_present": (
+            load_commit_audit_sheet(workspace_root, new_version) is not None
+            if target_record
+            else False
+        ),
         **changelog_plan,
         "would_write": not dry_run,
     }
@@ -1356,7 +1688,10 @@ def rename_release(
         entry_count=existing.entry_count,
         artifact_count=existing.artifact_count,
     )
-    rename_release_bundle(workspace_root, old_version, new_record)
+    if replace_canceled_target:
+        replace_canceled_release_bundle(workspace_root, old_version, new_record)
+    else:
+        rename_release_bundle(workspace_root, old_version, new_record)
     rewrote_successors = False
     record_revisions = {
         f"release:{new_version}": new_record.versioning.revision,
@@ -1385,6 +1720,8 @@ def rename_release(
         data={
             "old_release_version": old_version,
             "rewrote_successors": bool(rewrote_successors),
+            "replace_canceled_target": replace_canceled_target,
+            "reason": reason,
         },
     )
     rebuild_indexes(workspace_root)
@@ -1413,14 +1750,21 @@ def rename_release(
     return payload
 
 
+def group_releases_by_identity(
+    records: list[ReleaseRecord],
+ ) -> dict[str, list[ReleaseRecord]]:
+    """Group stored release records by their external release identity."""
+    groups: dict[str, list[ReleaseRecord]] = {}
+    for record in records:
+        groups.setdefault(release_identity_key(record.version), []).append(record)
+    return groups
+
+
+
 def _load_git_tags(
     workspace_root: Path,
-) -> tuple[dict[str, list[str]], dict[str, str], subprocess.CompletedProcess[str]]:
-    """Load git tags and their dates for the workspace.
-
-    Returns (tags_by_version, tag_dates, git_result).
-
-    """
+ ) -> tuple[dict[str, list[str]], dict[str, str], subprocess.CompletedProcess[str]]:
+    """Load semver Git tags keyed by semantic release identity."""
     git_result = subprocess.run(
         ["git", "-C", str(workspace_root), "tag", "--list"],
         check=False,
@@ -1428,16 +1772,18 @@ def _load_git_tags(
         text=True,
     )
     raw_tags = [line.strip() for line in git_result.stdout.splitlines() if line.strip()]
-    tags_by_version: dict[str, list[str]] = {}
+    tags_by_identity: dict[str, list[str]] = {}
+    valid_tags: set[str] = set()
     for tag in raw_tags:
-        normalized = tag[1:] if tag.startswith("v") else tag
-        if parse_release_version_tuple(normalized) is None:
+        tag_version = tag.removeprefix("v")
+        if parse_release_version_tuple(tag_version) is None:
             continue
-        tags_by_version.setdefault(normalized, []).append(tag)
+        identity = release_identity_key(tag)
+        tags_by_identity.setdefault(identity, []).append(tag)
+        valid_tags.add(tag)
     tag_dates: dict[str, str] = {}
     for tag in raw_tags:
-        normalized = tag[1:] if tag.startswith("v") else tag
-        if normalized not in tags_by_version:
+        if tag not in valid_tags:
             continue
         tag_result = subprocess.run(
             ["git", "-C", str(workspace_root), "log", "-1", "--format=%cs", tag],
@@ -1447,25 +1793,18 @@ def _load_git_tags(
         )
         if tag_result.returncode == 0 and tag_result.stdout.strip():
             tag_dates[tag] = tag_result.stdout.strip()
-    return tags_by_version, tag_dates, git_result
+    return tags_by_identity, tag_dates, git_result
+
 
 
 def _parse_changelog_headings(target: Path) -> dict[str, list[str]]:
-    """Extract version headings from a changelog file.
-
-    Returns a dict mapping normalized version strings to the heading lines.
-    Accepts canonical (``## [0.7.0] - 2026-07-26``), bare (``## 0.7.0``),
-    and legacy (``## Version 0.4.0 (2026-01-11)``) headings. Narrative
-    headings like ``## Previous Unreleased Changes`` are ignored.
-    """
+    """Extract changelog version headings keyed by release identity."""
     changelog_text = target.read_text(encoding="utf-8") if target.is_file() else ""
-    # Canonical: ## [0.7.0] - 2026-07-26  or  ## [0.7.0]
     _CANONICAL_RE = re.compile(r"^##\s+\[(?P<version>[^\]]+)\]")
-    # Bare version: ## 0.7.0  (no brackets, no Version prefix)
     _BARE_RE = re.compile(r"^##\s+(?P<version>v?\d+\.\d+[^\s]*)")
-    # Legacy: ## Version 0.4.0 (2026-01-11)
     _LEGACY_VERSION_RE = re.compile(
-        r"^##\s+Version\s+(?P<version>v?\d+\.\d+[^\s(]*)", re.IGNORECASE
+        r"^##\s+Version\s+(?P<version>v?\d+\.\d+[^\s(]*)",
+        re.IGNORECASE,
     )
     headings: dict[str, list[str]] = {}
     for line in changelog_text.splitlines():
@@ -1482,43 +1821,58 @@ def _parse_changelog_headings(target: Path) -> dict[str, list[str]]:
                 match = _BARE_RE.match(line_stripped)
                 if match:
                     candidate = match.group("version").strip()
-                    # Skip narrative headings (not starting with a digit/v)
                     if candidate and (
                         candidate[0].isdigit() or candidate[0].lower() == "v"
                     ):
-                        # Validate it looks like a semver
-                        normalized = (
-                            candidate[1:] if candidate.startswith("v") else candidate
-                        )
-                        if parse_release_version_tuple(normalized) is not None:
-                            version = normalized
+                        candidate_identity = release_identity_key(candidate)
+                        if parse_release_version_tuple(candidate_identity) is not None:
+                            version = candidate
         if version is None:
             continue
-        # Normalize optional v prefix
-        if version.startswith("v"):
-            version = version[1:]
-        if version.lower() == "unreleased":
+        identity = release_identity_key(version)
+        if identity.lower() == "unreleased":
             continue
-        headings.setdefault(version, []).append(line_stripped)
+        headings.setdefault(identity, []).append(line_stripped)
     return headings
+
 
 
 def _check_release_record_problems(
     records: list[ReleaseRecord],
-    tags_by_version: dict[str, list[str]],
+    records_by_identity: dict[str, list[ReleaseRecord]],
+    tags_by_identity: dict[str, list[str]],
     headings: dict[str, list[str]],
     target: Path,
     tag_dates: dict[str, str],
     git_result: subprocess.CompletedProcess[str],
-) -> list[dict[str, object]]:
-    """Check each release record for tag/heading/date problems.
-
-    Returns a list of problem dicts.
-    """
+ ) -> list[dict[str, object]]:
+    """Check release records while assigning shared evidence to one owner."""
     problems: list[dict[str, object]] = []
     for record in records:
-        tags = tags_by_version.get(record.version, [])
-        has_heading = bool(headings.get(record.version))
+        identity = release_identity_key(record.version)
+        group = records_by_identity[identity]
+        active = [candidate for candidate in group if candidate.status != "canceled"]
+        owner = active[0] if len(active) == 1 else None
+        tags = tags_by_identity.get(identity, [])
+        has_heading = bool(headings.get(identity))
+        if record.status == "canceled":
+            if owner is None and has_heading:
+                problems.append(
+                    {
+                        "kind": "canceled_with_changelog",
+                        "version": record.version,
+                    }
+                )
+            if any(r.previous_version == record.version for r in records):
+                problems.append(
+                    {
+                        "kind": "canceled_with_successor_reference",
+                        "version": record.version,
+                    }
+                )
+            continue
+        if owner is not record:
+            continue
         if record.status in {"planned", "draft", "candidate"} and tags:
             problems.append(
                 {
@@ -1544,23 +1898,8 @@ def _check_release_record_problems(
                         "version": record.version,
                     }
                 )
-        if record.status == "canceled":
-            if has_heading:
-                problems.append(
-                    {
-                        "kind": "canceled_with_changelog",
-                        "version": record.version,
-                    }
-                )
-            if any(r.previous_version == record.version for r in records):
-                problems.append(
-                    {
-                        "kind": "canceled_with_successor_reference",
-                        "version": record.version,
-                    }
-                )
         if has_heading and record.released_at:
-            heading = headings[record.version][0]
+            heading = headings[identity][0]
             heading_date = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", heading)
             for tag in tags:
                 tag_date = tag_dates.get(tag)
@@ -1586,15 +1925,17 @@ def _check_release_record_problems(
     return problems
 
 
+
 def reconcile_releases(
     workspace_root: Path,
     *,
     changelog_file: Path | None = None,
-) -> dict[str, object]:
+ ) -> dict[str, object]:
     """Compare release records, Git tags, and changelog headings read-only."""
     records = list_releases(workspace_root)
     by_version = {record.version: record for record in records}
-    tags_by_version, tag_dates, git_result = _load_git_tags(workspace_root)
+    records_by_identity = group_releases_by_identity(records)
+    tags_by_identity, tag_dates, git_result = _load_git_tags(workspace_root)
     paths = resolve_project_paths(workspace_root)
     target = (
         Path(changelog_file)
@@ -1606,28 +1947,62 @@ def reconcile_releases(
     headings = _parse_changelog_headings(target)
 
     problems: list[dict[str, object]] = []
-    for version, tags in sorted(tags_by_version.items()):
+    for identity, tags in sorted(tags_by_identity.items()):
+        group = records_by_identity.get(identity, [])
+        active = [record for record in group if record.status != "canceled"]
         if len(tags) > 1:
             problems.append(
-                {"kind": "ambiguous_tag_version", "version": version, "tags": tags}
+                {
+                    "kind": "ambiguous_tag_version",
+                    "version": identity,
+                    "tags": tags,
+                }
             )
-        if version not in by_version:
+        if not group:
             problems.append(
-                {"kind": "tag_without_release", "version": version, "tags": tags}
+                {"kind": "tag_without_release", "version": identity, "tags": tags}
             )
-    for version in sorted(headings):
-        if version not in by_version:
+        elif not active:
+            problems.append(
+                {
+                    "kind": "canceled_with_tag",
+                    "version": identity,
+                    "tags": tags,
+                    "records": sorted(record.version for record in group),
+                }
+            )
+        elif len(active) > 1:
+            problems.append(
+                {
+                    "kind": "ambiguous_active_release_identity",
+                    "version": identity,
+                    "records": sorted(record.version for record in active),
+                }
+            )
+    for identity in sorted(headings):
+        if identity not in records_by_identity:
             problems.append(
                 {
                     "kind": "changelog_without_release",
-                    "version": version,
+                    "version": identity,
                     "target_file": str(target),
+                }
+            )
+    for identity, group in sorted(records_by_identity.items()):
+        active = [record for record in group if record.status != "canceled"]
+        if len(active) > 1 and identity not in tags_by_identity:
+            problems.append(
+                {
+                    "kind": "ambiguous_active_release_identity",
+                    "version": identity,
+                    "records": sorted(record.version for record in active),
                 }
             )
     problems.extend(
         _check_release_record_problems(
             records,
-            tags_by_version,
+            records_by_identity,
+            tags_by_identity,
             headings,
             target,
             tag_dates,
@@ -1660,7 +2035,8 @@ def reconcile_releases(
         "problems": problems,
         "release_versions": sorted(by_version),
         "tags": {
-            version: sorted(tags) for version, tags in sorted(tags_by_version.items())
+            identity: sorted(tags)
+            for identity, tags in sorted(tags_by_identity.items())
         },
         "tag_dates": dict(sorted(tag_dates.items())),
         "changelog_file": str(target),
@@ -1668,117 +2044,141 @@ def reconcile_releases(
     }
 
 
+
 def import_tags(
     workspace_root: Path,
     *,
     apply: bool = False,
-) -> dict[str, object]:
-    """Discover semver git tags and create missing release records.
-
-    With ``apply=False`` (dry-run), returns the planned actions without
-    mutating state. With ``apply=True``, creates released records for
-    every tag that does not already have one. Idempotent: existing
-    records are never overwritten.
-    """
-    tags_by_version, tag_dates, git_result = _load_git_tags(workspace_root)
+ ) -> dict[str, object]:
+    """Discover Git tags and create only truly missing release identities."""
+    tags_by_identity, tag_dates, _git_result = _load_git_tags(workspace_root)
     existing_records = list_releases(workspace_root)
     existing_versions = {record.version for record in existing_records}
+    records_by_identity = group_releases_by_identity(existing_records)
 
-    # Sort tags semantically
     def _sort_key(item: tuple[str, list[str]]) -> tuple:
         version_str = item[0]
         semver = parse_release_version_tuple(version_str)
         return (semver is None, semver or (), version_str)
 
-    sorted_tags = sorted(tags_by_version.items(), key=_sort_key)
+    sorted_tags = sorted(tags_by_identity.items(), key=_sort_key)
+    earliest_identity: str | None = sorted_tags[0][0] if sorted_tags else None
 
-    # Find the earliest tag for :root base
-    earliest_version: str | None = sorted_tags[0][0] if sorted_tags else None
+    def owner_for(identity: str) -> str | None:
+        group = records_by_identity.get(identity, [])
+        active = [record for record in group if record.status != "canceled"]
+        if active:
+            return active[0].version
+        return group[0].version if group else None
+
+    all_identities = sorted(
+        set(records_by_identity) | set(tags_by_identity),
+        key=lambda identity: (
+            parse_release_version_tuple(identity) is None,
+            parse_release_version_tuple(identity) or (),
+            identity,
+        ),
+    )
+    predecessor_map: dict[str, str | None] = {}
+    for index, identity in enumerate(all_identities):
+        predecessor_map[identity] = (
+            owner_for(all_identities[index - 1]) if index else None
+        )
 
     planned: list[dict[str, object]] = []
     applied_versions: list[str] = []
     skipped_versions: list[str] = []
-
-    # Build predecessor chain from existing + new tags
-    all_versions = sorted(
-        set(existing_versions) | {v for v, _ in sorted_tags},
-        key=lambda v: (
-            parse_release_version_tuple(v) is None,
-            parse_release_version_tuple(v) or (),
-            v,
-        ),
-    )
-    predecessor_map: dict[str, str | None] = {}
-    for idx, version in enumerate(all_versions):
-        predecessor_map[version] = all_versions[idx - 1] if idx > 0 else None
-
-    for version, tags in sorted_tags:
-        tag = tags[0]  # Use first tag if ambiguous
+    needs_restore_versions: list[str] = []
+    for identity, tags in sorted_tags:
+        tag = tags[0]
         tag_date = tag_dates.get(tag, "")
+        group = records_by_identity.get(identity, [])
+        active = [record for record in group if record.status != "canceled"]
         is_ambiguous = len(tags) > 1
-        already_exists = version in existing_versions
-
-        action = "skip" if already_exists else "create"
-        predecessor = predecessor_map.get(version)
-
+        active_ambiguous = len(active) > 1
+        if not group:
+            action = "create"
+        elif active_ambiguous:
+            action = "ambiguous"
+        elif not active:
+            action = "needs_restore"
+        else:
+            action = "skip"
+        predecessor = predecessor_map.get(identity)
+        predecessor_identity = (
+            release_identity_key(predecessor) if predecessor else None
+        )
+        predecessor_tag = (
+            tags_by_identity.get(predecessor_identity, [predecessor])[0]
+            if predecessor_identity
+            else None
+        )
         entry: dict[str, object] = {
-            "version": version,
+            "version": identity,
             "tag": tag,
             "tags": sorted(tags),
             "released_at": tag_date,
             "previous_version": predecessor,
-            "git_base_ref": f"v{predecessor}"
-            if predecessor and version != earliest_version
-            else (":root" if version == earliest_version else None),
-            "git_head_ref": f"v{version}",
+            "git_base_ref": (
+                predecessor_tag
+                if predecessor and identity != earliest_identity
+                else (":root" if identity == earliest_identity else None)
+            ),
+            "git_head_ref": tag,
             "action": action,
-            "ambiguous": is_ambiguous,
-            "already_exists": already_exists,
+            "ambiguous": is_ambiguous or active_ambiguous,
+            "already_exists": bool(group),
+            "records": sorted(record.version for record in group),
         }
         planned.append(entry)
-
-        if apply and not already_exists:
-            if is_ambiguous:
-                raise LaunchError(
-                    f"Ambiguous tags for {version}: {', '.join(sorted(tags))}. "
-                    "Resolve the ambiguity before importing.",
-                    code=CODE_CONFLICT,
-                    exit_code=2,
-                )
-            # Create the release record
-            base_ref = ":root" if version == earliest_version else f"v{predecessor}"
+        if apply and (action == "ambiguous" or is_ambiguous):
+            raise LaunchError(
+                f"Ambiguous release identity for {identity}: "
+                f"{', '.join(sorted(tags)) or ', '.join(sorted(record.version for record in active))}. "
+                "Resolve the ambiguity before importing.",
+                code=CODE_CONFLICT,
+                exit_code=2,
+            )
+        if apply and action == "create":
+            base_ref = (
+                predecessor_tag
+                if predecessor and identity != earliest_identity
+                else (":root" if identity == earliest_identity else None)
+            )
             create_release(
                 workspace_root,
-                version=version,
+                version=identity,
                 status="released",
                 released_at=tag_date or _today(),
                 previous_version=predecessor,
             )
-            # Update with git range
             try:
                 update_release(
                     workspace_root,
-                    version=version,
+                    version=identity,
                     git_base_ref=base_ref,
-                    git_head_ref=f"v{version}",
+                    git_head_ref=tag,
                 )
             except LaunchError:
-                pass  # Git range is best-effort if workspace lacks the refs
-            applied_versions.append(version)
-        elif already_exists:
-            skipped_versions.append(version)
-
+                pass
+            applied_versions.append(identity)
+        elif action == "needs_restore":
+            needs_restore_versions.append(identity)
+        elif action == "skip":
+            skipped_versions.append(identity)
     return {
         "kind": "release_import_tags",
         "applied": apply,
-        "discovered_tag_count": len(tags_by_version),
+        "discovered_tag_count": len(tags_by_identity),
         "existing_release_count": len(existing_versions),
         "planned_count": len([e for e in planned if e["action"] == "create"]),
         "applied_count": len(applied_versions),
         "skipped_count": len(skipped_versions),
+        "needs_restore_count": len(needs_restore_versions),
         "plans": planned,
         "applied_versions": applied_versions,
         "skipped_versions": skipped_versions,
+        "needs_restore_versions": needs_restore_versions,
     }
 
 

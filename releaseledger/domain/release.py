@@ -28,6 +28,7 @@ __all__ = [
     "RELEASE_FRONT_MATTER_KEY_ORDER",
     "ReleaseRecord",
     "parse_release_version_tuple",
+    "release_identity_key",
 ]
 
 # Canonical key order used when writing release.md front matter.
@@ -245,6 +246,23 @@ def parse_release_version_tuple(version: str) -> tuple[int, int, int] | None:
     minor = int(match.group(2) or 0)
     patch = int(match.group(3) or 0)
     return (major, minor, patch)
+
+
+def release_identity_key(version: str) -> str:
+    """Return the comparison key shared by release records and tags.
+
+    A lowercase ``v`` is removed only when the remainder is a supported
+    SemVer-like version. Custom versions and repeated prefixes remain exact,
+    while prerelease and build suffixes are preserved.
+    """
+    normalized = version.strip()
+    if (
+        normalized.startswith("v")
+        and not normalized[1:].startswith("v")
+        and _SEMVER_RE.fullmatch(normalized[1:])
+    ):
+        return normalized[1:]
+    return normalized
 
 
 def release_from_dict(data: dict[str, object]) -> ReleaseRecord:

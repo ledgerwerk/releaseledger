@@ -19,9 +19,10 @@ from releaseledger.domain.event import (
     EVENT_ENTRY_BATCH_ADDED,
     EVENT_ENTRY_DELETED,
     EVENT_ENTRY_IMPORTED,
+    EVENT_ENTRY_MOVED,
     EVENT_ENTRY_UPDATED,
 )
-from releaseledger.domain.versioning import bump_versioning
+from releaseledger.domain.versioning import bump_versioning, initial_versioning
 from releaseledger.errors import (
     CODE_CONFLICT,
     CODE_NOT_FOUND,
@@ -36,12 +37,15 @@ from releaseledger.services.entry_lint import lint_entry_records
 from releaseledger.services.events import append_event
 from releaseledger.storage.paths import resolve_project_paths
 from releaseledger.storage.store import (
+    commit_audit_path,
     delete_entry,
     load_commit_audit_sheet,
     load_entries,
     load_release,
     next_commit_audit_versioning,
+    next_entry_id,
     rebuild_indexes,
+    release_dir,
     save_commit_audit_sheet,
     save_entry,
     save_release,
@@ -50,13 +54,14 @@ from releaseledger.storage.store import (
 __all__ = [
     "add_many_release_entries",
     "add_release_entry",
+    "delete_release_entry",
     "import_release_entry_file",
     "list_release_entries",
     "load_entry_batch_file",
-    "show_release_entry",
-    "delete_release_entry",
-    "update_release_entry",
+    "move_release_entry",
     "set_entry_status",
+    "show_release_entry",
+    "update_release_entry",
 ]
 
 
@@ -1152,6 +1157,229 @@ def delete_release_entry(
             "force_accepted": bool(force_accepted),
             "detach_audit": bool(detach_audit),
             "affected_audit_rows": [row["sha"] for row in affected_rows],
+        },
+    )
+    rebuild_indexes(workspace_root)
+    result["events"] = [event.event_id]
+    return result
+
+
+def move_release_entry(
+    workspace_root: Path,
+    *,
+    source_version: str,
+    entry_id: str,
+    target_version: str,
+    reason: str,
+    renumber: bool = False,
+    move_audit_targets: bool = False,
+    dry_run: bool = False,
+ ) -> dict[str, object]:
+    """Move one entry between release bundles with preflighted ownership."""
+    if not isinstance(reason, str) or not reason.strip():
+        raise LaunchError(
+            "Entry move requires a non-empty reason.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
+    if source_version == target_version:
+        raise LaunchError(
+            "Entry move source and target releases must differ.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
+    source_release = load_release(workspace_root, source_version)
+    target_release = load_release(workspace_root, target_version)
+    entry = _find_entry(workspace_root, source_release.version, entry_id)
+    source_entries = load_entries(workspace_root, source_release.version)
+    target_entries = load_entries(workspace_root, target_release.version)
+    existing_target = next(
+        (candidate for candidate in target_entries if candidate.entry_id == entry_id),
+        None,
+    )
+    if existing_target is not None and not renumber:
+        raise LaunchError(
+            f"Entry {entry_id} already exists in target release "
+            f"{target_release.version}; pass --renumber to allocate a new ID.",
+            code=CODE_CONFLICT,
+            exit_code=2,
+        )
+    target_entry_id = (
+        next_entry_id(workspace_root, target_release.version)
+        if existing_target is not None
+        else entry.entry_id
+    )
+    target_refs = {
+        ref
+        for candidate in target_entries
+        for ref in candidate.source_refs
+    }
+    duplicate_refs = sorted(set(entry.source_refs) & target_refs)
+    if duplicate_refs:
+        raise LaunchError(
+            "Moved entry source refs already belong to target entries: "
+            + ", ".join(duplicate_refs),
+            code=CODE_CONFLICT,
+            exit_code=2,
+        )
+    source_audit = load_commit_audit_sheet(workspace_root, source_release.version)
+    target_audit = load_commit_audit_sheet(workspace_root, target_release.version)
+    targeted_rows = ()
+    if source_audit is not None:
+        targeted_rows = tuple(
+            row
+            for row in source_audit.rows
+            if row.target_entry_id == entry.entry_id
+            or row.target_entry_key in {
+                entry.entry_id,
+                f"{source_release.version}/{entry.entry_id}",
+            }
+        )
+    if targeted_rows and not move_audit_targets:
+        raise LaunchError(
+            f"Entry {entry.entry_id} is targeted by {len(targeted_rows)} audit row(s); "
+            "pass --move-audit-targets to move those rows.",
+            code=CODE_CONFLICT,
+            exit_code=2,
+            data={"audit_rows": [row.sha for row in targeted_rows]},
+        )
+    if targeted_rows and target_audit is not None:
+        target_shas = {row.sha for row in target_audit.rows}
+        overlap = sorted(target_shas & {row.sha for row in targeted_rows})
+        if overlap:
+            raise LaunchError(
+                "Moved audit rows collide with target audit rows: "
+                + ", ".join(overlap),
+                code=CODE_CONFLICT,
+                exit_code=2,
+            )
+    moved_entry = replace(
+        entry,
+        entry_id=target_entry_id,
+        release_version=target_release.version,
+        versioning=initial_versioning(),
+        order=(max((candidate.order or 0 for candidate in target_entries), default=0) + 1),
+    )
+    updated_source = replace(
+        source_release,
+        entry_count=max(0, len(source_entries) - 1),
+        versioning=bump_versioning(source_release.versioning),
+    )
+    updated_target = replace(
+        target_release,
+        entry_count=len(target_entries) + 1,
+        versioning=bump_versioning(target_release.versioning),
+    )
+    moved_source_audit = source_audit
+    moved_target_audit = target_audit
+    if targeted_rows and move_audit_targets and source_audit is not None:
+        remaining_rows = tuple(row for row in source_audit.rows if row not in targeted_rows)
+        moved_rows = tuple(
+            replace(
+                row,
+                target_entry_id=target_entry_id,
+                target_entry_key=(
+                    f"{target_release.version}/{target_entry_id}"
+                    if row.target_entry_key == f"{source_release.version}/{entry.entry_id}"
+                    else row.target_entry_key
+                ),
+            )
+            for row in targeted_rows
+        )
+        moved_source_audit = replace(
+            source_audit,
+            rows=remaining_rows,
+            versioning=bump_versioning(source_audit.versioning),
+        )
+        if target_audit is None:
+            moved_target_audit = replace(
+                source_audit,
+                release_version=target_release.version,
+                versioning=initial_versioning(),
+                rows=moved_rows,
+            )
+        else:
+            moved_target_audit = replace(
+                target_audit,
+                rows=target_audit.rows + moved_rows,
+                versioning=bump_versioning(target_audit.versioning),
+            )
+    result: dict[str, object] = {
+        "kind": "release_entry_move",
+        "source_release": source_release.version,
+        "target_release": target_release.version,
+        "source_entry_id": entry.entry_id,
+        "target_entry_id": target_entry_id,
+        "renumbered": target_entry_id != entry.entry_id,
+        "entry": moved_entry.to_dict(),
+        "source_release_record": updated_source.to_dict(),
+        "target_release_record": updated_target.to_dict(),
+        "audit_rows": [row.sha for row in targeted_rows],
+        "written": not dry_run,
+        "dry_run": dry_run,
+    }
+    if dry_run:
+        return result
+    paths = resolve_project_paths(workspace_root)
+    source_entry_path = release_dir(paths, source_release.version) / "entries" / f"{entry.entry_id}.md"
+    target_entry_path = release_dir(paths, target_release.version) / "entries" / f"{target_entry_id}.md"
+    files = [
+        source_entry_path,
+        target_entry_path,
+        release_dir(paths, source_release.version) / "release.md",
+        release_dir(paths, target_release.version) / "release.md",
+    ]
+    if source_audit is not None:
+        files.append(commit_audit_path(paths, source_release.version))
+    if target_audit is not None or moved_target_audit is not None:
+        files.append(commit_audit_path(paths, target_release.version))
+    snapshots = {path: path.read_bytes() if path.is_file() else None for path in files}
+    try:
+        save_entry(workspace_root, moved_entry)
+        save_release(workspace_root, updated_target, overwrite=True)
+        delete_entry(workspace_root, source_release.version, entry.entry_id)
+        save_release(workspace_root, updated_source, overwrite=True)
+        if moved_source_audit is not source_audit and moved_source_audit is not None:
+            save_commit_audit_sheet(workspace_root, moved_source_audit, overwrite=True)
+        if moved_target_audit is not target_audit and moved_target_audit is not None:
+            save_commit_audit_sheet(workspace_root, moved_target_audit, overwrite=True)
+    except BaseException:
+        for path, data in snapshots.items():
+            if data is None:
+                if path.is_file():
+                    path.unlink()
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+        raise
+    event = append_event(
+        workspace_root,
+        event=EVENT_ENTRY_MOVED,
+        release_version=target_release.version,
+        entry_id=target_entry_id,
+        record_revisions={
+            f"release:{source_release.version}": updated_source.versioning.revision,
+            f"release:{target_release.version}": updated_target.versioning.revision,
+            f"entry:{target_release.version}/{target_entry_id}": moved_entry.versioning.revision,
+            **(
+                {f"audit:{source_release.version}": moved_source_audit.versioning.revision}
+                if moved_source_audit is not source_audit and moved_source_audit is not None
+                else {}
+            ),
+            **(
+                {f"audit:{target_release.version}": moved_target_audit.versioning.revision}
+                if moved_target_audit is not target_audit and moved_target_audit is not None
+                else {}
+            ),
+        },
+        data={
+            "source_release": source_release.version,
+            "source_entry_id": entry.entry_id,
+            "target_release": target_release.version,
+            "target_entry_id": target_entry_id,
+            "reason": reason.strip(),
+            "renumbered": target_entry_id != entry.entry_id,
+            "moved_audit_rows": [row.sha for row in targeted_rows],
         },
     )
     rebuild_indexes(workspace_root)

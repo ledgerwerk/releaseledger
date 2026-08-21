@@ -11,7 +11,14 @@ storage = "project"
 storage = "cache"
 
 [ledgers.taskledger.mounts.data]
-storage = "project"
+storage = "external"
+root = "../ledger"
+
+[ledgers.taskledger.mounts.runtime]
+storage = "user-data"
+
+[ledgers.taskledger.mounts.logs]
+storage = "user-data"
 
 [ledgers.taskledger.mounts.indexes]
 storage = "cache"

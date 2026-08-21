@@ -83,6 +83,10 @@ releaseledger release update VERSION [release metadata options]
 releaseledger release tag VERSION [release metadata options]
 releaseledger release finalize VERSION [--released-at YYYY-MM-DD]
                                        [--changelog-file PATH]
+releaseledger release restore VERSION --reason TEXT [--to STATUS]
+                                      [--from-tag TAG] [--git-base REF]
+                                      [--previous VERSION] [--clear-previous]
+                                      [--released-at YYYY-MM-DD] [--dry-run]
 releaseledger release prepare VERSION [--previous VERSION]
                                       [--released-at YYYY-MM-DD]
                                       [--git-base REF] [--git-head REF]
@@ -107,7 +111,8 @@ releaseledger release rename OLD_VERSION NEW_VERSION [--previous VERSION]
                                                       [--target-file PATH]
                                                       [--rename-changelog-section]
                                                       [--replace-existing-section]
-                                                      [--dry-run]
+                                                      [--replace-canceled-target]
+                                                      [--reason TEXT] [--dry-run]
 releaseledger release chain check
 releaseledger release chain repair [--dry-run] [--apply]
 releaseledger release chain check [--strict]
@@ -117,11 +122,14 @@ releaseledger release show VERSION
 ```
 
 `release tag` creates a release with status `released`. `release finalize`
-transitions an existing release to `released`. `release cancel` marks a
-release as `canceled` (never shipped; excluded from previous-version
-inference). `release rename` moves a release bundle to a new version and
-rewrites its front matter, entries, and optionally its changelog section.
-`release chain check`/`repair` validate and rebuild predecessor links.
+transitions an existing release to `released` and is a compatible no-op when
+that release is already finalized. `release cancel` marks a release as
+`canceled` (never shipped; excluded from previous-version inference).
+`release restore` is the only supported way to reopen a canceled release or
+restore one from a matching shipped Git tag. Generic `release update --status`
+cannot bypass terminal lifecycle states. `release rename` moves a release
+bundle; `--replace-canceled-target` atomically displaces an obsolete canceled
+bundle. `release chain check`/`repair` validate and rebuild predecessor links.
 
 ## Entry commands
 
@@ -141,6 +149,8 @@ releaseledger entry update VERSION ENTRY_ID [entry metadata options]
                                     [--clear-source-refs]
 releaseledger entry delete VERSION ENTRY_ID --reason TEXT [--dry-run]
                                     [--force-accepted] [--detach-audit]
+releaseledger entry move SOURCE_VERSION ENTRY_ID TARGET_VERSION --reason TEXT
+                                  [--renumber] [--move-audit-targets] [--dry-run]
 releaseledger entry show VERSION ENTRY_ID
 releaseledger entry import VERSION --file FILE [--replace]
                                    [--source-ledger LEDGER]

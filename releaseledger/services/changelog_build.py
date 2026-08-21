@@ -26,7 +26,11 @@ from jinja2.exceptions import SecurityError, TemplateError
 from jinja2.sandbox import SandboxedEnvironment
 
 from releaseledger.domain.entry import ReleaseEntryRecord, normalize_entry_status
-from releaseledger.domain.release import ReleaseRecord, parse_release_version_tuple
+from releaseledger.domain.release import (
+    ReleaseRecord,
+    parse_release_version_tuple,
+    release_identity_key,
+)
 from releaseledger.domain.states import (
     DEFAULT_KEEPACHANGELOG_KIND_MAP,
     ENTRY_KIND_TITLES,
@@ -61,10 +65,10 @@ __all__ = [
     "extract_unreleased_section_body",
     "find_release_section",
     "insert_release_section",
-    "render_changelog_section",
-    "render_full_changelog_document",
     "remove_release_section",
     "rename_release_section",
+    "render_changelog_section",
+    "render_full_changelog_document",
     "replace_release_section",
 ]
 
@@ -1037,7 +1041,10 @@ def _strip_stale_generated_unreleased_body(
     if end_idx is None:
         return body, None
 
-    if version not in selected_versions:
+    selected_identities = {
+        release_identity_key(selected) for selected in selected_versions
+    }
+    if release_identity_key(version) not in selected_identities:
         return body, None
 
     remaining = lines[:start_idx] + lines[end_idx + 1 :]
@@ -1669,7 +1676,10 @@ def _validate_complete_history(
     """
     import subprocess
 
-    from releaseledger.domain.release import parse_release_version_tuple
+    from releaseledger.domain.release import (
+        parse_release_version_tuple,
+        release_identity_key,
+    )
 
     git_result = subprocess.run(
         ["git", "-C", str(workspace_root), "tag", "--list"],
@@ -1680,13 +1690,13 @@ def _validate_complete_history(
     raw_tags = [line.strip() for line in git_result.stdout.splitlines() if line.strip()]
     tag_versions: dict[str, list[str]] = {}
     for tag in raw_tags:
-        normalized = tag[1:] if tag.startswith("v") else tag
+        normalized = tag.removeprefix("v")
         if parse_release_version_tuple(normalized) is None:
             continue
-        tag_versions.setdefault(normalized, []).append(tag)
+        tag_versions.setdefault(release_identity_key(tag), []).append(tag)
 
     all_releases = list_releases(workspace_root)
-    release_versions = {r.version for r in all_releases}
+    release_versions = {release_identity_key(r.version) for r in all_releases}
 
     missing = sorted(set(tag_versions) - release_versions)
     ambiguous = {v: tags for v, tags in tag_versions.items() if len(tags) > 1}

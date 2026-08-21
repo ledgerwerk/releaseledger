@@ -67,6 +67,7 @@ def build_command_inventory() -> CommandInventory:
         ("update", "Update release metadata.", "ledger-write"),
         ("set-status", "Change a nonterminal release status.", "ledger-write"),
         ("finalize", "Finalize a release.", "ledger-write"),
+        ("restore", "Restore a canceled release.", "ledger-write"),
         ("prepare", "Prepare release artifacts.", "external-write"),
         ("list", "List releases."),
         ("show", "Show one release."),
@@ -104,6 +105,7 @@ def build_command_inventory() -> CommandInventory:
         ("update", "Update entry metadata.", "ledger-write"),
         ("set-status", "Change an entry status.", "ledger-write"),
         ("delete", "Delete a release entry.", "ledger-write"),
+        ("move", "Move a release entry.", "ledger-write"),
         ("import", "Import one release entry.", "ledger-write"),
         (
             "apply",

@@ -8,6 +8,7 @@ from releaseledger.services.entries import (
     delete_release_entry,
     import_release_entry_file,
     list_release_entries,
+    move_release_entry,
     show_release_entry,
     update_release_entry,
 )
@@ -17,11 +18,12 @@ from releaseledger.services.entry_prompt import build_entry_prompt
 __all__ = [
     "add_many_release_entries",
     "add_release_entry",
-    "delete_release_entry",
     "build_entry_prompt",
+    "delete_release_entry",
     "import_release_entry_file",
-    "list_release_entries",
     "lint_release_entries",
+    "list_release_entries",
+    "move_release_entry",
     "show_release_entry",
     "update_release_entry",
 ]

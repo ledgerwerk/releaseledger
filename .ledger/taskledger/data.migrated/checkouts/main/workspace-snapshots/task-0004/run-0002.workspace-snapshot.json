@@ -1,0 +1,507 @@
+{
+  "captured_at": "2026-08-21T12:14:16Z",
+  "content_hash": "sha256:b1703f17df5d750d5bce8480666ee1afec9c2c57bd4696f8a1f7679ddfb9f8f8",
+  "dirty": true,
+  "entries": [
+    {
+      "content_hash": "sha256:869ecd2d487184a3ac59d373ab3aeeb9f3b3ca0fd387f103225cf16dbfa248ef",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0001/components/00-summary.md",
+      "size": 115,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:4aff9858a9f3229bc8a0e8ee6f61ce8d64b4ea639c4e1483f147c887e8d09b33",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0001/components/10-context.md",
+      "size": 81,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:a4242ec1f613840cc2b6df6b6df7a0d08371680191fdb47908462f9833f7f8f3",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0001/components/20-tool-call.md",
+      "size": 72,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:b5de17ee259bdeae95a3eb861f2b57cc5d1be94a061ee6e5f2437be0dfbdd8e0",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0001/components/30-expected-behavior.md",
+      "size": 50,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:4cbd70ea8a0d7f94fb8792ce532fdbed1eb57e0e4a2d8ae248cfb3056ae0db34",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0001/components/40-actual-behavior.md",
+      "size": 66,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:c1a6f6744a3f2e22ebdb2040fbaac0d68f4b87eb46d4e64589a6942ae26b4d81",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0001/components/50-reproduction.md",
+      "size": 144,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:f0102846718b8365ba214ce5001fd32b14e0a93200bcd1bca1e3b64f364d28a4",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0001/components/60-impact.md",
+      "size": 119,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:0a56963377b75b784e51a3f51460d4f22eddbf12a7f35bdb15ab04dd42e16f0a",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0001/components/90-suggested-fix.md",
+      "size": 101,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:223ef61fa459ceddf57a15cfb8b6c27d774833cfdc4ac5f1dc2e324e80b40c5c",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0001/repair.yaml",
+      "size": 2630,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:869ecd2d487184a3ac59d373ab3aeeb9f3b3ca0fd387f103225cf16dbfa248ef",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0001/versions/v0001/components/00-summary.md",
+      "size": 115,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:4aff9858a9f3229bc8a0e8ee6f61ce8d64b4ea639c4e1483f147c887e8d09b33",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0001/versions/v0001/components/10-context.md",
+      "size": 81,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:a4242ec1f613840cc2b6df6b6df7a0d08371680191fdb47908462f9833f7f8f3",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0001/versions/v0001/components/20-tool-call.md",
+      "size": 72,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:b5de17ee259bdeae95a3eb861f2b57cc5d1be94a061ee6e5f2437be0dfbdd8e0",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0001/versions/v0001/components/30-expected-behavior.md",
+      "size": 50,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:4cbd70ea8a0d7f94fb8792ce532fdbed1eb57e0e4a2d8ae248cfb3056ae0db34",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0001/versions/v0001/components/40-actual-behavior.md",
+      "size": 66,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:c1a6f6744a3f2e22ebdb2040fbaac0d68f4b87eb46d4e64589a6942ae26b4d81",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0001/versions/v0001/components/50-reproduction.md",
+      "size": 144,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:f0102846718b8365ba214ce5001fd32b14e0a93200bcd1bca1e3b64f364d28a4",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0001/versions/v0001/components/60-impact.md",
+      "size": 119,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:0a56963377b75b784e51a3f51460d4f22eddbf12a7f35bdb15ab04dd42e16f0a",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0001/versions/v0001/components/90-suggested-fix.md",
+      "size": 101,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:223ef61fa459ceddf57a15cfb8b6c27d774833cfdc4ac5f1dc2e324e80b40c5c",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0001/versions/v0001/repair.yaml",
+      "size": 2630,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:cdc100b2e1d3b97ba01363830c2ffd9cfa5327ea99a4c6a8b89a4c8487844a05",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0002/components/00-summary.md",
+      "size": 132,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:7e7c9d2f7742f4c176222152f7a90fc335c755bfd9a1cba07714abc45a8737bd",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0002/components/10-context.md",
+      "size": 67,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:10abd216db4716f9c977691bc3cb429b2cf5cbc0afafc7737836884dbdb2ffde",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0002/components/20-tool-call.md",
+      "size": 203,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:465d6b2616dc73f68974d3db25c6088b69796588dd4470292c0d206d17b636fa",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0002/components/30-expected-behavior.md",
+      "size": 67,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:5f2f5e559af0662dde6dd0520f7d67914588dd48fe644986ccd4a7cb12eaa357",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0002/components/40-actual-behavior.md",
+      "size": 155,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:61688e38d8cc1fc9f4c7a9dab4d7ad8c3c38878a6ef1d7220331726e7f897698",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0002/components/50-reproduction.md",
+      "size": 99,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:8ef9ca19cb8a0e6531655f8157014611a07073b43dea0fc9e5b39ea8b3a632db",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0002/components/60-impact.md",
+      "size": 121,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:6803c8cd813cb5fc69bb9ffdbb32243af998a147f3b8a1fd29f7b9432061e329",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0002/components/90-suggested-fix.md",
+      "size": 100,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:4bbc03833fa0732a855477ba000854d31e6fa56d24904964ef2cd5232c8727e8",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0002/repair.yaml",
+      "size": 2653,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:cdc100b2e1d3b97ba01363830c2ffd9cfa5327ea99a4c6a8b89a4c8487844a05",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0002/versions/v0001/components/00-summary.md",
+      "size": 132,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:7e7c9d2f7742f4c176222152f7a90fc335c755bfd9a1cba07714abc45a8737bd",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0002/versions/v0001/components/10-context.md",
+      "size": 67,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:10abd216db4716f9c977691bc3cb429b2cf5cbc0afafc7737836884dbdb2ffde",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0002/versions/v0001/components/20-tool-call.md",
+      "size": 203,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:465d6b2616dc73f68974d3db25c6088b69796588dd4470292c0d206d17b636fa",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0002/versions/v0001/components/30-expected-behavior.md",
+      "size": 67,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:5f2f5e559af0662dde6dd0520f7d67914588dd48fe644986ccd4a7cb12eaa357",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0002/versions/v0001/components/40-actual-behavior.md",
+      "size": 155,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:61688e38d8cc1fc9f4c7a9dab4d7ad8c3c38878a6ef1d7220331726e7f897698",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0002/versions/v0001/components/50-reproduction.md",
+      "size": 99,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:8ef9ca19cb8a0e6531655f8157014611a07073b43dea0fc9e5b39ea8b3a632db",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0002/versions/v0001/components/60-impact.md",
+      "size": 121,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:6803c8cd813cb5fc69bb9ffdbb32243af998a147f3b8a1fd29f7b9432061e329",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0002/versions/v0001/components/90-suggested-fix.md",
+      "size": 100,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:4bbc03833fa0732a855477ba000854d31e6fa56d24904964ef2cd5232c8727e8",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/repairs/repair-0002/versions/v0001/repair.yaml",
+      "size": 2653,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:9cd8da4580cf04694cb3f60bf86c67d7e66dcfc2939d582277e8565d4fcdb1cc",
+      "exists": true,
+      "kind": "file",
+      "path": ".repairledger/storage.yaml",
+      "size": 70,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:eae6ddf963388cf56ba94c29aa06da61b8ed4472884dd3b0f2fdebe9f0b4ae56",
+      "exists": true,
+      "kind": "file",
+      "path": "01_todo.md",
+      "size": 38086,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:d19ccb22b4b476a9e3b12ac0de906d72ee691ae9a252d7ffe102e413140ea6a4",
+      "exists": true,
+      "kind": "file",
+      "path": "docs/commands.generated.md",
+      "size": 3514,
+      "status": "modified"
+    },
+    {
+      "content_hash": "sha256:a69b824244783853dc4eefe698fc157497562675e1c6b9c259035d3fb7879b66",
+      "exists": true,
+      "kind": "file",
+      "path": "docs/commands.md",
+      "size": 22914,
+      "status": "modified"
+    },
+    {
+      "content_hash": "sha256:49011302f3901f1a0bae57ead7d953037a198cc688b77edfe8ca33023e205d0a",
+      "exists": true,
+      "kind": "file",
+      "path": "docs/concepts.md",
+      "size": 6931,
+      "status": "modified"
+    },
+    {
+      "content_hash": "sha256:9a271d98b06e7d4be494439c773c8fa237e43a0266035365230aed172092b62e",
+      "exists": true,
+      "kind": "file",
+      "path": "docs/quickstart.md",
+      "size": 6416,
+      "status": "modified"
+    },
+    {
+      "content_hash": "sha256:90cd3209d9b9838c25d7eee446c4b02dfdb40155c052f03ae41b00f87e6c7258",
+      "exists": true,
+      "kind": "file",
+      "path": "releaseledger/api/entries.py",
+      "size": 758,
+      "status": "modified"
+    },
+    {
+      "content_hash": "sha256:e1eca5eff6609fa58283ac102457df28c099f19028b651ec56e104580ea735a2",
+      "exists": true,
+      "kind": "file",
+      "path": "releaseledger/api/releases.py",
+      "size": 745,
+      "status": "modified"
+    },
+    {
+      "content_hash": "sha256:fd871d8970f16ad2b6a170aa6cd7421edb415e5e2eacc376adcf8df3a4b247e6",
+      "exists": true,
+      "kind": "file",
+      "path": "releaseledger/cli.py",
+      "size": 171321,
+      "status": "modified"
+    },
+    {
+      "content_hash": "sha256:b94e10447442104e3a13aabe91acf080693d5ff4bbbbfd92d900e59cd6771662",
+      "exists": true,
+      "kind": "file",
+      "path": "releaseledger/command_registry.py",
+      "size": 9382,
+      "status": "modified"
+    },
+    {
+      "content_hash": "sha256:f3489258794f2220b4500ff924a4d5e681ef5446cf7e3c6038e74ac003404b56",
+      "exists": true,
+      "kind": "file",
+      "path": "releaseledger/domain/event.py",
+      "size": 4947,
+      "status": "modified"
+    },
+    {
+      "content_hash": "sha256:c297213a5e652e280bafc7f48482f02bb36f66de91af37e7495142e52b0e9863",
+      "exists": true,
+      "kind": "file",
+      "path": "releaseledger/domain/release.py",
+      "size": 11721,
+      "status": "modified"
+    },
+    {
+      "content_hash": "sha256:b20cb115598d69989bc82e9bc7791fbb4136380ece3f92aaed9ed34acb02cf3d",
+      "exists": true,
+      "kind": "file",
+      "path": "releaseledger/services/changelog_build.py",
+      "size": 73283,
+      "status": "modified"
+    },
+    {
+      "content_hash": "sha256:c9751501ea845bd0de7c297381a844fdb50f83dfc3512d0fca4c93545baf1af7",
+      "exists": true,
+      "kind": "file",
+      "path": "releaseledger/services/entries.py",
+      "size": 48626,
+      "status": "modified"
+    },
+    {
+      "content_hash": "sha256:c4d4b2366136371e51fdff7e0fd4a2f5fd435109b45dd7327c123ba1fbd4d706",
+      "exists": true,
+      "kind": "file",
+      "path": "releaseledger/services/releases.py",
+      "size": 86253,
+      "status": "modified"
+    },
+    {
+      "content_hash": "sha256:ebea22394cc264cbe1d017ff093ecc44f675a7927ab1e4362110b28c614da990",
+      "exists": true,
+      "kind": "file",
+      "path": "releaseledger/storage/store.py",
+      "size": 28593,
+      "status": "modified"
+    },
+    {
+      "content_hash": "sha256:9dbc5b35f2656f6ecaca4fb913ef702aeb3908bfc576985866386bd6972cb2b8",
+      "exists": true,
+      "kind": "file",
+      "path": "repairledger.toml",
+      "size": 124,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:50cfc8c15def87c9afeec78eb6d19a693d86a42ec604a62e4d855f4e4a44aaa5",
+      "exists": true,
+      "kind": "file",
+      "path": "skills/releaseledger/SKILL.md",
+      "size": 33214,
+      "status": "modified"
+    },
+    {
+      "content_hash": "sha256:95397fd76de8a2a22ca47058283ddefac8caa9b4c62caeee12ac9d8b0a3a5a24",
+      "exists": true,
+      "kind": "file",
+      "path": "tests/test_changelog_full_build.py",
+      "size": 28142,
+      "status": "modified"
+    },
+    {
+      "content_hash": "sha256:f3b0b12d660ca7dd8d980ded14ee6583c3dd8db5eff39c9aed60e5d938af7bdf",
+      "exists": true,
+      "kind": "file",
+      "path": "tests/test_cli.py",
+      "size": 61150,
+      "status": "modified"
+    },
+    {
+      "content_hash": "sha256:e4ee979aaf54baff050320a5ddcf001e6110436714610559045bff44d031d417",
+      "exists": true,
+      "kind": "file",
+      "path": "tests/test_entry_move.py",
+      "size": 3696,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:1f5329391757b4366192b7e86e39fdd53ae911c6ead408bba376b583c134655f",
+      "exists": true,
+      "kind": "file",
+      "path": "tests/test_lexhint_recovery.py",
+      "size": 3193,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:4e9b2d936ec4796a4944d4c763ef4f1aa93057c5d6ace0f32557ac1127ba16b7",
+      "exists": true,
+      "kind": "file",
+      "path": "tests/test_release_identity.py",
+      "size": 1890,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:7d84415141711f1be25903a3ffe5cfca0ca9b564f839dfedea1764abbca34fad",
+      "exists": true,
+      "kind": "file",
+      "path": "tests/test_release_reconcile.py",
+      "size": 10062,
+      "status": "modified"
+    },
+    {
+      "content_hash": "sha256:14afaedf7a5bc1e25bfea01a3c9b443c92b00318848a9f8236b9adea37c8ac9a",
+      "exists": true,
+      "kind": "file",
+      "path": "tests/test_release_replace.py",
+      "size": 4005,
+      "status": "untracked"
+    },
+    {
+      "content_hash": "sha256:a9e8019146a3e3f92537e013fa435cb0d56b80e8d4ede8c46541f2c825b3a2a8",
+      "exists": true,
+      "kind": "file",
+      "path": "tests/test_release_restore.py",
+      "size": 4110,
+      "status": "untracked"
+    }
+  ],
+  "entry_count": 62,
+  "format": "worktree-content:v1",
+  "git_commit": "89a73f96616d418d2a87e661229090f6e5ba61f9",
+  "paths_hash": "sha256:437c2c2c98c1e7325c2a6af83804a0af01c480030cb318edab7733a013edae79"
+}

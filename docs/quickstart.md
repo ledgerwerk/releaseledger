@@ -120,7 +120,9 @@ releaseledger build 1.2.0 --strict --target-file CHANGELOG.md
 
 Preview and apply a planned-version correction as one explicit workflow. The
 dry-run verifies bundle, entry, audit, successor, and changelog actions; no
-manual edit to generated `CHANGELOG.md` content is needed.
+manual edit to generated `CHANGELOG.md` content is needed. Stored `vX.Y.Z`
+and `X.Y.Z` records share one external identity, while exact storage names
+remain unchanged.
 
 ```bash
 releaseledger release rename 0.3.0 0.2.8 \
@@ -217,3 +219,29 @@ releaseledger build 1.2.0 \
   --strict \
   --target-file CHANGELOG.md
 ```
+
+
+## Recover a canceled release that shipped
+
+If a canceled release has a real Git tag, reconcile first, then use the explicit restore and bundle replacement workflows:
+
+```bash
+releaseledger release reconcile --strict
+releaseledger release rename v0.1.0 0.1.0 \
+  --replace-canceled-target \
+  --reason "Consolidate duplicate canceled bundles." \
+  --dry-run
+releaseledger release rename v0.1.0 0.1.0 \
+  --replace-canceled-target \
+  --reason "Consolidate duplicate canceled bundles."
+releaseledger release restore 0.1.0 \
+  --from-tag v0.1.0 \
+  --git-base :root \
+  --reason "The tagged release was actually shipped."
+releaseledger release chain repair --apply
+releaseledger build --all --strict --no-preserve-unreleased --target-file CHANGELOG.md
+releaseledger release reconcile --strict
+releaseledger release chain check --strict
+```
+
+Never use generic `release update --status` to reopen a canceled or released record, and do not repair release ownership by renaming a changelog section manually.

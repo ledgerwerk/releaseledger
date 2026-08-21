@@ -78,6 +78,7 @@ from releaseledger.services.entries import (
     list_release_entries,
     load_entry_batch_file_with_metadata,
     load_entry_batch_payload,
+    move_release_entry,
     set_entry_status,
     show_release_entry,
     update_release_entry,
@@ -111,6 +112,7 @@ from releaseledger.services.releases import (
     rename_changelog_section,
     rename_release,
     repair_release_chain,
+    restore_release,
     set_release_status,
     show_release,
     tag_release,
@@ -883,13 +885,72 @@ def release_finalize_command(
             released_at=released_at,
             changelog_file=changelog_file,
         )
-        return result, _event_ids(result), f"finalized release {version}"
+        human = (
+            f"release {version} already finalized; no changes"
+            if result.get("already_finalized")
+            else f"finalized release {version}"
+        )
+        return result, _event_ids(result), human
 
     run_command(
         command="release.finalize",
         result_type="release",
         json_output=state.json_output,
         produce=produce,
+    )
+
+
+@release_app.command("restore")
+def release_restore_command(
+    ctx: typer.Context,
+    version: Annotated[str, typer.Argument(help="Canceled release version.")],
+    reason: Annotated[str, typer.Option("--reason", help="Why the release is restored.")],
+    to_status: Annotated[
+        str | None, typer.Option("--to", help="planned|draft|candidate when reopening.")
+    ] = None,
+    from_tag: Annotated[
+        str | None, typer.Option("--from-tag", help="Matching Git tag for shipped restoration.")
+    ] = None,
+    git_base_ref: Annotated[
+        str | None, typer.Option("--git-base", help="Git base ref for restored metadata.")
+    ] = None,
+    previous_version: Annotated[
+        str | None, typer.Option("--previous", help="Override previous release version.")
+    ] = None,
+    clear_previous: Annotated[
+        bool, typer.Option("--clear-previous", help="Clear previous_version explicitly.")
+    ] = False,
+    released_at: Annotated[
+        str | None, typer.Option("--released-at", help="Release date YYYY-MM-DD.")
+    ] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+ ) -> None:
+    """Restore a canceled release or correct it from a Git tag."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        result = restore_release(
+            _paths(ctx).workspace_root,
+            version=version,
+            reason=reason,
+            to_status=to_status,
+            from_tag=from_tag,
+            git_base_ref=git_base_ref,
+            previous_version=previous_version if previous_version is not None else UNSET,
+            clear_previous=clear_previous,
+            released_at=released_at,
+            dry_run=dry_run,
+        )
+        action = "previewed restore of" if dry_run else "restored"
+        return result, _event_ids(result), f"{action} release {version}"
+
+    run_command(
+        command="release.restore",
+        result_type="release",
+        json_output=state.json_output,
+        produce=produce,
+        workspace_root=_paths(ctx).workspace_root,
+        mutating=not dry_run,
     )
 
 
@@ -1327,6 +1388,17 @@ def release_rename_command(
             help="Overwrite a destination changelog section if it exists.",
         ),
     ] = False,
+    replace_canceled_target: Annotated[
+        bool,
+        typer.Option(
+            "--replace-canceled-target",
+            help="Replace an existing canceled target bundle safely.",
+        ),
+    ] = False,
+    reason: Annotated[
+        str | None,
+        typer.Option("--reason", help="Why the canceled target is replaced."),
+    ] = None,
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", help="Preview the rename without writing."),
@@ -1350,6 +1422,8 @@ def release_rename_command(
             target_file=target_file,
             rename_changelog_section=rename_changelog_section,
             replace_existing_section=replace_existing_section,
+            replace_canceled_target=replace_canceled_target,
+            reason=reason,
             dry_run=dry_run,
         )
         if dry_run:
@@ -1748,6 +1822,46 @@ def entry_update_command(
         result_type="release_entry",
         json_output=state.json_output,
         produce=produce,
+    )
+
+
+@entry_app.command("move")
+def entry_move_command(
+    ctx: typer.Context,
+    source_version: Annotated[str, typer.Argument(help="Source release version.")],
+    entry_id: Annotated[str, typer.Argument(help="Entry ID to move.")],
+    target_version: Annotated[str, typer.Argument(help="Target release version.")],
+    reason: Annotated[str, typer.Option("--reason", help="Why the entry is moved.")],
+    renumber: Annotated[bool, typer.Option("--renumber", help="Allocate a new target ID on collision.")] = False,
+    move_audit_targets: Annotated[
+        bool, typer.Option("--move-audit-targets", help="Move audit rows targeting the entry.")
+    ] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+ ) -> None:
+    """Move one release entry between release bundles."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        result = move_release_entry(
+            _paths(ctx).workspace_root,
+            source_version=source_version,
+            entry_id=entry_id,
+            target_version=target_version,
+            reason=reason,
+            renumber=renumber,
+            move_audit_targets=move_audit_targets,
+            dry_run=dry_run,
+        )
+        action = "previewed move of" if dry_run else "moved"
+        return result, _event_ids(result), f"{action} entry {entry_id}"
+
+    run_command(
+        command="entry.move",
+        result_type="release_entry",
+        json_output=state.json_output,
+        produce=produce,
+        workspace_root=_paths(ctx).workspace_root,
+        mutating=not dry_run,
     )
 
 

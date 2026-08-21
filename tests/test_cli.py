@@ -371,11 +371,13 @@ class TestPhase3Releases:
         assert "status: released" in show.stdout
         assert "released_at: 2026-06-13" in show.stdout
 
-    def test_release_finalize_rejects_already_released(self, tmp_path: Path) -> None:
+    def test_release_finalize_already_released_is_idempotent(self, tmp_path: Path) -> None:
         _init_project(tmp_path)
         _run(tmp_path, "release", "tag", "1.2.0")
-        result = _run(tmp_path, "release", "finalize", "1.2.0")
-        assert result.exit_code != 0
+        result = _jrun(tmp_path, "release", "finalize", "1.2.0")
+        payload = _json(result)
+        assert payload["result"]["already_finalized"] is True
+        assert payload["result"]["written"] is False
 
     def test_json_release_show_envelope(self, tmp_path: Path) -> None:
         _init_project(tmp_path)

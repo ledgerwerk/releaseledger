@@ -22,6 +22,7 @@ EVENT_RELEASE_FINALIZED = "release.finalized"
 EVENT_RELEASE_UPDATED = "release.updated"
 EVENT_RELEASE_CANCELED = "release.canceled"
 EVENT_RELEASE_RENAMED = "release.renamed"
+EVENT_RELEASE_RESTORED = "release.restored"
 EVENT_RELEASE_CHAIN_REPAIRED = "release.chain_repaired"
 EVENT_CHANGELOG_SECTION_RENAMED = "changelog.section_renamed"
 EVENT_CHANGELOG_SECTION_REMOVED = "changelog.section_removed"
@@ -30,6 +31,7 @@ EVENT_ENTRY_UPDATED = "entry.updated"
 EVENT_ENTRY_IMPORTED = "entry.imported"
 EVENT_ENTRY_BATCH_ADDED = "entry.batch_added"
 EVENT_ENTRY_DELETED = "entry.deleted"
+EVENT_ENTRY_MOVED = "entry.moved"
 
 
 @dataclass(slots=True, frozen=True)

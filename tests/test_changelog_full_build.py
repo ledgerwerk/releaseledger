@@ -343,10 +343,8 @@ class TestFullBuild:
     def test_strict_fails_when_no_date(self, tmp_path: Path) -> None:
         _init_project(tmp_path)
         _write_keepachangelog_config(tmp_path)
-        # A released release with no date: create planned then set status.
-        result = _run(tmp_path, "release", "create", "0.1.0")
-        assert result.exit_code == 0, _human_error(result)
-        result = _run(tmp_path, "release", "update", "0.1.0", "--status", "released")
+        # A released release with no date.
+        result = _run(tmp_path, "release", "create", "0.1.0", "--status", "released")
         assert result.exit_code == 0, _human_error(result)
         _run(
             tmp_path, "entry", "add", "0.1.0", "--kind", "added", "--summary", "Feature"

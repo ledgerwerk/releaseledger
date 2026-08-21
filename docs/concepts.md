@@ -52,9 +52,17 @@ previous-version inference and not built into public changelogs by default.
 Canceled releases may carry `cancel_reason` and `superseded_by` metadata
 and remain visible in `release list` as an audit tombstone.
 
+Release identity compares `v1.2.3` and `1.2.3` as one external release while
+preserving exact stored version paths and concrete predecessor references.
+Unique aliases resolve at the service boundary; conflicting aliases are
+reported explicitly.
+
 Version correction is a domain operation across the release identity, bundle,
 entry ownership, predecessor links, audit sheet, changelog identity, and
-indexes. `release rename --dry-run` previews those surfaces; changelog mutation
+indexes. `release rename --dry-run` previews those surfaces. Use
+`release restore --from-tag` when a canceled release was later shipped, and
+use `release rename --replace-canceled-target --reason TEXT` when a correct
+canceled bundle must displace an obsolete canceled alias. Changelog mutation
 remains explicit with `--rename-changelog-section`.
 
 ## Entry

@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import copy
 import re
+import shutil
+import tempfile
+import uuid
 from dataclasses import replace
 from pathlib import Path
 
@@ -57,12 +60,13 @@ from releaseledger.storage.paths import ProjectPaths, resolve_project_paths
 __all__ = [
     "commit_audit_path",
     "delete_commit_audit_sheet",
+    "delete_entry",
+    "list_releases",
+    "list_releases_for_paths",
     "load_commit_audit_sheet",
     "load_entries",
     "load_entries_for_paths",
     "load_release",
-    "list_releases",
-    "list_releases_for_paths",
     "next_commit_audit_versioning",
     "next_entry_id",
     "rebuild_indexes",
@@ -71,9 +75,9 @@ __all__ = [
     "release_dir",
     "release_markdown_path",
     "rename_release_bundle",
+    "replace_canceled_release_bundle",
     "save_commit_audit_sheet",
     "save_entries_for_release",
-    "delete_entry",
     "save_entry",
     "save_release",
     "validate_release_version",
@@ -550,6 +554,97 @@ def rename_release_bundle(
     save_release(workspace_root, new_record, overwrite=True)
     save_entries_for_release(workspace_root, new_record.version, entries)
     return new_record
+
+
+def replace_canceled_release_bundle(
+    workspace_root: Path,
+    old_version: str,
+    new_record: ReleaseRecord,
+ ) -> ReleaseRecord:
+    """Atomically replace an existing target with a rewritten source bundle."""
+    paths = _resolve(workspace_root)
+    validate_release_version(old_version)
+    validate_release_version(new_record.version)
+    if old_version == new_record.version:
+        raise LaunchError(
+            "Replacement source and target versions must differ.",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+        )
+    source_bundle = release_dir(paths, old_version)
+    target_bundle = release_dir(paths, new_record.version)
+    if not source_bundle.is_dir():
+        raise LaunchError(
+            f"Release not found: {old_version}",
+            code=CODE_NOT_FOUND,
+            exit_code=2,
+        )
+    if not target_bundle.is_dir():
+        raise LaunchError(
+            f"Release not found: {new_record.version}",
+            code=CODE_NOT_FOUND,
+            exit_code=2,
+        )
+    entries = load_entries(workspace_root, old_version)
+    temp_root = Path(
+        tempfile.mkdtemp(prefix=".release-replace-", dir=paths.releases_dir)
+    )
+    staged_bundle = temp_root / "bundle"
+    target_backup = paths.releases_dir / (
+        f".{new_record.version}.target-backup-{uuid.uuid4().hex}"
+    )
+    source_backup = paths.releases_dir / (
+        f".{old_version}.source-backup-{uuid.uuid4().hex}"
+    )
+    target_was_moved = False
+    source_was_moved = False
+    try:
+        shutil.copytree(source_bundle, staged_bundle)
+        ledgercore.write_front_matter_document(
+            staged_bundle / "release.md",
+            new_record.to_front_matter(),
+            body=new_record.note or "",
+            body_mode="ensure-single-final-newline",
+            key_order=RELEASE_FRONT_MATTER_KEY_ORDER,
+        )
+        staged_entries = staged_bundle / "entries"
+        ledgercore.ensure_dir(staged_entries)
+        for child in staged_entries.glob("entry-*.md"):
+            child.unlink()
+        for entry in entries:
+            rewritten = replace(
+                entry,
+                release_version=new_record.version,
+                versioning=replace(
+                    entry.versioning, revision=entry.versioning.revision + 1
+                ),
+            )
+            ledgercore.write_front_matter_document(
+                staged_entries / f"{rewritten.entry_id}.md",
+                rewritten.to_front_matter(),
+                body=rewritten.body or "",
+                body_mode="ensure-single-final-newline",
+                key_order=ENTRY_FRONT_MATTER_KEY_ORDER,
+            )
+        target_bundle.rename(target_backup)
+        target_was_moved = True
+        staged_bundle.rename(target_bundle)
+        source_bundle.rename(source_backup)
+        source_was_moved = True
+        shutil.rmtree(target_backup)
+        shutil.rmtree(source_backup)
+        return new_record
+    except BaseException:
+        if source_was_moved and source_backup.exists() and not source_bundle.exists():
+            source_backup.rename(source_bundle)
+        if target_bundle.exists() and target_was_moved:
+            shutil.rmtree(target_bundle)
+        if target_backup.exists() and not target_bundle.exists():
+            target_backup.rename(target_bundle)
+        raise
+    finally:
+        if temp_root.exists():
+            shutil.rmtree(temp_root)
 
 
 def _strip_revision(data: dict[str, object]) -> dict[str, object]:

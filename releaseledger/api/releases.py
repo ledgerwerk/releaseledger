@@ -11,20 +11,24 @@ from releaseledger.services.releases import (
     reconcile_releases,
     rename_release,
     repair_release_chain,
+    resolve_release_selector,
+    restore_release,
     show_release,
     tag_release,
     update_release,
-)
+    )
 
 __all__ = [
     "cancel_release",
     "check_release_chain",
-    "reconcile_releases",
     "create_release",
     "finalize_release",
     "list_release_records",
+    "reconcile_releases",
     "rename_release",
     "repair_release_chain",
+    "resolve_release_selector",
+    "restore_release",
     "show_release",
     "tag_release",
     "update_release",

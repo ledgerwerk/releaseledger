@@ -59,6 +59,7 @@ releaseledger release update VERSION
 releaseledger release prepare VERSION
 releaseledger release tag VERSION
 releaseledger release finalize VERSION
+releaseledger release restore VERSION --reason TEXT [--from-tag TAG] [--dry-run]
 releaseledger release check VERSION [--phase current|finalize|published] [--strict] [--target-file PATH]
 releaseledger entry add VERSION --kind KIND --summary TEXT
 releaseledger entry add-many VERSION --file FILE --dry-run [--strict] [--guard-commit-subjects]
@@ -716,8 +717,10 @@ releaseledger release check VERSION --strict
 releaseledger build --all --dry-run --strict
 ```
 
-`release reconcile` compares release records, Git tags, and changelog headings. It never writes historical state and reports `tag_without_release`, `changelog_without_release`, `planned_with_tag`, and related mismatches.
+`release reconcile` compares release records, Git tags, and changelog headings. It never writes historical state and reports `tag_without_release`, `changelog_without_release`, `planned_with_tag`, `canceled_with_tag`, `ambiguous_active_release_identity`, and related mismatches. A canceled release with a matching Git tag is inconsistent and requires investigation.
 
 `source_refs` is the single coverage-owner surface for a commit or other coverable identity. Use `sources` for supporting provenance when several changelog bullets describe one commit. `entry add-many --dry-run --json` exposes `result.issues` without writing. Do not create a real entry to probe validation. Remove accidental draft or rejected probes with `entry delete VERSION ENTRY_ID --reason TEXT`; accepted entries require an explicit force flag.
 
 Canceling a release with direct successors requires `--rewrite-successors` and either a valid prior predecessor or `--successor-previous VERSION`. Use `--dry-run` before mutation. A single-release build rejects canceled releases unless `--include-canceled` is explicitly requested for archival/debug output.
+
+If a canceled release was later shipped, use `release restore VERSION --from-tag TAG --reason TEXT`; do not use `release update --status` to bypass terminal states. For duplicate canceled aliases where the correct bundle must replace an obsolete target, use `release rename OLD NEW --replace-canceled-target --reason TEXT` and inspect its dry-run first. Run strict reconciliation and chain checks after correction. Do not repair ownership by manually renaming `Unreleased`.
