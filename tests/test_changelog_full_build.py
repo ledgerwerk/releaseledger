@@ -779,3 +779,42 @@ class TestFullBuildRegression:
             "--replace-existing",
         )
         assert internal.exit_code == 0, _human_error(internal)
+
+
+def test_single_build_requires_explicit_unreleased_policy(tmp_path: Path) -> None:
+    _init_project(tmp_path)
+    _seed_release(
+        tmp_path,
+        "1.0.0",
+        released_at="2026-01-01",
+        summary="A release",
+    )
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## [Unreleased]\n\n- Manual note\n\n",
+        encoding="utf-8",
+    )
+    blocked = _run(tmp_path, "build", "1.0.0", "--strict")
+    assert blocked.exit_code != 0
+    assert "non-empty Unreleased" in _human_error(blocked)
+
+    preserved = _jrun(
+        tmp_path,
+        "build",
+        "1.0.0",
+        "--strict",
+        "--unreleased-policy",
+        "preserve",
+    )
+    assert preserved.exit_code == 0, _human_error(preserved)
+    assert json.loads(preserved.stdout)["result"]["unreleased_policy"] == "preserve"
+
+    consumed = _run(
+        tmp_path,
+        "build",
+        "1.0.0",
+        "--unreleased-policy",
+        "consume",
+        "--replace-existing",
+    )
+    assert consumed.exit_code == 0, _human_error(consumed)
+    assert "Manual note" not in (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8")

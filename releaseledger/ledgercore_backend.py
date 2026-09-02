@@ -93,6 +93,7 @@ __all__ = [
     "build_releaseledger_legacy_migration_plan",
     "clear_releaseledger_data_override",
     "ensure_releaseledger_config_binding",
+    "ensure_releaseledger_indexes_binding",
     "ensure_releaseledger_registration",
     "execute_releaseledger_layout_migration",
     "expected_releaseledger_storage_binding",
@@ -833,6 +834,68 @@ def initialize_releaseledger_locations(
         written["indexes_root"] = str(layout.indexes_root)
 
     return written
+
+
+def ensure_releaseledger_indexes_binding(
+    layout: ReleaseledgerLedgerLayout,
+) -> Any:
+    """Ensure the disposable index cache has a valid Ledgercore binding."""
+    mount_root = layout.indexes_root
+    marker = layout.indexes_binding_path
+    expected = _expected_binding(
+        project_uuid=layout.project_uuid,
+        project_name=layout.project_name,
+        tool=TOOL_NAME,
+        mount=INDEXES_MOUNT,
+        storage="cache",
+    )
+    if marker.is_file():
+        validation = _validate_optional_binding(
+            mount_root=mount_root, expected=expected, allow_missing=False
+        )
+        if not validation.valid:
+            raise LaunchError(
+                validation.reason or "Invalid index binding.",
+                code=CODE_CONFIG_ERROR,
+                exit_code=2,
+                data={"mount": INDEXES_MOUNT, "path": str(mount_root)},
+                remediation=["Repair the indexes binding before rebuilding."],
+            )
+        return validation
+    generated_names = {"releases.json", "entries.json"}
+    unexpected = (
+        [
+            child.name
+            for child in mount_root.iterdir()
+            if child.name not in generated_names
+        ]
+        if mount_root.is_dir()
+        else []
+    )
+    if unexpected:
+        raise LaunchError(
+            "Cannot initialize the indexes binding because the cache contains "
+            f"unexpected files: {', '.join(sorted(unexpected))}.",
+            code=CODE_CONFIG_ERROR,
+            exit_code=2,
+            data={"mount": INDEXES_MOUNT, "path": str(mount_root)},
+            remediation=["Inspect or explicitly repair the disposable index cache."],
+        )
+    mount = SimpleNamespace(
+        path=mount_root,
+        project_uuid=layout.project_uuid,
+        tool=TOOL_NAME,
+        name=INDEXES_MOUNT,
+        storage="cache",
+    )
+    try:
+        return initialize_storage_binding(mount, require_empty=False)
+    except LedgerCoreError as exc:
+        raise _map_ledgercore_error(
+            exc,
+            code=CODE_CONFIG_ERROR,
+            extra_data={"mount": INDEXES_MOUNT, "path": str(mount_root)},
+        ) from exc
 
 
 def ensure_releaseledger_config_binding(

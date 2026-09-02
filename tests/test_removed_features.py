@@ -494,7 +494,7 @@ def test_entry_prompt_includes_opaque_context_and_workflow(tmp_path: Path) -> No
     assert result.exit_code == 0, result.output
     assert '{"validation": "passed"}' in result.output
     assert "source_refs: [tl:task-0103]" in result.output
-    assert "entry add-many 1.0.0" in result.output
+    assert "entry apply 1.0.0" in result.output
     assert ".taskledger/" not in result.output
 
     json_result = _run(

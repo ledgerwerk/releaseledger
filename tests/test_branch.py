@@ -106,7 +106,7 @@ def test_branch_start_creates_ledger(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     _commit(repo, "init", "README.md")
     _run(repo, "init")
-    _run(repo, "release", "create", "0.1.0", "--released-at", "2026-06-14")
+    _run(repo, "release", "create", "0.1.0")
     # Start a branch ledger.
     result = _run(repo, "branch", "start", "feature-a", "--parent", "main")
     assert result.exit_code == 0, result.output
@@ -141,8 +141,6 @@ def test_branch_merge_dedups_by_source_refs(tmp_path: Path) -> None:
         "0.2.0",
         "--previous",
         "0.1.0",
-        "--released-at",
-        "2026-06-14",
     )
     # Start branch ledger.
     _run(repo, "branch", "start", "feature-b", "--parent", "main")
@@ -196,7 +194,7 @@ def test_branch_guard_warn_does_not_block(tmp_path: Path) -> None:
     )
     config_path.write_text(content)
     # A mutating command should succeed (with warning).
-    result = _run(repo, "release", "create", "0.1.0", "--released-at", "2026-06-14")
+    result = _run(repo, "release", "create", "0.1.0")
     assert result.exit_code == 0, result.output
 
 
@@ -213,7 +211,7 @@ def test_branch_guard_on_blocks_mutating(tmp_path: Path) -> None:
     )
     config_path.write_text(content)
     # A mutating command should fail.
-    result = _run(repo, "release", "create", "0.1.0", "--released-at", "2026-06-14")
+    result = _run(repo, "release", "create", "0.1.0")
     assert result.exit_code != 0
 
 

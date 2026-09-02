@@ -105,8 +105,8 @@ entries:
 ## Write workflow
 
 ```bash
-releaseledger entry add-many {release_version} --file {batch_path} --dry-run
-releaseledger entry add-many {release_version} --file {batch_path}
+releaseledger entry apply {release_version} --file {batch_path} --dry-run
+releaseledger entry apply {release_version} --file {batch_path}
 releaseledger entry lint {release_version} --strict
 releaseledger entry list {release_version}
 ```

@@ -91,6 +91,7 @@ releaseledger release prepare VERSION [--previous VERSION]
                                       [--released-at YYYY-MM-DD]
                                       [--git-base REF] [--git-head REF]
                                       [--output-dir PATH]
+                                      [--refresh]
 releaseledger release check VERSION [--target-file PATH] [--strict]
                                     [--include-internal]
                                     [--phase current|finalize|published]
@@ -139,7 +140,7 @@ releaseledger entry add VERSION --kind KIND --summary TEXT [--body TEXT]
                                [--scope SCOPE]... [--source-ref REF]...
                                [--path PATH]... [--issue REF]... [--pr REF]...
                                [--breaking] [--internal] [--dry-run]
-releaseledger entry add-many VERSION --file FILE [--dry-run] [--strict]
+releaseledger entry apply VERSION --file FILE [--dry-run] [--strict]
                                     [--guard-commit-subjects]
                                     [--sync-audit]
 releaseledger entry update VERSION ENTRY_ID [entry metadata options]
@@ -165,15 +166,15 @@ releaseledger entry prompt VERSION [--source-ref REF]...
 `entry lint` checks summary style and record validity. With `--json` it
 returns the full per-entry `issues` and `entries` payload, **including on
 failure**; the command still exits non-zero. `--strict` fails on warnings.
-`entry add-many --dry-run` and `entry add-many` now share the same pre-write
-`entry add-many --dry-run --json` preserves the complete `result` payload on
+`entry apply --dry-run` and `entry apply` now share the same pre-write
+`entry apply --dry-run --json` preserves the complete `result` payload on
 validation failure, including proposed entries, lint findings, coverage projection,
 and stable issue codes. Human mode prints one actionable row per issue.
 validation path, so strict dry-run results match write-mode gating.
 
 ## Batch file format
 
-`entry add-many` expects YAML with a top-level `entries` list:
+`entry apply` expects YAML with a top-level `entries` list:
 
 ```yaml
 entries:
@@ -196,14 +197,14 @@ entries:
 ## Changelog commands
 
 ```text
-releaseledger changelog VERSION [--format markdown|json] [--output PATH]
+releaseledger changelog preview VERSION [--format markdown|json] [--output PATH]
                                 [--include-internal]
                                 [--target-changelog PATH]
                                 [--release-date YYYY-MM-DD]
                                 [--include-sources]
                                 [--include-status STATUS]... [--lint]
 
-releaseledger build VERSION [--target-file PATH]
+releaseledger changelog build VERSION [--target-file PATH]
                             [--release-date YYYY-MM-DD]
                             [--unreleased]
                             [--include-internal]
@@ -214,7 +215,7 @@ releaseledger build VERSION [--target-file PATH]
                             [--include-status STATUS]...
                             [--strict]
                             [--allow-empty]
-releaseledger build [VERSION] [--all] [--target-file PATH]
+releaseledger changelog build [VERSION] [--all] [--target-file PATH]
                             [--include-release-status STATUS]...
                             [--preserve-unreleased|--no-preserve-unreleased]
                             [--unreleased-version VERSION]
@@ -232,7 +233,7 @@ coding agent needs release metadata, entries, target-file guidance, and optional
 lint findings. Pass `--include-sources` to include provenance refs in Markdown
 output.
 
-`releaseledger build` renders the final changelog section and inserts it into
+`releaseledger changelog build` renders the final changelog section and inserts it into
 the target file. Use `--dry-run` before writing and `--replace-existing` when
 re-rendering an existing release section. Pass `--template NAME` to select a
 named changelog template profile.
@@ -242,11 +243,11 @@ named changelog template profile.
 
 ### Full changelog rebuild
 
-`releaseledger build` with no `VERSION` (or `releaseledger build --all`)
+`releaseledger changelog build` with no `VERSION` (or `releaseledger changelog build --all`)
 rebuilds the **complete** target file from ledger state:
 
-- `releaseledger build VERSION` updates one release section.
-- `releaseledger build` or `releaseledger build --all` rebuilds the whole
+- `releaseledger changelog build VERSION` updates one release section.
+- `releaseledger changelog build` or `releaseledger changelog build --all` rebuilds the whole
   target file from ledger state.
 - Full rebuild excludes internal entries and non-released releases by default.
 - Use `--include-internal` only for internal release notes.
@@ -354,7 +355,7 @@ postprocessors = [
 Run `releaseledger release check VERSION --strict --target-file CHANGELOG.md`
 before a final public build.
 
-`releaseledger build --strict` blocks on entry lint errors, empty included
+`releaseledger changelog build --strict` blocks on entry lint errors, empty included
 entries unless `--allow-empty` is supplied, release source refs that are
 not covered by included entries, and (for releases with stored git range
 metadata) git commits that have no accepted entry coverage. Internal-only
@@ -369,8 +370,8 @@ or a canceled release), correct it with the section helpers rather than editing
 the file by hand:
 
 ```text
-releaseledger changelog-section rename-section OLD NEW --target-file CHANGELOG.md
-releaseledger changelog-section remove-section VERSION --target-file CHANGELOG.md
+releaseledger changelog section rename OLD NEW --target-file CHANGELOG.md
+releaseledger changelog section remove VERSION --target-file CHANGELOG.md
 ```
 
 `release rename --rename-changelog-section` and
@@ -391,7 +392,7 @@ and changelog headings before finalization.
 ## Review commands
 
 ```text
-releaseledger review VERSION [--include-internal]
+releaseledger release review VERSION [--include-internal]
                         [--include-status STATUS]...
                         [--target-file PATH] [--strict]
                         [--git] [--git-base REF] [--git-head REF]
@@ -447,7 +448,7 @@ releaseledger git evidence VERSION [--base REF] [--head REF]
 ```
 
 `git range` inspects the commit range and prints candidate entries.
-`git scaffold` generates a metadata-rich `entry add-many` YAML batch from the
+`git scaffold` generates a metadata-rich `entry apply` YAML batch from the
 range for review and curation; `git import` remains a compatibility alias.
 `git evidence` exports deterministic per-commit patches plus a manifest. The
 `next` forms are non-persisting previews that do not require a release record.
@@ -498,9 +499,9 @@ branch to `ledger_ref`. `branch start` forks a new ledger. `branch merge` merges
 ## Changelog section correction commands
 
 ```text
-releaseledger changelog-section remove-section VERSION --target-file PATH
+releaseledger changelog section remove VERSION --target-file PATH
                                                   [--ignore-missing] [--dry-run]
-releaseledger changelog-section rename-section OLD_VERSION NEW_VERSION
+releaseledger changelog section rename OLD_VERSION NEW_VERSION
                                                   --target-file PATH
                                                   [--ignore-missing]
                                                   [--replace-existing] [--dry-run]

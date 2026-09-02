@@ -121,3 +121,48 @@ def test_entry_set_status_and_update_alias(tmp_path: Path) -> None:
     payload = json.loads(alias.stdout)
     assert payload["command"] == "entry set-status"
     assert payload["warnings"][0]["code"] == "deprecated_command"
+
+
+def test_planned_release_cannot_store_released_at(tmp_path: Path) -> None:
+    assert runner.invoke(app, ["--root", str(tmp_path), "init"]).exit_code == 0
+    rejected = runner.invoke(
+        app,
+        [
+            "--root",
+            str(tmp_path),
+            "release",
+            "create",
+            "1.0.0",
+            "--released-at",
+            "2026-06-14",
+        ],
+    )
+    assert rejected.exit_code == 2
+    assert "actual release date" in rejected.output
+
+
+def test_finalize_check_uses_proposed_date_without_mutation(tmp_path: Path) -> None:
+    assert runner.invoke(app, ["--root", str(tmp_path), "init"]).exit_code == 0
+    created = runner.invoke(
+        app, ["--root", str(tmp_path), "release", "create", "1.0.0"]
+    )
+    assert created.exit_code == 0, created.output
+    checked = runner.invoke(
+        app,
+        [
+            "--root",
+            str(tmp_path),
+            "--json",
+            "release",
+            "check",
+            "1.0.0",
+            "--phase",
+            "finalize",
+            "--released-at",
+            "2026-06-14",
+        ],
+    )
+    assert checked.exit_code == 0, checked.output
+    payload = json.loads(checked.stdout)
+    assert payload["result"]["release"]["released_at"] is None
+    assert payload["result"]["release"]["proposed_released_at"] == "2026-06-14"

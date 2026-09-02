@@ -94,8 +94,6 @@ def test_review_git_strict_fails_on_missing_commit(tmp_path: Path) -> None:
             "0.2.0",
             "--previous",
             "0.1.0",
-            "--released-at",
-            "2026-06-14",
         ],
     )
     runner.invoke(
@@ -160,8 +158,6 @@ def test_review_git_strict_passes_when_covered(tmp_path: Path) -> None:
             "0.2.0",
             "--previous",
             "0.1.0",
-            "--released-at",
-            "2026-06-14",
         ],
     )
     runner.invoke(
@@ -236,8 +232,6 @@ def test_review_git_reports_snapshot_drift_but_uses_stored_shas(
             "0.2.0",
             "--previous",
             "0.1.0",
-            "--released-at",
-            "2026-06-14",
         ],
     )
     runner.invoke(
@@ -323,8 +317,6 @@ def test_review_git_works_without_taskledger(tmp_path: Path) -> None:
             "0.2.0",
             "--previous",
             "0.1.0",
-            "--released-at",
-            "2026-06-14",
         ],
     )
     runner.invoke(
@@ -385,8 +377,6 @@ def test_review_boundary_ref_tl_coverable(tmp_path: Path) -> None:
             "0.2.0",
             "--previous",
             "0.1.0",
-            "--released-at",
-            "2026-06-14",
         ],
     )
     runner.invoke(
@@ -426,8 +416,6 @@ def test_review_boundary_ref_git_range_non_coverable(tmp_path: Path) -> None:
             "0.2.0",
             "--previous",
             "0.1.0",
-            "--released-at",
-            "2026-06-14",
         ],
     )
     # A git-range:* boundary ref is non-coverable.
@@ -472,8 +460,6 @@ def test_review_service_git_auto_enables(tmp_path: Path) -> None:
             "0.2.0",
             "--previous",
             "0.1.0",
-            "--released-at",
-            "2026-06-14",
         ],
     )
     runner.invoke(
@@ -536,8 +522,6 @@ def _seed_covered_repo(tmp_path: Path) -> tuple[Path, str, str]:
             "0.2.0",
             "--previous",
             "0.1.0",
-            "--released-at",
-            "2026-06-14",
         ],
     )
     runner.invoke(
@@ -643,3 +627,95 @@ def test_review_require_audit_sheet_passes_when_complete(
     assert payload["ok"] is True
     assert payload["result"]["audit"]["ok"] is True
     assert payload["result"]["audit"]["row_count"] == 2
+
+
+def test_review_strict_requires_changelog_change_acknowledgement(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+    _commit(repo, "root", "README.md")
+    _git(repo, "tag", "v0.1.0")
+    sha_a = _commit(repo, "feat: add a", "a.txt")
+    (repo / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
+    sha_changelog = _commit(repo, "docs: update changelog", "CHANGELOG.md")
+    assert sha_changelog
+    runner.invoke(app, ["--cwd", str(repo), "init"])
+    runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(repo),
+            "release",
+            "create",
+            "0.2.0",
+            "--previous",
+            "0.1.0",
+        ],
+    )
+    runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(repo),
+            "release",
+            "update",
+            "0.2.0",
+            "--git-base",
+            "v0.1.0",
+            "--git-head",
+            "HEAD",
+        ],
+    )
+    runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(repo),
+            "release",
+            "finalize",
+            "0.2.0",
+            "--released-at",
+            "2026-06-14",
+        ],
+    )
+    (repo / "entry.yaml").write_text(
+        f"entries:\n- kind: added\n  summary: Added a\n"
+        f"  source_refs:\n  - 'git:{sha_a}'\n  - 'git:{sha_changelog}'\n  status: accepted\n",
+        encoding="utf-8",
+    )
+    added = runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(repo),
+            "entry",
+            "add-many",
+            "0.2.0",
+            "--file",
+            str(repo / "entry.yaml"),
+        ],
+    )
+    assert added.exit_code == 0, added.output
+    result = runner.invoke(
+        app,
+        ["--cwd", str(repo), "--json", "review", "0.2.0", "--git", "--strict"],
+    )
+    assert result.exit_code != 0
+    payload = json.loads(result.output)
+    assert payload["result"]["git"]["target_changelog_modified_in_range"] is True
+    assert payload["result"]["checks"]["target_changelog_ok"] is False
+    acknowledged = runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(repo),
+            "--json",
+            "review",
+            "0.2.0",
+            "--git",
+            "--strict",
+            "--acknowledge-changelog-change",
+        ],
+    )
+    assert acknowledged.exit_code == 0, acknowledged.output
+    assert json.loads(acknowledged.output)["result"]["ok"] is True

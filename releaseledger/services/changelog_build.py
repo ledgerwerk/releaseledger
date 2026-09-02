@@ -1231,6 +1231,7 @@ def build_changelog_file(
     include_internal: bool = False,
     release_date: str | None = None,
     unreleased: bool = False,
+    unreleased_policy: str | None = None,
     template_name: str = "default",
     dry_run: bool = False,
     replace_existing: bool = False,
@@ -1273,6 +1274,32 @@ def build_changelog_file(
         for entry in all_entries
         if entry.status in statuses and (include_internal or not entry.internal)
     ]
+    if unreleased_policy not in {None, "preserve", "consume", "managed"}:
+        raise LaunchError(
+            "Unsupported --unreleased-policy. Use preserve, consume, or managed.",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+        )
+    existing = _read_target(target)
+    unreleased_body = extract_unreleased_section_body(existing)
+    reconciliation_warnings: list[str] = []
+    if unreleased_body and not unreleased and unreleased_policy is None:
+        message = (
+            "Target changelog contains a non-empty Unreleased section; "
+            "pass --unreleased-policy preserve, consume, or managed."
+        )
+        if strict:
+            raise LaunchError(
+                message,
+                code=CODE_VALIDATION_ERROR,
+                exit_code=2,
+                remediation=[
+                    "Choose an explicit Unreleased ownership policy before building."
+                ],
+            )
+        reconciliation_warnings.append("warning: " + message)
+    elif unreleased_body and unreleased_policy in {"consume", "managed"}:
+        existing = _replace_unreleased_section_body(existing, "")
     strict_warnings: list[str] = []
     hidden_internal_commit_count = 0
     if strict:
@@ -1311,12 +1338,12 @@ def build_changelog_file(
     section = str(rendered["section"])
     section_heading = rendered["section_heading"]
 
-    existing = _read_target(target)
     span = find_release_section(existing, version)
     raw_warnings = rendered.get("warnings", [])
     warnings: list[str] = []
     if isinstance(raw_warnings, list):
         warnings = [str(item) for item in raw_warnings]
+    warnings.extend(reconciliation_warnings)
     warnings.extend(strict_warnings)
     replaced_existing = False
 
@@ -1340,6 +1367,7 @@ def build_changelog_file(
         return {
             "kind": "changelog_build",
             "version": version,
+            "unreleased_policy": unreleased_policy,
             "target_file": _relative_target(workspace_root, target),
             "updated": False,
             "dry_run": True,
@@ -1409,6 +1437,7 @@ def build_changelog_file(
     return {
         "kind": "changelog_build",
         "version": version,
+        "unreleased_policy": unreleased_policy,
         "target_file": _relative_target(workspace_root, target),
         "updated": True,
         "dry_run": False,
@@ -1456,6 +1485,27 @@ def extract_unreleased_section_body(text: str) -> str:
             break
     body = "".join(lines[start:end])
     return body.strip("\n")
+
+
+def _replace_unreleased_section_body(text: str, body: str) -> str:
+    """Replace the manual Unreleased body while preserving its heading."""
+    lines = text.splitlines(keepends=True)
+    start: int | None = None
+    for index, line in enumerate(lines):
+        if _UNRELEASED_HEADING_RE.match(line):
+            start = index + 1
+            break
+    if start is None:
+        return text
+    end = len(lines)
+    for index in range(start, len(lines)):
+        if _LEVEL2_RE.match(lines[index]) or _LINK_REF_RE.match(lines[index].strip()):
+            end = index
+            break
+    replacement = ["\n"] if body.strip() else []
+    if body.strip():
+        replacement = [body.strip("\n") + "\n", "\n"]
+    return "".join(lines[:start] + replacement + lines[end:])
 
 
 def _full_changelog_release_key(record: ReleaseRecord) -> tuple[object, ...]:

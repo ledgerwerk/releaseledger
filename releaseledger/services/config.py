@@ -89,6 +89,8 @@ def storage_where(workspace_root: Path) -> dict[str, object]:
                 }
         return {
             "kind": "storage_location",
+            "discovered": True,
+            "canonical": True,
             "project_root": str(layout.project_root),
             "project_uuid": layout.project_uuid,
             "project_name": layout.project_name or "",
@@ -134,6 +136,8 @@ def storage_where(workspace_root: Path) -> dict[str, object]:
         config_path, _ = discover_legacy_project(root)
         return {
             "kind": "storage_location",
+            "discovered": False,
+            "canonical": False,
             "project_root": str(root),
             "legacy_detected": True,
             "legacy_config_path": str(config_path),
@@ -147,6 +151,8 @@ def storage_where(workspace_root: Path) -> dict[str, object]:
     except Exception:
         return {
             "kind": "storage_location",
+            "discovered": False,
+            "canonical": False,
             "project_root": str(root),
             "legacy_detected": False,
             "migration_state": "uninitialized",

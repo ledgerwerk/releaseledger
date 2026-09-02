@@ -56,8 +56,6 @@ def _create_release(tmp_path: Path, version: str = "0.5.0") -> None:
             version,
             "--previous",
             "0.4.0",
-            "--released-at",
-            "2026-06-14",
         ],
     )
     assert result.exit_code == 0, result.stdout

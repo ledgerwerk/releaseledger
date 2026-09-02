@@ -45,19 +45,27 @@ def project_status(root: Path, *, check: bool = False) -> dict[str, object]:
     """Return a concise status without creating or repairing project state."""
     storage = storage_where(root)
     state = str(storage.get("migration_state", "uninitialized"))
-    initialized = state == "canonical-ready"
-    records = _records(root) if initialized else []
+    discovered = bool(storage.get("discovered", False))
+    canonical = bool(storage.get("canonical", discovered))
+    initialized = canonical
+    records = _records(root) if discovered else []
     active = [
         str(record.get("version", ""))
         for record in records
         if str(record.get("status", "")) in _ACTIVE_STATUSES
     ]
     active.sort()
-    healthy = initialized and bool(storage.get("layout_valid", False))
-    if not initialized:
+    layout_valid = bool(storage.get("layout_valid", False))
+    healthy = canonical and layout_valid
+    if not discovered:
         next_action = {
             "command": "init",
             "reason": "No canonical Releaseledger project is initialized.",
+        }
+    elif not layout_valid:
+        next_action = {
+            "command": "storage validate --strict",
+            "reason": "The canonical project was discovered but its storage layout is invalid.",
         }
     elif active:
         next_action = {
@@ -72,6 +80,9 @@ def project_status(root: Path, *, check: bool = False) -> dict[str, object]:
     result: dict[str, object] = {
         "kind": "project_status",
         "initialized": initialized,
+        "discovered": discovered,
+        "canonical": canonical,
+        "layout_valid": layout_valid,
         "state": "ready" if healthy else state,
         "project_root": str(storage.get("project_root", root.resolve())),
         "ledger_ref": str(storage.get("active_ledger_ref", "")),
@@ -124,15 +135,20 @@ def project_doctor(root: Path, *, check: bool = False) -> dict[str, object]:
     """Run deterministic diagnostics without applying repairs."""
     storage = storage_where(root)
     checks: list[dict[str, object]] = []
-    initialized = str(storage.get("migration_state")) == "canonical-ready"
+    discovered = bool(storage.get("discovered", False))
+    canonical = bool(storage.get("canonical", discovered))
     checks.append(
         {
             "code": "project_discovery",
-            "status": "pass" if initialized else "fail",
-            "message": "Canonical project discovered."
-            if initialized
-            else "No canonical project discovered.",
-            "remediation": [] if initialized else ["Run `releaseledger init`."],
+            "status": "pass" if discovered and canonical else "fail",
+            "message": (
+                "Canonical Releaseledger project discovered."
+                if discovered and canonical
+                else "No canonical project discovered."
+            ),
+            "remediation": []
+            if discovered and canonical
+            else ["Run `releaseledger init`."],
         }
     )
     layout_valid = bool(storage.get("layout_valid", False))
@@ -140,27 +156,33 @@ def project_doctor(root: Path, *, check: bool = False) -> dict[str, object]:
         {
             "code": "storage_layout",
             "status": "pass" if layout_valid else "fail",
-            "message": "Storage layout is valid."
-            if layout_valid
-            else "Storage layout is unavailable or invalid.",
+            "message": (
+                "Storage layout is valid."
+                if layout_valid
+                else "Storage layout is unavailable or invalid."
+            ),
             "remediation": []
             if layout_valid
             else ["Run `releaseledger storage validate --strict`."],
         }
     )
     release_ok = True
-    if initialized:
+    release_error: str | None = None
+    if discovered and canonical:
         try:
-            _records(root)
-        except Exception:
+            list_release_records(root)
+        except Exception as exc:
             release_ok = False
+            release_error = str(exc)
     checks.append(
         {
             "code": "release_records",
             "status": "pass" if release_ok else "fail",
-            "message": "Release records are parseable."
-            if release_ok
-            else "Release records could not be parsed.",
+            "message": (
+                "Release records are parseable."
+                if release_ok
+                else f"Release records could not be parsed: {release_error}"
+            ),
             "remediation": [],
         }
     )
@@ -178,10 +200,17 @@ def next_action(root: Path) -> dict[str, object]:
     """Return one recommendation without executing it."""
     storage = storage_where(root)
     state = str(storage.get("migration_state", "uninitialized"))
+    discovered = bool(storage.get("discovered", False))
+    layout_valid = bool(storage.get("layout_valid", False))
     if state == "legacy":
         command = "migrate plan storage-layout"
         reason = "Legacy storage requires an explicit migration plan."
-    elif state != "canonical-ready":
+    elif discovered and not layout_valid:
+        command = "storage validate --strict"
+        reason = (
+            "The canonical project was discovered but its storage layout is invalid."
+        )
+    elif not discovered:
         command = "init"
         reason = "No canonical project is initialized."
     else:

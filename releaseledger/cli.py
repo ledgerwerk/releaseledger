@@ -989,7 +989,14 @@ def release_prepare_command(
         typer.Option(
             "--output-dir", help="Directory for exported preparation artifacts."
         ),
-    ] = Path(".releaseledger/work"),
+    ] = Path(".ledger/releaseledger/work"),
+    refresh: Annotated[
+        bool,
+        typer.Option(
+            "--refresh",
+            help="Explicitly refresh an existing preparation workspace and audit sheet.",
+        ),
+    ] = False,
 ) -> None:
     """Create/update a planned release snapshot and export working artifacts."""
     state = cli_state_from_context(ctx)
@@ -1003,14 +1010,23 @@ def release_prepare_command(
             git_base_ref=git_base_ref,
             git_head_ref=git_head_ref,
             output_dir=output_dir,
+            refresh=refresh,
         )
         outputs = result.get("outputs")
         outputs_dict = outputs if isinstance(outputs, dict) else {}
+        work_dir = str(outputs_dict.get("work_dir", ""))
+        entries_path = str(outputs_dict.get("entries_yaml", ""))
         human = (
-            f"prepared release {version}\n"
-            f"  range: {outputs_dict.get('range_json', '')}\n"
-            f"  audit: {outputs_dict.get('audit_yaml', '')}\n"
-            f"  scaffold: {outputs_dict.get('entries_yaml', '')}"
+            f"Prepared release workspace: {work_dir}\n\n"
+            "Next:\n"
+            f"1. Review {outputs_dict.get('audit_yaml', '')} and "
+            f"{outputs_dict.get('evidence_manifest', '')}.\n"
+            f"2. Record include/exclude decisions in {outputs_dict.get('audit_decisions_yaml', '')}.\n"
+            "3. Edit entries.yaml from reviewed behavior; do not copy commit subjects.\n"
+            f"4. releaseledger entry apply {entries_path} --dry-run\n"
+            f"5. releaseledger entry apply {entries_path}\n"
+            f"6. releaseledger release check {version} --phase finalize --strict\n"
+            "7. releaseledger changelog build ..."
         )
         return result, [], human
 
@@ -2467,6 +2483,13 @@ def review_command(
             help="Require a commit audit sheet; gate when absent or incomplete.",
         ),
     ] = False,
+    acknowledge_changelog_change: Annotated[
+        bool,
+        typer.Option(
+            "--acknowledge-changelog-change",
+            help="Acknowledge that the target changelog changed in the Git range.",
+        ),
+    ] = False,
 ) -> None:
     """Review release coverage, orphans, lint, and a strict changelog dry-run."""
     state = cli_state_from_context(ctx)
@@ -2485,6 +2508,7 @@ def review_command(
             git_base=git_base,
             git_head=git_head,
             require_audit_sheet=require_audit_sheet,
+            acknowledge_changelog_change=acknowledge_changelog_change,
         )
     except ReleaseledgerError as exc:
         emit_error(command="release review", error=exc, json_output=state.json_output)
@@ -2768,6 +2792,13 @@ def build_command(
         bool,
         typer.Option("--unreleased", help="Render the date as Unreleased/no date."),
     ] = False,
+    unreleased_policy: Annotated[
+        str | None,
+        typer.Option(
+            "--unreleased-policy",
+            help="Single-release Unreleased policy: preserve, consume, or managed.",
+        ),
+    ] = None,
     include_internal: Annotated[
         bool,
         typer.Option("--include-internal", help="Include internal entries."),
@@ -2905,6 +2936,7 @@ def build_command(
                 include_internal=include_internal,
                 release_date=release_date,
                 unreleased=unreleased,
+                unreleased_policy=unreleased_policy,
                 template_name=template,
                 dry_run=dry_run,
                 replace_existing=replace_existing,
@@ -3360,7 +3392,7 @@ def git_import_command(
     read or written.
 
     The output YAML is intended for review and manual curation before running
-    ``releaseledger entry add-many VERSION --file FILE``.
+    ``releaseledger entry apply VERSION --file FILE``.
     """
     state = cli_state_from_context(ctx)
     workspace_root = _paths(ctx).workspace_root
@@ -3478,8 +3510,8 @@ def git_import_command(
         "  edit the YAML and write user-facing summaries from diffs/docs/tests"
     )
     lines.append("  do not copy or paraphrase git commit messages into summaries")
-    lines.append(f"  releaseledger entry add-many {version} --file {output} --dry-run")
-    lines.append(f"  releaseledger entry add-many {version} --file {output}")
+    lines.append(f"  releaseledger entry apply {version} --file {output} --dry-run")
+    lines.append(f"  releaseledger entry apply {version} --file {output}")
     emit_payload(
         command=("git scaffold" if invoked_name == "scaffold" else "git import"),
         result_type=("git_scaffold" if invoked_name == "scaffold" else "git_import"),

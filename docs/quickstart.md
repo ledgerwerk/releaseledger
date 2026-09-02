@@ -62,8 +62,8 @@ releaseledger release prepare 1.2.0 \
   --previous 1.1.0 \
   --released-at 2026-06-14 \
   --git-base v1.1.0 \
-  --git-head HEAD \
-  --output-dir .releaseledger/work/1.2.0
+  --git-head HEAD
+work=.ledger/releaseledger/work/1.2.0
 ```
 
 After the snapshot is attached, omit `--head` unless you intentionally want to
@@ -71,35 +71,34 @@ refresh the stored snapshot to a newer commit.
 
 ## Create audit evidence and scaffold entries
 
-```bash
-releaseledger git evidence 1.2.0 --output-dir /tmp/1.2.0-evidence
-releaseledger audit decisions 1.2.0 --output /tmp/1.2.0-audit-decisions.yaml
-releaseledger git scaffold 1.2.0 \
-  --output /tmp/1.2.0-entries.yaml
-```
+````bash
+# release prepare already emitted evidence/, audit.yaml, audit-decisions.yaml, and entries.yaml.
+ls "$work"
+ls "$work/evidence"
 
 Curate the audit annotations, then validate the evidence phase:
 
 ```bash
 releaseledger audit apply 1.2.0 \
-  --file /tmp/1.2.0-audit-decisions.yaml \
+  --file "$work/audit-decisions.yaml" \
   --dry-run
 releaseledger audit apply 1.2.0 \
-  --file /tmp/1.2.0-audit-decisions.yaml
+  --file "$work/audit-decisions.yaml"
 releaseledger audit validate 1.2.0 --phase evidence --strict
-```
+````
 
 Edit the entry scaffold to write user-facing summaries from reviewed behavior,
 then validate and write entries atomically:
+One commit may map to zero, one, or multiple entries. Keep one `source_refs` coverage owner for each commit and use supporting `sources` on additional behavior-specific entries; write every summary from the reviewed diff, not the commit subject.
 
 ```bash
-releaseledger entry add-many 1.2.0 \
-  --file /tmp/1.2.0-entries.yaml \
+releaseledger entry apply 1.2.0 \
+  --file "$work/entries.yaml" \
   --dry-run \
   --strict \
   --guard-commit-subjects
-releaseledger entry add-many 1.2.0 \
-  --file /tmp/1.2.0-entries.yaml \
+releaseledger entry apply 1.2.0 \
+  --file "$work/entries.yaml" \
   --strict \
   --guard-commit-subjects \
   --sync-audit
@@ -113,7 +112,7 @@ releaseledger release check 1.2.0 --strict --target-file CHANGELOG.md
 releaseledger release check 1.2.0 --phase finalize \
   --released-at 2026-06-14 --strict --target-file CHANGELOG.md
 releaseledger release finalize 1.2.0 --released-at 2026-06-14
-releaseledger build 1.2.0 --strict --target-file CHANGELOG.md
+releaseledger changelog build 1.2.0 --strict --target-file CHANGELOG.md
 ```
 
 ## Correct a recorded version safely
@@ -153,7 +152,7 @@ explicit version intent. Rebuild the whole file only when you really mean all
 history:
 
 ```bash
-releaseledger build --strict --target-file CHANGELOG.md
+releaseledger changelog build --strict --target-file CHANGELOG.md
 ```
 
 ## Optional: taskledger provenance
@@ -209,12 +208,12 @@ releaseledger changelog preview 1.2.0 \
 Use `build VERSION` to render and insert a final section:
 
 ```bash
-releaseledger build 1.2.0 \
+releaseledger changelog build 1.2.0 \
   --dry-run \
   --strict \
   --target-file CHANGELOG.md
 
-releaseledger build 1.2.0 \
+releaseledger changelog build 1.2.0 \
   --release-date 2026-06-13 \
   --strict \
   --target-file CHANGELOG.md
@@ -238,7 +237,7 @@ releaseledger release restore 0.1.0 \
   --git-base :root \
   --reason "The tagged release was actually shipped."
 releaseledger release chain repair --apply
-releaseledger build --all --strict --no-preserve-unreleased --target-file CHANGELOG.md
+releaseledger changelog build --all --strict --no-preserve-unreleased --target-file CHANGELOG.md
 releaseledger release reconcile --strict
 releaseledger release chain check --strict
 ```

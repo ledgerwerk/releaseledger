@@ -63,7 +63,7 @@ def test_storage_rejects_invalid_release_revision_transitions(tmp_path: Path) ->
 
 def test_entry_mutations_increment_expected_records(tmp_path: Path) -> None:
     initialize_project(tmp_path)
-    create_release(tmp_path, version="1.0.0", released_at="2026-06-14")
+    create_release(tmp_path, version="1.0.0")
     add_release_entry(
         tmp_path,
         release_version="1.0.0",

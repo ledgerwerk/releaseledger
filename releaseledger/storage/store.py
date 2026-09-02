@@ -426,6 +426,13 @@ def rebuild_indexes_for_paths(paths: ProjectPaths) -> None:
             entry_rows.append(_entry_index_row(entry))
     entry_rows.sort(key=lambda row: (row.get("order"), row.get("entry_id")))
 
+    layout = getattr(paths.project, "layout", None)
+    if layout is not None:
+        from releaseledger.ledgercore_backend import (
+            ensure_releaseledger_indexes_binding,
+        )
+
+        ensure_releaseledger_indexes_binding(layout)
     ledgercore.ensure_dir(paths.indexes_dir)
     ledgercore.write_json(paths.releases_index_path, release_rows)
     ledgercore.write_json(paths.entries_index_path, entry_rows)

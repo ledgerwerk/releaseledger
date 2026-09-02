@@ -98,8 +98,6 @@ def _setup_release(tmp_path: Path) -> tuple[Path, str, str]:
             "0.2.0",
             "--previous",
             "0.1.0",
-            "--released-at",
-            "2026-06-14",
         ],
     )
     assert result.exit_code == 0, result.output
@@ -169,8 +167,6 @@ def test_git_range_uses_stored_head_not_current_head(tmp_path: Path) -> None:
             "0.2.0",
             "--previous",
             "0.1.0",
-            "--released-at",
-            "2026-06-14",
         ],
     )
     assert result.exit_code == 0, result.output
@@ -223,8 +219,6 @@ def test_git_import_uses_stored_head_not_current_head(tmp_path: Path) -> None:
             "0.2.0",
             "--previous",
             "0.1.0",
-            "--released-at",
-            "2026-06-14",
         ],
     )
     assert result.exit_code == 0, result.output
@@ -264,12 +258,42 @@ def test_git_scaffold_alias_emits_metadata_rich_batch(tmp_path: Path) -> None:
     assert payload["result_type"] == "git_scaffold"
     batch = yaml.safe_load(out.read_text(encoding="utf-8"))
     assert payload["result"]["entry_count"] == 2
+    assert batch["schema"] == "releaseledger.entry-batch.v1"
+    assert batch["operation"] == "create"
     assert batch["object_type"] == "release_entry_batch"
     assert batch["release_version"] == "0.2.0"
     assert len(batch["git_base_sha"]) == 40
     assert len(batch["git_head_sha"]) == 40
     refs = {entry["source_refs"][0] for entry in batch["entries"]}
     assert refs == {f"git:{sha_a}", f"git:{sha_b}"}
+
+
+def test_git_scaffold_batch_applies_without_legacy_warning(tmp_path: Path) -> None:
+    repo, _sha_a, _sha_b = _setup_release(tmp_path)
+    out = repo / "entries.yaml"
+    _jrun(repo, "git", "scaffold", "0.2.0", "--output", str(out))
+    batch = yaml.safe_load(out.read_text(encoding="utf-8"))
+    for entry in batch["entries"]:
+        entry["summary"] = "Describe the reviewed user-facing change"
+    out.write_text(yaml.safe_dump(batch, sort_keys=False), encoding="utf-8")
+
+    applied = runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(repo),
+            "--json",
+            "entry",
+            "apply",
+            "0.2.0",
+            "--file",
+            str(out),
+            "--dry-run",
+        ],
+    )
+    assert applied.exit_code == 0, applied.output
+    result = json.loads(applied.stdout)
+    assert not any(w.get("code") == "legacy_input" for w in result["warnings"])
 
 
 # --------------------------------------------------------------------------
@@ -352,6 +376,8 @@ def test_release_prepare_exports_snapshot_artifacts(tmp_path: Path) -> None:
         "0.2.0",
         "--previous",
         "0.1.0",
+        "--released-at",
+        "2026-06-14",
         "--git-base",
         "v0.1.0",
         "--git-head",
@@ -360,9 +386,83 @@ def test_release_prepare_exports_snapshot_artifacts(tmp_path: Path) -> None:
         str(out_dir),
     )
     assert payload["result_type"] == "release_prepare"
+    assert payload["result"]["release"]["released_at"] is None
+    assert payload["result"]["proposed_released_at"] == "2026-06-14"
     assert (out_dir / "range.json").is_file()
     assert (out_dir / "audit.yaml").is_file()
     assert (out_dir / "entries.yaml").is_file()
+    assert (out_dir / "audit-decisions.yaml").is_file()
+    assert (out_dir / "evidence" / "manifest.json").is_file()
+    prepared_batch = yaml.safe_load(
+        (out_dir / "entries.yaml").read_text(encoding="utf-8")
+    )
+    assert prepared_batch["schema"] == "releaseledger.entry-batch.v1"
+    assert prepared_batch["operation"] == "create"
+
+
+def test_release_prepare_default_workspace_is_versioned_and_refreshable(
+    tmp_path: Path,
+) -> None:
+    repo, _sha_a, _sha_b = _setup_release(tmp_path)
+    first = runner.invoke(app, ["--cwd", str(repo), "release", "prepare", "0.2.0"])
+    assert first.exit_code == 0, first.output
+    work = repo / ".ledger" / "releaseledger" / "work" / "0.2.0"
+    assert work.is_dir()
+    assert (work / "evidence" / "manifest.json").is_file()
+    blocked = runner.invoke(app, ["--cwd", str(repo), "release", "prepare", "0.2.0"])
+    assert blocked.exit_code == 2
+    assert "--refresh" in blocked.output
+    refreshed = runner.invoke(
+        app,
+        ["--cwd", str(repo), "release", "prepare", "0.2.0", "--refresh"],
+    )
+    assert refreshed.exit_code == 0, refreshed.output
+
+
+def test_prepare_to_apply_two_commit_end_to_end(tmp_path: Path) -> None:
+    repo, _sha_a, _sha_b = _setup_release(tmp_path)
+    payload = _jrun(repo, "release", "prepare", "0.2.0")
+    work = Path(payload["result"]["outputs"]["work_dir"])
+    batch_path = work / "entries.yaml"
+    batch = yaml.safe_load(batch_path.read_text(encoding="utf-8"))
+    for index, entry in enumerate(batch["entries"], 1):
+        entry["status"] = "accepted"
+        entry["summary"] = f"Added user-visible behavior {index}"
+    batch_path.write_text(yaml.safe_dump(batch, sort_keys=False), encoding="utf-8")
+    applied = _jrun(
+        repo,
+        "entry",
+        "apply",
+        "0.2.0",
+        "--file",
+        str(batch_path),
+        "--strict",
+        "--guard-commit-subjects",
+    )
+    assert len(applied["result"]["entries"]) == 2
+    decisions_path = work / "audit-decisions.yaml"
+    decisions = yaml.safe_load(decisions_path.read_text(encoding="utf-8"))
+    for row in decisions["rows"]:
+        row["inspected"] = True
+        row["decision"] = "accepted"
+        row["observed_behavior"] = "Reviewed behavior from the patch."
+    decisions_path.write_text(
+        yaml.safe_dump(decisions, sort_keys=False), encoding="utf-8"
+    )
+    _jrun(repo, "audit", "apply", "0.2.0", "--file", str(decisions_path))
+    _jrun(repo, "release", "import-tags", "--apply")
+    checked = _jrun(
+        repo,
+        "release",
+        "check",
+        "0.2.0",
+        "--phase",
+        "finalize",
+        "--released-at",
+        "2026-06-14",
+        "--strict",
+    )
+    assert checked["result"]["ok"] is True
 
 
 # --------------------------------------------------------------------------
@@ -590,8 +690,6 @@ def test_git_range_fails_without_base(tmp_path: Path) -> None:
             "0.2.0",
             "--previous",
             "0.1.0",
-            "--released-at",
-            "2026-06-14",
         ],
     )
     result = runner.invoke(app, ["--cwd", str(repo), "git", "range", "0.2.0"])

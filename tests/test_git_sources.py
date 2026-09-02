@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from releaseledger.domain.release import ReleaseRecord
 from releaseledger.errors import LaunchError
 from releaseledger.services.git_sources import (
     build_git_range_summary,
@@ -19,6 +20,7 @@ from releaseledger.services.git_sources import (
     is_git_worktree,
     is_root_base_ref,
     net_diff_paths,
+    release_snapshot_drift_report,
     resolve_base_sha,
     resolve_git_ref,
 )
@@ -482,3 +484,20 @@ def test_collect_enforces_clean_worktree(tmp_path: Path) -> None:
             repo, base_ref="v0.1.0", head_ref="HEAD", require_clean_worktree=True
         )
     assert "dirty" in exc_info.value.message.lower()
+
+
+def test_snapshot_drift_marks_immutable_sha_provenance(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    root_sha = _commit(repo, "root", content_name="README.md")
+    head_sha = _commit(repo, "feature", content_name="feature.txt")
+    report = release_snapshot_drift_report(
+        repo,
+        ReleaseRecord(
+            version="0.2.0",
+            git_base_sha=root_sha,
+            git_head_sha=head_sha,
+        ),
+    )
+    assert report is not None
+    assert report["status"] == "pinned"
+    assert all(row["provenance"] == "immutable_sha" for row in report["checks"])

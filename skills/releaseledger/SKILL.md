@@ -38,7 +38,7 @@ Releaseledger is separate from taskledger. Do not treat `.releaseledger/` as tas
 - Do not import taskledger, inspect `.taskledger/`, or dereference task refs.
   Accept taskledger evidence only as caller-supplied context and global refs.
 - Do not use git commit messages as changelog entries. Do not paste, paraphrase, title-case, or mechanically convert commit subjects into `summary` values. A commit message is only provenance for locating evidence.
-- Do not run multiple releaseledger mutating commands concurrently. Especially do not fan out `entry add` calls. Use `entry add-many ... --dry-run` followed by one `entry add-many`, or run single mutating commands sequentially and re-read state after any failure.
+- Do not run multiple releaseledger mutating commands concurrently. Especially do not fan out `entry add` calls. Use `entry apply ... --dry-run` followed by one `entry apply`, or run single mutating commands sequentially and re-read state after any failure.
 - During normal release work, do not inspect `releaseledger` package internals. If CLI output is insufficient, first try the JSON form of the public command. If the JSON form is still insufficient, write a change request and stop using source code as a workaround unless the user explicitly asks for releaseledger debugging.
 
 ## Core agent command path
@@ -62,8 +62,9 @@ releaseledger release finalize VERSION
 releaseledger release restore VERSION --reason TEXT [--from-tag TAG] [--dry-run]
 releaseledger release check VERSION [--phase current|finalize|published] [--strict] [--target-file PATH]
 releaseledger entry add VERSION --kind KIND --summary TEXT
-releaseledger entry add-many VERSION --file FILE --dry-run [--strict] [--guard-commit-subjects]
-releaseledger entry add-many VERSION --file FILE [--strict] [--guard-commit-subjects] [--sync-audit]
+releaseledger release review VERSION [--git] [--strict] [--acknowledge-changelog-change]
+releaseledger entry apply VERSION --file FILE --dry-run [--strict] [--guard-commit-subjects]
+releaseledger entry apply VERSION --file FILE [--strict] [--guard-commit-subjects] [--sync-audit]
 releaseledger entry show VERSION ENTRY_ID
 releaseledger entry update VERSION ENTRY_ID
 releaseledger entry update VERSION ENTRY_ID --add-source-ref REF
@@ -73,7 +74,7 @@ releaseledger entry lint VERSION --strict
 releaseledger entry prompt VERSION --source-ref REF --context-file FILE
 releaseledger changelog preview VERSION --format markdown|json
 releaseledger changelog build VERSION
-releaseledger build VERSION --dry-run
+releaseledger changelog build VERSION --dry-run
 releaseledger release review VERSION [--strict] [--git] [--git-base REF] [--git-head REF] [--require-audit-sheet]
 releaseledger git range VERSION [--base REF] [--head REF]
 releaseledger git scaffold VERSION [--base REF] [--head REF] --output PATH
@@ -90,9 +91,9 @@ releaseledger audit sync VERSION
 releaseledger commands
 releaseledger help release review
 releaseledger branch status
-releaseledger build --strict --target-file CHANGELOG.md
-releaseledger build VERSION --strict --target-file CHANGELOG.md
-releaseledger build VERSION --strict --target-file CHANGELOG.md --replace-existing
+releaseledger changelog build --strict --target-file CHANGELOG.md
+releaseledger changelog build VERSION --strict --target-file CHANGELOG.md
+releaseledger changelog build VERSION --strict --target-file CHANGELOG.md --replace-existing
 
 releaseledger storage where
 releaseledger storage validate --strict
@@ -122,7 +123,7 @@ releaseledger --root PATH --json release show VERSION
 5. For a known release, run `releaseledger release show VERSION`.
 6. Run `releaseledger entry list VERSION`.
 7. Generate machine context when needed:
-   `releaseledger changelog VERSION --format json`.
+   `releaseledger changelog preview VERSION --format json`.
 8. Do not inspect `.releaseledger/` internals unless the CLI cannot start and the user explicitly requested forensic inspection.
 
 ## Release creation protocol
@@ -174,10 +175,12 @@ releaseledger release rename OLD NEW --previous PREV \
 releaseledger release rename OLD NEW --previous PREV \
   --target-file CHANGELOG.md --rename-changelog-section
 releaseledger release prepare NEW --previous PREV --released-at DATE \
-  --git-base PREV_TAG --git-head HEAD --output-dir .releaseledger/work/NEW
-releaseledger audit decisions NEW --output .releaseledger/work/NEW/audit-decisions.yaml
-releaseledger audit apply NEW --file .releaseledger/work/NEW/audit-decisions.yaml --dry-run
-releaseledger audit apply NEW --file .releaseledger/work/NEW/audit-decisions.yaml
+  --git-base PREV_TAG --git-head HEAD --refresh
+releaseledger entry apply .ledger/releaseledger/work/NEW/entries.yaml --dry-run --strict --guard-commit-subjects
+releaseledger entry apply .ledger/releaseledger/work/NEW/entries.yaml --strict --guard-commit-subjects --sync-audit
+releaseledger audit decisions NEW --output .ledger/releaseledger/work/NEW/audit-decisions.yaml
+releaseledger audit apply NEW --file .ledger/releaseledger/work/NEW/audit-decisions.yaml --dry-run
+releaseledger audit apply NEW --file .ledger/releaseledger/work/NEW/audit-decisions.yaml
 releaseledger release check NEW --phase finalize --released-at DATE --strict \
   --target-file CHANGELOG.md
 releaseledger changelog build NEW --output CHANGELOG.md --strict --replace-existing
@@ -253,9 +256,9 @@ opaque context and global refs:
 ```bash
 releaseledger entry prompt VERSION --source-ref tl:task-0103 \
   --context-file /tmp/task-0103.json --output /tmp/prompt.md
-releaseledger entry add-many VERSION --file /tmp/VERSION-entries.yaml \
+releaseledger entry apply VERSION --file /tmp/VERSION-entries.yaml \
   --dry-run --strict --guard-commit-subjects
-releaseledger entry add-many VERSION --file /tmp/VERSION-entries.yaml \
+releaseledger entry apply VERSION --file /tmp/VERSION-entries.yaml \
   --strict --guard-commit-subjects --sync-audit
 releaseledger entry lint VERSION --strict
 releaseledger entry list VERSION
@@ -265,7 +268,7 @@ Batch creation validates every entry before writing any entry. If any item is
 invalid, correct the YAML and rerun the dry run; do not add entries one at a
 time to bypass atomic validation.
 
-For batch imports, verify fields with `releaseledger --json entry add-many VERSION --file FILE --dry-run` and inspect `result.entries[*].internal`, `breaking`, and other fields before assuming the batch parser dropped a field.
+For batch imports, verify fields with `releaseledger --json entry apply VERSION --file FILE --dry-run` and inspect `result.entries[*].internal`, `breaking`, and other fields before assuming the batch parser dropped a field.
 
 ## Changelog source protocol
 
@@ -281,7 +284,7 @@ releaseledger changelog preview VERSION --lint
 
 Rules:
 
-1. Treat `releaseledger changelog VERSION` as source/context unless the command name or option explicitly says build/update.
+1. Treat `releaseledger changelog preview VERSION` as source/context unless the command name or option explicitly says build/update.
 2. Check whether internal entries were filtered.
 3. Preserve warnings, release metadata, and entry grouping when handing source to a human or another tool.
 4. If no date is provided and the release has no persisted `released_at`, keep the output unreleased or explicitly say no date was available.
@@ -309,9 +312,9 @@ Use this for any git-backed changelog or release-note backfill.
 8. Generate the batch scaffold with `releaseledger git scaffold VERSION --output entries.yaml`
    (or `git import`, which remains a compatibility alias).
 9. Add entries atomically with
-   `releaseledger entry add-many VERSION --file entries.yaml --dry-run --strict --guard-commit-subjects`
+   `releaseledger entry apply VERSION --file entries.yaml --dry-run --strict --guard-commit-subjects`
    followed by
-   `releaseledger entry add-many VERSION --file entries.yaml --strict --guard-commit-subjects --sync-audit`.
+   `releaseledger entry apply VERSION --file entries.yaml --strict --guard-commit-subjects --sync-audit`.
 10. Validate the complete phase after entries exist:
     `releaseledger audit validate VERSION --phase complete --strict --include-internal`.
 11. Run `releaseledger release check VERSION --phase finalize --released-at DATE --strict --target-file CHANGELOG.md` before any final build. Use the
@@ -322,6 +325,8 @@ are `needs_review`, `accepted`, `grouped`, `internal`, and `rejected`.
 `public_impact` values are `public`, `docs`, `internal`, `none`, and
 `unknown`. The sheet is evidence state, not changelog prose.
 
+One commit may legitimately map to zero, one, or multiple changelog entries. Use one `source_refs` coverage owner for the commit, then add the same commit as supporting `sources` on additional behavior-specific entries when needed. Keep each summary based on reviewed diff behavior; never force one bullet per commit and never generate prose from commit subjects.
+
 ## CHANGELOG.md build protocol
 
 Use this when the user asks to build, generate, or update `CHANGELOG.md`.
@@ -331,7 +336,7 @@ Use this when the user asks to build, generate, or update `CHANGELOG.md`.
    If it reports missing `git:<sha>` coverage, audit failures, lint errors, or
    release-state blockers, stop and resolve them before building.
 1. Generate a strict dry run first:
-   `releaseledger build VERSION --dry-run --strict --target-file CHANGELOG.md`.
+   `releaseledger changelog build VERSION --dry-run --strict --target-file CHANGELOG.md`.
 2. Inspect the rendered section:
    - heading version is correct
    - release date is exact, omitted, or marked unreleased according to user intent
@@ -339,7 +344,7 @@ Use this when the user asks to build, generate, or update `CHANGELOG.md`.
    - groups appear in deterministic order
    - breaking changes are visible
 3. Apply the build:
-   `releaseledger build VERSION --target-file CHANGELOG.md`.
+   `releaseledger changelog build VERSION --target-file CHANGELOG.md`.
 4. Read `CHANGELOG.md` back and verify:
    - no duplicate release heading exists
    - new section is below `## Unreleased` when that heading exists
@@ -354,8 +359,8 @@ Use this when the user asks to build, generate, or update `CHANGELOG.md`.
    `releaseledger release finalize VERSION --released-at YYYY-MM-DD`.
 9. To rebuild the **whole** target file from ledger state, use the
    conventional full-build command:
-   - `releaseledger build --dry-run --target-file CHANGELOG.md`
-   - `releaseledger build --target-file CHANGELOG.md`
+   - `releaseledger changelog build --dry-run --target-file CHANGELOG.md`
+   - `releaseledger changelog build --target-file CHANGELOG.md`
      `build` with no VERSION (or `build --all`) regenerates every selected
      release section newest-first, preserves the `## [Unreleased]` body by
      default, excludes internal entries and non-released releases by default,
@@ -367,7 +372,7 @@ Use this when the user asks to build, generate, or update `CHANGELOG.md`.
 An explicit release version means single-section intent:
 
 ```bash
-releaseledger build VERSION --strict --target-file CHANGELOG.md
+releaseledger changelog build VERSION --strict --target-file CHANGELOG.md
 ```
 
 Use a full document rebuild only when the user explicitly asks for all history,
@@ -375,7 +380,7 @@ for example "rebuild the whole changelog" or "regenerate all release
 sections":
 
 ```bash
-releaseledger build --strict --target-file CHANGELOG.md
+releaseledger changelog build --strict --target-file CHANGELOG.md
 ```
 
 If a git range exists, strict build must pass. If it fails because commits are
@@ -401,7 +406,7 @@ When the user requests "all versions," "all changes," "full history," or equival
    d. curate entries without copying commit subjects
    e. preserve PR/contributor metadata
    f. validate audit completeness
-5. releaseledger build --all --strict --require-complete-history
+5. releaseledger changelog build --all --strict --require-complete-history
 6. releaseledger release reconcile --strict
 ```
 
@@ -460,14 +465,14 @@ The command is idempotent and never overwrites existing records.
 ## Release review protocol
 
 Use this to answer "what did I already add for this release?" before adding
-new entries or building the changelog. `releaseledger review VERSION` is
+new entries or building the changelog. `releaseledger release review VERSION` is
 read-only: it never writes `CHANGELOG.md` and never mutates release state.
 
 ```bash
-releaseledger review VERSION
-releaseledger --json review VERSION
-releaseledger review VERSION --include-status accepted --include-status draft
-releaseledger review VERSION --strict --target-file CHANGELOG.md
+releaseledger release review VERSION
+releaseledger --json release review VERSION
+releaseledger release review VERSION --include-status accepted --include-status draft
+releaseledger release review VERSION --strict --target-file CHANGELOG.md
 releaseledger release check VERSION --strict --target-file CHANGELOG.md
 ```
 
@@ -536,9 +541,9 @@ releaseledger audit validate VERSION --phase evidence --strict
 
 # 5. Create a coverage scaffold and validate entries atomically.
 releaseledger git scaffold VERSION --output entries.yaml
-releaseledger entry add-many VERSION --file entries.yaml \
+releaseledger entry apply VERSION --file entries.yaml \
   --dry-run --strict --guard-commit-subjects
-releaseledger entry add-many VERSION --file entries.yaml \
+releaseledger entry apply VERSION --file entries.yaml \
   --strict --guard-commit-subjects --sync-audit
 
 # 6. Run one complete read-only gate.
@@ -546,13 +551,13 @@ releaseledger release check VERSION --strict --target-file CHANGELOG.md
 
 # 7. Finalize only when shipped intent is explicit, then build the requested scope.
 releaseledger release finalize VERSION --released-at YYYY-MM-DD
-releaseledger build VERSION --strict --target-file CHANGELOG.md
+releaseledger changelog build VERSION --strict --target-file CHANGELOG.md
 ```
 
 No coverage, no build:
 
-- If `releaseledger review VERSION --git --strict` fails, do not run
-  `releaseledger build`.
+- If `releaseledger release review VERSION --git --strict` fails, do not run
+  `releaseledger changelog build`.
 - If the user asks for a fast changelog and the range has not been audited,
   produce the audit worksheet and stop before mutation.
 - If a commit cannot be understood from the patch, mark it draft/internal and
@@ -608,7 +613,7 @@ When machine output is needed, `--json` is root-level:
 
 ```bash
 releaseledger --json release show 1.2.0
-releaseledger --json build 1.2.0 --dry-run
+releaseledger --json changelog build 1.2.0 --dry-run
 ```
 
 Do not append `--json` after the subcommand unless releaseledger explicitly adds that local option later.
@@ -714,12 +719,12 @@ releaseledger release show VERSION
 releaseledger git range VERSION
 releaseledger audit validate VERSION --phase complete --strict
 releaseledger release check VERSION --strict
-releaseledger build --all --dry-run --strict
+releaseledger changelog build --all --dry-run --strict
 ```
 
 `release reconcile` compares release records, Git tags, and changelog headings. It never writes historical state and reports `tag_without_release`, `changelog_without_release`, `planned_with_tag`, `canceled_with_tag`, `ambiguous_active_release_identity`, and related mismatches. A canceled release with a matching Git tag is inconsistent and requires investigation.
 
-`source_refs` is the single coverage-owner surface for a commit or other coverable identity. Use `sources` for supporting provenance when several changelog bullets describe one commit. `entry add-many --dry-run --json` exposes `result.issues` without writing. Do not create a real entry to probe validation. Remove accidental draft or rejected probes with `entry delete VERSION ENTRY_ID --reason TEXT`; accepted entries require an explicit force flag.
+`source_refs` is the single coverage-owner surface for a commit or other coverable identity. Use `sources` for supporting provenance when several changelog bullets describe one commit. `entry apply --dry-run --json` exposes `result.issues` without writing. Do not create a real entry to probe validation. Remove accidental draft or rejected probes with `entry delete VERSION ENTRY_ID --reason TEXT`; accepted entries require an explicit force flag.
 
 Canceling a release with direct successors requires `--rewrite-successors` and either a valid prior predecessor or `--successor-previous VERSION`. Use `--dry-run` before mutation. A single-release build rejects canceled releases unless `--include-canceled` is explicitly requested for archival/debug output.
 

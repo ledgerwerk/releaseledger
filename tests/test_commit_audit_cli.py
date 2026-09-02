@@ -101,8 +101,6 @@ def _seed_range(tmp_path: Path) -> tuple[Path, str, str]:
             "0.2.0",
             "--previous",
             "0.1.0",
-            "--released-at",
-            "2026-06-14",
         ).exit_code
         == 0
     )
@@ -159,8 +157,6 @@ class TestAuditInit:
                 "0.2.0",
                 "--previous",
                 "0.1.0",
-                "--released-at",
-                "2026-06-14",
             ).exit_code
             == 0
         )

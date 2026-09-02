@@ -272,6 +272,37 @@ def _compute_git_expected_refs(
     return git_block, git_warnings, git_ref_map, expected_refs
 
 
+def _target_changelog_changed_in_range(
+    workspace_root: Path,
+    *,
+    release: ReleaseRecord,
+    target_file: Path | None,
+    git_block: dict[str, object] | None,
+) -> bool | None:
+    """Return whether the reviewed Git range changes the target changelog."""
+    if git_block is None:
+        return None
+    target = target_file or Path(release.changelog_file or "CHANGELOG.md")
+    if target.is_absolute():
+        try:
+            relative_target = target.resolve().relative_to(workspace_root).as_posix()
+        except ValueError:
+            return False
+    else:
+        relative_target = target.as_posix()
+    from releaseledger.services.git_sources import net_diff_paths
+
+    try:
+        changed_paths = net_diff_paths(
+            workspace_root,
+            base_ref=str(git_block["base_sha"]),
+            head_ref=str(git_block["head_sha"]),
+        )
+    except LaunchError:
+        return None
+    return relative_target in changed_paths
+
+
 def _compute_git_coverage(
     coverage: list[dict[str, object]],
     git_block: dict[str, object] | None,
@@ -599,6 +630,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
     include_history_health: bool = False,
     phase: str = "current",
     proposed_released_at: str | None = None,
+    acknowledge_changelog_change: bool = False,
 ) -> dict[str, object]:
     """Build a deterministic, read-only release review for ``version``.
 
@@ -625,6 +657,13 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         )
     workspace_root = workspace_root.expanduser().resolve()
     release = load_release(workspace_root, version)
+    from releaseledger.storage.config import load_project_config
+    from releaseledger.storage.paths import resolve_project_paths
+
+    project_config = load_project_config(
+        resolve_project_paths(workspace_root).config_path
+    )
+    configured_target_file = Path(project_config.changelog_output)
     statuses = tuple(normalize_entry_status(value) for value in include_statuses)
     entries = load_entries(workspace_root, version)
     audit_sheet = load_commit_audit_sheet(workspace_root, version)
@@ -636,9 +675,9 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
 
     # 1. Release payload.
     release_block: dict[str, object] = {
-        "version": release.version,
         "status": release.status,
         "released_at": release.released_at,
+        "proposed_released_at": (proposed_released_at if phase == "finalize" else None),
         "previous_version": release.previous_version,
         "changelog_file": release.changelog_file,
         "boundary_ref": release.boundary_ref,
@@ -663,6 +702,19 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         git_head=git_head,
         include_merges=include_merges,
     )
+    target_changelog_modified = _target_changelog_changed_in_range(
+        workspace_root,
+        release=release,
+        target_file=target_file or configured_target_file,
+        git_block=git_block,
+    )
+    if git_block is not None:
+        git_block["target_changelog_modified_in_range"] = target_changelog_modified
+        if target_changelog_modified:
+            git_warnings.append(
+                "target_changelog_modified_in_range: true; reconcile the changelog "
+                "ownership before building."
+            )
 
     # 3. Coverage classification.
     coverage = _compute_coverage(
@@ -746,11 +798,11 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
 
     git_coverage_ok, git_missing_count = _compute_git_coverage(coverage, git_block)
     if phase == "finalize":
-        release_state_ok = release.status in {
-            "planned",
-            "draft",
-            "candidate",
-        } and bool(proposed_released_at or release.released_at)
+        release_state_ok = (
+            release.status in {"planned", "draft", "candidate"}
+            and bool(proposed_released_at)
+            and release.released_at is None
+        )
     elif phase == "published":
         release_state_ok = release.status == "released" and bool(release.released_at)
     else:
@@ -760,6 +812,11 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
     snapshot_drift = git_block.get("snapshot_drift") if git_block else None
     snapshot_ok = not (
         isinstance(snapshot_drift, dict) and snapshot_drift.get("status") == "drifted"
+    )
+    target_changelog_ok = not (
+        strict
+        and target_changelog_modified is True
+        and not acknowledge_changelog_change
     )
 
     # Commit audit sheet integration (opt-in via --require-audit-sheet).
@@ -787,6 +844,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         "chain_ok": chain_ok,
         "reconciliation_ok": reconciliation_ok,
         "snapshot_ok": snapshot_ok,
+        "target_changelog_ok": target_changelog_ok,
         "audit_evidence_ok": audit_evidence_ok,
         "audit_complete_ok": audit_complete_ok,
         "phase": phase,
@@ -798,7 +856,13 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         and lint_ok
         and (
             not strict
-            or (changelog_ok and release_state_ok and chain_ok and reconciliation_ok)
+            or (
+                changelog_ok
+                and release_state_ok
+                and chain_ok
+                and reconciliation_ok
+                and target_changelog_ok
+            )
         )
     )
     if strict and git_block is not None:
@@ -818,10 +882,16 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         git_missing_count=git_missing_count,
     )
     if not release_state_ok:
-        recommendations.append(
-            f"{release.version} has released_at={release.released_at}"
-            f" but status={release.status}."
-        )
+        if phase == "finalize":
+            recommendations.append(
+                "Finalize eligibility requires an active release, a proposed "
+                "release date, and no persisted released_at date."
+            )
+        else:
+            recommendations.append(
+                f"{release.version} has released_at={release.released_at}"
+                f" but status={release.status}."
+            )
     if not chain_ok:
         recommendations.append(
             "Repair the release predecessor chain before finalization."
@@ -863,6 +933,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         "include_statuses": list(statuses),
         "phase": phase,
         "proposed_released_at": proposed_released_at,
+        "acknowledge_changelog_change": acknowledge_changelog_change,
         "recommendations": recommendations,
         "chain": chain_block,
         "reconciliation": reconciliation_block,

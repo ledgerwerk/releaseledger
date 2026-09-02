@@ -229,8 +229,6 @@ def _add_entries(tmp_path: Path, entries: list[dict[str, object]]) -> None:
                 "release",
                 "create",
                 "0.2.0",
-                "--released-at",
-                "2026-06-14",
             ],
         ).exit_code
         == 0

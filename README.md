@@ -92,49 +92,21 @@ The package exposes the console command `releaseledger` and supports
 releaseledger init
 
 # 2. Create the release and attach the git snapshot once.
-releaseledger release create 1.2.0 \
-  --previous 1.1.0 \
-  --released-at 2026-06-14
-
-releaseledger release update 1.2.0 \
-  --git-base v1.1.0 \
-  --git-head HEAD
-
-# 3. Export deterministic evidence, initialize the audit, and scaffold entries.
-releaseledger git evidence 1.2.0 --output-dir /tmp/1.2.0-evidence
-releaseledger audit init 1.2.0
-releaseledger audit show 1.2.0 --format yaml --output /tmp/1.2.0-audit.yaml
-releaseledger git scaffold 1.2.0 --output /tmp/1.2.0-git-entries.yaml
-
-# 4. Curate audit annotations, then validate the evidence phase.
-releaseledger audit apply 1.2.0 \
-  --file /tmp/1.2.0-audit-decisions.yaml \
-  --dry-run
-releaseledger audit apply 1.2.0 \
-  --file /tmp/1.2.0-audit-decisions.yaml
-releaseledger audit validate 1.2.0 --phase evidence --strict
-
-# 5. Edit the entry scaffold summaries, then validate and write atomically.
-releaseledger entry add-many 1.2.0 \
-  --file /tmp/1.2.0-git-entries.yaml \
-  --dry-run \
-  --strict \
-  --guard-commit-subjects
-releaseledger entry add-many 1.2.0 \
-  --file /tmp/1.2.0-git-entries.yaml \
-  --strict \
-  --guard-commit-subjects \
-  --sync-audit
+releaseledger release prepare 1.2.0 \
+  --previous 1.1.0 --git-base v1.1.0 --git-head HEAD
+work=.ledger/releaseledger/work/1.2.0
+releaseledger entry apply "$work/entries.yaml" --dry-run --strict --guard-commit-subjects
+releaseledger entry apply "$work/entries.yaml" --strict --guard-commit-subjects --sync-audit
 releaseledger audit validate 1.2.0 --phase complete --strict --include-internal
 
-# 6. Run the final read-only gate, then finalize and build.
-releaseledger release check 1.2.0 --strict --target-file CHANGELOG.md
+# 3. Run the final read-only gate, then finalize and build.
+releaseledger release check 1.2.0 --phase finalize --released-at 2026-06-14 --strict
+releaseledger changelog build 1.2.0 --strict --target-file CHANGELOG.md
 releaseledger release finalize 1.2.0 --released-at 2026-06-14
-releaseledger build 1.2.0 --strict --target-file CHANGELOG.md
 
 # Or rebuild the COMPLETE changelog from ledger state:
-releaseledger build --dry-run --strict --target-file CHANGELOG.md
-releaseledger build --target-file CHANGELOG.md
+releaseledger changelog build --dry-run --strict --target-file CHANGELOG.md
+releaseledger changelog build --target-file CHANGELOG.md
 ```
 
 Taskledger refs (`tl:task-0103`) and PR refs (`github:pr-42`) are optional
@@ -217,7 +189,7 @@ releaseledger entry add VERSION --kind KIND --summary TEXT [--body TEXT]
                                [--scope SCOPE]... [--source-ref REF]...
                                [--path PATH]... [--issue REF]... [--pr REF]...
                                [--breaking] [--internal] [--dry-run]
-releaseledger entry add-many VERSION --file FILE [--dry-run] [--strict]
+releaseledger entry apply VERSION --file FILE [--dry-run] [--strict]
                                     [--guard-commit-subjects]
                                     [--sync-audit]
 releaseledger entry update VERSION ENTRY_ID [entry metadata options]
@@ -238,7 +210,7 @@ releaseledger changelog preview VERSION [--format markdown|json] [--output PATH]
                                 [--include-sources]
                                 [--include-status STATUS]... [--lint]
 
-releaseledger build VERSION [--target-file PATH]
+releaseledger changelog build VERSION [--target-file PATH]
                             [--release-date YYYY-MM-DD]
                             [--unreleased]
                             [--include-internal]
@@ -249,13 +221,13 @@ releaseledger build VERSION [--target-file PATH]
                             [--include-status STATUS]...
                             [--strict]
                             [--allow-empty]
-releaseledger build [VERSION] [--all] [--target-file PATH]
+releaseledger changelog build [VERSION] [--all] [--target-file PATH]
                             [--include-release-status STATUS]...
                             [--preserve-unreleased|--no-preserve-unreleased]
                             [--include-internal]
                             [--include-status STATUS]... [--strict]
                             [--dry-run] [--allow-empty]
-releaseledger review VERSION [--include-internal]
+releaseledger release review VERSION [--include-internal]
                        [--include-status STATUS]...
                        [--target-file PATH] [--strict]
                        [--git] [--git-base REF] [--git-head REF]
@@ -285,9 +257,9 @@ releaseledger branch status
 releaseledger branch start BRANCH --parent PARENT
 releaseledger branch merge BRANCH --into TARGET --release VERSION
 
-releaseledger changelog-section remove-section VERSION --target-file PATH
+releaseledger changelog section remove VERSION --target-file PATH
                                               [--ignore-missing] [--dry-run]
-releaseledger changelog-section rename-section OLD_VERSION NEW_VERSION
+releaseledger changelog section rename OLD_VERSION NEW_VERSION
                                               --target-file PATH
                                               [--ignore-missing]
                                               [--replace-existing] [--dry-run]
@@ -307,7 +279,7 @@ releaseledger --version
 
 ## Batch entries
 
-`entry add-many` reads YAML with a top-level `entries` list:
+`entry apply` reads YAML with a top-level `entries` list:
 
 ```yaml
 entries:
@@ -330,8 +302,8 @@ entries:
 Run a dry run before writing:
 
 ```bash
-releaseledger entry add-many 1.2.0 --file /tmp/1.2.0-entries.yaml --dry-run
-releaseledger entry add-many 1.2.0 --file /tmp/1.2.0-entries.yaml
+releaseledger entry apply 1.2.0 --file /tmp/1.2.0-entries.yaml --dry-run
+releaseledger entry apply 1.2.0 --file /tmp/1.2.0-entries.yaml
 ```
 
 ## Changelog generation
@@ -343,16 +315,16 @@ or humans who need to inspect release metadata, included entries, target file
 guidance, and lint findings before writing final prose. Add
 `--include-sources` when the Markdown output should show provenance refs.
 
-`releaseledger build` renders the final section from `[changelog]` config and
+`releaseledger changelog build` renders the final section from `[changelog]` config and
 inserts it into the target file. It can run in `--dry-run` mode, replace an
 existing release section with `--replace-existing`, or render an unreleased date
 with `--unreleased`. Use `--template NAME` to select a named changelog template
 profile.
 
 Use the conventional **full rebuild** to regenerate the whole target file from
-ledger state: `releaseledger build` with no `VERSION` (or `releaseledger build --all`) rewrites the entire document newest-first, preserves the
+ledger state: `releaseledger changelog build` with no `VERSION` (or `releaseledger changelog build --all`) rewrites the entire document newest-first, preserves the
 `## [Unreleased]` body by default, excludes internal entries and non-released
-releases by default, and regenerates the link-reference block. `releaseledger build VERSION` keeps the single-section insert/replace behavior. Use
+releases by default, and regenerates the link-reference block. `releaseledger changelog build VERSION` keeps the single-section insert/replace behavior. Use
 `--include-release-status` to include candidate/planned sections explicitly,
 and `--include-internal` only for internal release notes.
 
@@ -391,17 +363,17 @@ postprocessors = [
 
 ## Release review
 
-`releaseledger review VERSION` is a read-only coverage report that combines
+`releaseledger release review VERSION` is a read-only coverage report that combines
 release state, entry coverage, orphan detection, entry lint, and a strict
 changelog dry-run into one deterministic report. Use it to answer "what did I
 already add for this release?" without stitching together `release show`,
 `entry list`, `entry lint`, `changelog`, and `build --dry-run`.
 
 ```bash
-releaseledger review 0.5.0
-releaseledger --json review 0.5.0
-releaseledger review 0.5.0 --include-status accepted --include-status draft
-releaseledger review 0.5.0 --strict --target-file CHANGELOG.md
+releaseledger release review 0.5.0
+releaseledger --json release review 0.5.0
+releaseledger release review 0.5.0 --include-status accepted --include-status draft
+releaseledger release review 0.5.0 --strict --target-file CHANGELOG.md
 ```
 
 Each expected source ref (`release.source_refs` plus `boundary_ref`) is
@@ -411,7 +383,7 @@ classified as `covered`, `draft_only`, `rejected_only`, `internal_only`, or
 evidence in entry `sources`; `source_refs` plus entry `status` are the
 canonical change identity.
 
-> Before adding a new entry, run `releaseledger review VERSION`. If the same
+> Before adding a new entry, run `releaseledger release review VERSION`. If the same
 > `source_ref` is already covered by an accepted entry, update the existing
 > entry instead of adding a duplicate.
 
@@ -474,10 +446,10 @@ releaseledger entry prompt 1.2.0 \
   --context-file /tmp/task-0103.json \
   --output /tmp/entry-prompt.md
 
-releaseledger entry add-many 1.2.0 --file /tmp/1.2.0-entries.yaml --dry-run
-releaseledger entry add-many 1.2.0 --file /tmp/1.2.0-entries.yaml
+releaseledger entry apply 1.2.0 --file /tmp/1.2.0-entries.yaml --dry-run
+releaseledger entry apply 1.2.0 --file /tmp/1.2.0-entries.yaml
 releaseledger entry lint 1.2.0 --strict
-releaseledger build 1.2.0 --dry-run --strict --target-file CHANGELOG.md
+releaseledger changelog build 1.2.0 --dry-run --strict --target-file CHANGELOG.md
 ```
 
 The prompt command tells the drafting agent to use only releaseledger metadata,

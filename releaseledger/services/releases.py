@@ -46,6 +46,7 @@ from releaseledger.errors import (
 from releaseledger.services.audit import (
     create_commit_audit_sheet,
     refresh_commit_audit_sheet,
+    render_commit_audit_decisions_template,
     render_commit_audit_sheet,
 )
 from releaseledger.services.changelog_build import (
@@ -57,6 +58,7 @@ from releaseledger.services.events import append_event
 from releaseledger.services.git_sources import (
     GIT_DEFAULT_HEAD,
     build_git_range_summary,
+    export_git_evidence,
     generate_git_scaffold_batch,
     is_root_base_ref,
     release_snapshot_drift_report,
@@ -107,6 +109,27 @@ _FINALIZABLE_STATUSES = frozenset({"planned", "draft", "candidate"})
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _FINALIZABLE_STATUSES = frozenset({"planned", "draft", "candidate"})
+
+
+def _validate_released_at_for_status(
+    status: str,
+    released_at: str | None,
+    *,
+    explicit: bool = True,
+) -> None:
+    """Enforce that ``released_at`` records completed publication only."""
+    if explicit and released_at is not None and status != "released":
+        raise LaunchError(
+            "--released-at records the actual release date and cannot be set "
+            f"while status is {status!r}.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+            remediation=[
+                "Omit --released-at while preparing the release.",
+                "Pass the proposed date to `release check --phase finalize`.",
+                "Use `release finalize --released-at YYYY-MM-DD` when shipped.",
+            ],
+        )
 
 
 def resolve_release_selector(workspace_root: Path, selector: str) -> str:
@@ -442,6 +465,7 @@ def create_release(
         )
     if released_at is not None:
         _validate_date(released_at, "--released-at")
+    _validate_released_at_for_status(status, released_at)
     warnings: list[str] = []
     if previous_version is None:
         previous_version, warnings = _infer_previous_version(
@@ -913,6 +937,12 @@ def update_release(
     )
     if resolved_released_at is not None:
         _validate_date(str(resolved_released_at), "--released-at")
+    if (
+        effective_status != "released"
+        and resolved_released_at is not None
+        and (released_at is not UNSET or status is not None)
+    ):
+        _validate_released_at_for_status(effective_status, resolved_released_at)
     boundary, refs, count = _validate_source_metadata(
         boundary_ref=resolved_boundary_raw,
         source_refs=(
@@ -1076,10 +1106,27 @@ def prepare_release(
     git_base_ref: str | None = None,
     git_head_ref: str | None = None,
     output_dir: Path,
+    refresh: bool = False,
 ) -> dict[str, object]:
     """Create/update a planned release snapshot and export working artifacts."""
     workspace_root = workspace_root.expanduser().resolve()
-    output_dir = output_dir.expanduser().resolve()
+    output_dir = Path(output_dir)
+    if not output_dir.is_absolute():
+        output_dir = workspace_root / output_dir
+    # The default project-local work root is version-scoped; explicit output
+    # paths remain compatible with the historical direct-output contract.
+    if output_dir.name == "work" and output_dir.parent.name == "releaseledger":
+        output_dir = output_dir / version
+    output_dir = output_dir.resolve()
+    if output_dir.exists() and any(output_dir.iterdir()) and not refresh:
+        raise LaunchError(
+            f"Preparation workspace is not empty: {output_dir}. Pass --refresh to overwrite it.",
+            code=CODE_CONFLICT,
+            exit_code=2,
+            remediation=["Review or remove the workspace, or rerun with --refresh."],
+        )
+    if released_at is not None:
+        _validate_date(released_at, "--released-at")
     try:
         load_release(workspace_root, version)
         release_exists = True
@@ -1093,14 +1140,11 @@ def prepare_release(
             version=version,
             status="planned",
             previous_version=previous_version,
-            released_at=released_at,
         )
     else:
         update_kwargs: dict[str, object] = {"version": version}
         if previous_version is not None:
             update_kwargs["previous_version"] = previous_version
-        if released_at is not None:
-            update_kwargs["released_at"] = released_at
         if len(update_kwargs) > 1:
             update_release(workspace_root, **update_kwargs)  # type: ignore[arg-type]
     if git_base_ref is not None or git_head_ref is not None:
@@ -1118,11 +1162,16 @@ def prepare_release(
         head_ref=snapshot.head_spec,
     )
     audit_exists = load_commit_audit_sheet(workspace_root, version) is not None
-    audit_result = (
-        refresh_commit_audit_sheet(workspace_root, version=version)
-        if audit_exists
-        else create_commit_audit_sheet(workspace_root, version=version)
-    )
+    if audit_exists and refresh:
+        audit_result = refresh_commit_audit_sheet(workspace_root, version=version)
+    elif audit_exists:
+        audit_result = {
+            "kind": "audit_reused",
+            "version": version,
+            "refreshed": False,
+        }
+    else:
+        audit_result = create_commit_audit_sheet(workspace_root, version=version)
     audit_yaml = render_commit_audit_sheet(
         workspace_root, version=version, format_name="yaml"
     )
@@ -1133,15 +1182,32 @@ def prepare_release(
         base_ref=snapshot.base_spec,
         head_ref=snapshot.head_spec,
     )
+    decisions = render_commit_audit_decisions_template(workspace_root, version=version)
+    evidence_dir = output_dir / "evidence"
+    evidence_result = export_git_evidence(
+        workspace_root,
+        release_version=version,
+        base_ref=snapshot.base_spec,
+        head_ref=snapshot.head_spec,
+        include_merges=resolve_project_paths(
+            workspace_root
+        ).project.config.git_include_merges,
+        output_dir=evidence_dir,
+    )
     ledgercore.ensure_dir(output_dir)
     range_path = output_dir / "range.json"
     audit_path = output_dir / "audit.yaml"
     scaffold_path = output_dir / "entries.yaml"
+    decisions_path = output_dir / "audit-decisions.yaml"
     ledgercore.atomic_write_text(
         range_path,
         json.dumps(range_summary, indent=2, sort_keys=True) + "\n",
     )
     ledgercore.atomic_write_text(audit_path, audit_yaml)
+    ledgercore.atomic_write_text(
+        decisions_path,
+        yaml.safe_dump(decisions, sort_keys=False, default_flow_style=False),
+    )
     ledgercore.atomic_write_text(
         scaffold_path,
         yaml.safe_dump(scaffold, sort_keys=False, default_flow_style=False),
@@ -1150,11 +1216,17 @@ def prepare_release(
         "kind": "release_prepare",
         "version": version,
         "release": load_release(workspace_root, version).to_dict(),
+        "proposed_released_at": released_at,
         "audit": audit_result,
         "outputs": {
             "range_json": str(range_path),
             "audit_yaml": str(audit_path),
             "entries_yaml": str(scaffold_path),
+            "audit_decisions_yaml": str(decisions_path),
+            "evidence_manifest": str(
+                evidence_result.get("manifest", evidence_dir / "manifest.json")
+            ),
+            "work_dir": str(output_dir),
         },
     }
 

@@ -161,7 +161,19 @@ def release_snapshot_drift_report(
         ("head", release.git_head_ref, release.git_head_sha),
     )
     for label, ref, stored_sha in targets:
-        if ref is None or stored_sha is None:
+        if stored_sha is None:
+            continue
+        if ref is None:
+            checks.append(
+                {
+                    "label": label,
+                    "ref": None,
+                    "stored_sha": stored_sha,
+                    "current_sha": stored_sha,
+                    "status": "pinned",
+                    "provenance": "immutable_sha",
+                }
+            )
             continue
         try:
             current_sha = (
@@ -176,6 +188,7 @@ def release_snapshot_drift_report(
                 "stored_sha": stored_sha,
                 "current_sha": current_sha,
                 "status": status,
+                "provenance": "symbolic_ref",
             }
         except LaunchError as exc:
             check = {
@@ -184,6 +197,7 @@ def release_snapshot_drift_report(
                 "stored_sha": stored_sha,
                 "current_sha": None,
                 "status": "unknown",
+                "provenance": "symbolic_ref",
                 "message": exc.message,
             }
         checks.append(check)
@@ -193,6 +207,8 @@ def release_snapshot_drift_report(
         status = "drifted"
     elif any(check["status"] == "unknown" for check in checks):
         status = "unknown"
+    elif all(check["status"] == "pinned" for check in checks):
+        status = "pinned"
     else:
         status = "current"
     return {"status": status, "checks": checks}
@@ -982,6 +998,8 @@ def generate_git_scaffold_batch(
             }
         )
     return {
+        "schema": "releaseledger.entry-batch.v1",
+        "operation": "create",
         "schema_version": 1,
         "object_type": "release_entry_batch",
         "release_version": release_version,
