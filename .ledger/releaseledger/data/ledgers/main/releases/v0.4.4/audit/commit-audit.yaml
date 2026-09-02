@@ -1,0 +1,98 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: v0.4.4
+git_base_ref: v0.4.3
+git_base_sha: ffff48d532acfdd222f3c4e4fa103e737cb983e0
+git_head_ref: HEAD
+git_head_sha: d7385ef4028b354fdbc33df69d998195aeeb3470
+git_range: ffff48d532acfdd222f3c4e4fa103e737cb983e0..d7385ef4028b354fdbc33df69d998195aeeb3470
+commit_count: 1
+rows:
+  - sha: d7385ef4028b354fdbc33df69d998195aeeb3470
+    source_ref: git:d7385ef4028b354fdbc33df69d998195aeeb3470
+    short_sha: d7385ef
+    changed_paths:
+      - README.md
+      - docs/commands.md
+      - docs/quickstart.md
+      - releaseledger/cli.py
+      - releaseledger/documentation.py
+      - releaseledger/ledgercore_backend.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/config.py
+      - releaseledger/services/entry_prompt.py
+      - releaseledger/services/git_sources.py
+      - releaseledger/services/project_state.py
+      - releaseledger/services/releases.py
+      - releaseledger/services/review.py
+      - releaseledger/storage/store.py
+      - skills/releaseledger/SKILL.md
+      - tests/test_branch.py
+      - tests/test_changelog_full_build.py
+      - tests/test_commit_audit.py
+      - tests/test_commit_audit_cli.py
+      - tests/test_documentation_commands.py
+      - tests/test_entry_atomicity.py
+      - tests/test_git_cli.py
+      - tests/test_git_review.py
+      - tests/test_git_sources.py
+      - tests/test_index_binding.py
+      - tests/test_project_state.py
+      - tests/test_release_review.py
+      - tests/test_removed_features.py
+      - tests/test_status_transitions_cli.py
+      - tests/test_versioning_schema.py
+    stats:
+      files_changed: 0
+      insertions: 1134
+      deletions: 233
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/commands.md
+      - docs/quickstart.md
+      - releaseledger/cli.py
+      - releaseledger/documentation.py
+      - releaseledger/ledgercore_backend.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/config.py
+      - releaseledger/services/entry_prompt.py
+      - releaseledger/services/git_sources.py
+      - releaseledger/services/project_state.py
+      - releaseledger/services/releases.py
+      - releaseledger/services/review.py
+      - releaseledger/storage/store.py
+      - skills/releaseledger/SKILL.md
+      - tests/test_branch.py
+      - tests/test_changelog_full_build.py
+      - tests/test_commit_audit.py
+      - tests/test_commit_audit_cli.py
+      - tests/test_documentation_commands.py
+      - tests/test_entry_atomicity.py
+      - tests/test_git_cli.py
+      - tests/test_git_review.py
+      - tests/test_git_sources.py
+      - tests/test_index_binding.py
+      - tests/test_project_state.py
+      - tests/test_release_review.py
+      - tests/test_removed_features.py
+      - tests/test_status_transitions_cli.py
+      - tests/test_versioning_schema.py
+    observed_behavior:
+      Reviewed the complete patch and its regression tests. The release
+      workflow now uses canonical entry apply and changelog build commands, preparation
+      workspaces are version-scoped and refreshable, release checks require an explicit
+      proposed date before finalization, single-release builds require an explicit policy
+      for non-empty Unreleased content, and documentation command examples can be linted.
+      Snapshot drift reporting and index-cache binding validation were also covered
+      by the implementation and tests.
+    public_impact: public
+    decision: accepted
+    evidence_subject: "feat: improved skill and commands"
+    target_entry_id: entry-0001
+    notes:
+      One accepted changelog entry will own coverage for this commit; the summary
+      must be written from the reviewed behavior rather than the commit subject.
