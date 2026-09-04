@@ -1,0 +1,39 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.4.5
+git_base_ref: 0596416aef19d5d2a46acb22541fff846fa7c0f8
+git_base_sha: 0596416aef19d5d2a46acb22541fff846fa7c0f8
+git_head_ref: 19aef143a369ddd045cff8f5cbe4b09d363d58c2
+git_head_sha: 19aef143a369ddd045cff8f5cbe4b09d363d58c2
+include_merges: nontrivial
+entries:
+  - kind: added
+    summary: Added release refresh for updating Git snapshots and surfacing pending audit decisions
+    status: accepted
+    source_refs:
+      - git:19aef143a369ddd045cff8f5cbe4b09d363d58c2
+    paths:
+      - releaseledger/cli.py
+      - releaseledger/services/releases.py
+      - releaseledger/services/audit.py
+      - docs/commands.md
+  - kind: changed
+    summary: Changed release checks and tag imports to support target-scoped readiness and explicit history ranges
+    status: accepted
+    sources:
+      - git:19aef143a369ddd045cff8f5cbe4b09d363d58c2
+    paths:
+      - releaseledger/services/review.py
+      - releaseledger/services/releases.py
+      - releaseledger/services/changelog_build.py
+  - kind: quality
+    summary: Improved changelog and entry validation with canonical ordering, separate empty-section controls, and kind-aware linting
+    status: accepted
+    sources:
+      - git:19aef143a369ddd045cff8f5cbe4b09d363d58c2
+    paths:
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/entry_lint.py
+      - tests/test_entry_lint.py

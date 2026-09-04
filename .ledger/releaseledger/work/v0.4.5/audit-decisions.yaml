@@ -1,0 +1,40 @@
+rows:
+  - sha: 19aef143a369ddd045cff8f5cbe4b09d363d58c2
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/commands.generated.md
+      - docs/commands.md
+      - releaseledger/cli.py
+      - releaseledger/command_registry.py
+      - releaseledger/domain/audit.py
+      - releaseledger/domain/release.py
+      - releaseledger/protocol.py
+      - releaseledger/services/audit.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/entry_lint.py
+      - releaseledger/services/project_state.py
+      - releaseledger/services/releases.py
+      - releaseledger/services/review.py
+      - tests/test_commit_audit_cli.py
+      - tests/test_entry_lint.py
+      - tests/test_git_cli.py
+      - tests/test_release_reconcile.py
+      - tests/test_release_replace.py
+      - tests/test_release_review.py
+      - tests/test_releaseledger_skill_protocol.py
+      - tests/test_removed_features.py
+      - tests/test_version_correction_workflow.py
+    observed_behavior: >-
+      The patch adds a release refresh workflow that updates the stored Git
+      snapshot, preserves reviewed audit annotations, marks changed rows stale,
+      and emits pending decisions. It also adds scoped tag import, target versus
+      full-history readiness reporting, stricter changelog coverage and ordering,
+      kind-aware entry linting, protocol diagnostics, and matching CLI,
+      documentation, skill, and regression-test coverage.
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: Reviewed the complete patch and its added regression tests.
+    stale: false

@@ -1,0 +1,48 @@
+{
+  "candidate_count": 1,
+  "candidates": [
+    {
+      "additions": 1020,
+      "deletions": 86,
+      "patch_file": "19aef14.patch",
+      "patch_sha256": "dfdc6a369f2cca5977682e747120028eebc7fb9ffb21fd65421bcdaad7a8b619",
+      "paths": [
+        "README.md",
+        "docs/commands.generated.md",
+        "docs/commands.md",
+        "releaseledger/cli.py",
+        "releaseledger/command_registry.py",
+        "releaseledger/domain/audit.py",
+        "releaseledger/domain/release.py",
+        "releaseledger/protocol.py",
+        "releaseledger/services/audit.py",
+        "releaseledger/services/changelog_build.py",
+        "releaseledger/services/entry_lint.py",
+        "releaseledger/services/project_state.py",
+        "releaseledger/services/releases.py",
+        "releaseledger/services/review.py",
+        "skills/releaseledger/SKILL.md",
+        "tests/test_commit_audit_cli.py",
+        "tests/test_entry_lint.py",
+        "tests/test_git_cli.py",
+        "tests/test_release_reconcile.py",
+        "tests/test_release_replace.py",
+        "tests/test_release_review.py",
+        "tests/test_releaseledger_skill_protocol.py",
+        "tests/test_removed_features.py",
+        "tests/test_version_correction_workflow.py"
+      ],
+      "sha": "19aef143a369ddd045cff8f5cbe4b09d363d58c2",
+      "short_sha": "19aef14",
+      "source_ref": "git:19aef143a369ddd045cff8f5cbe4b09d363d58c2"
+    }
+  ],
+  "git_base_ref": "0596416aef19d5d2a46acb22541fff846fa7c0f8",
+  "git_base_sha": "0596416aef19d5d2a46acb22541fff846fa7c0f8",
+  "git_head_ref": "19aef143a369ddd045cff8f5cbe4b09d363d58c2",
+  "git_head_sha": "19aef143a369ddd045cff8f5cbe4b09d363d58c2",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.4.5",
+  "schema_version": 1
+}

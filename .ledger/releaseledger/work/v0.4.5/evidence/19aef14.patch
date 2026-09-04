@@ -1,0 +1,2185 @@
+ README.md                                  |   4 +
+ docs/commands.generated.md                 |   1 +
+ docs/commands.md                           |   7 +
+ releaseledger/cli.py                       | 135 +++++++++++++++++-
+ releaseledger/command_registry.py          |   1 +
+ releaseledger/domain/audit.py              |  10 ++
+ releaseledger/domain/release.py            |  11 ++
+ releaseledger/protocol.py                  |  51 +++++++
+ releaseledger/services/audit.py            |  72 ++++++++--
+ releaseledger/services/changelog_build.py  | 100 ++++++++++---
+ releaseledger/services/entry_lint.py       |  42 +++++-
+ releaseledger/services/project_state.py    |  19 +++
+ releaseledger/services/releases.py         | 154 +++++++++++++++++++-
+ releaseledger/services/review.py           | 216 +++++++++++++++++++++++++----
+ skills/releaseledger/SKILL.md              |  46 ++++--
+ tests/test_commit_audit_cli.py             |  72 ++++++++++
+ tests/test_entry_lint.py                   |  38 +++++
+ tests/test_git_cli.py                      |  28 +++-
+ tests/test_release_reconcile.py            |  15 ++
+ tests/test_release_replace.py              |  42 +++++-
+ tests/test_release_review.py               |  33 +++++
+ tests/test_releaseledger_skill_protocol.py |   3 +-
+ tests/test_removed_features.py             |   4 +-
+ tests/test_version_correction_workflow.py  |   2 +
+ 24 files changed, 1020 insertions(+), 86 deletions(-)
+
+diff --git a/README.md b/README.md
+index 774404c..fc5ba85 100644
+--- a/README.md
++++ b/README.md
+@@ -152,6 +152,7 @@ releaseledger release create VERSION [--title TEXT] [--status STATUS]
+                                      [--source-count N]
+ releaseledger release update VERSION [same metadata options]
+                                      [--clear-previous]
++                                       [--history-state discovered|audited|curated]
+                                      [--clear-changelog-file]
+                                      [--clear-boundary-ref]
+                                      [--clear-source-refs]
+@@ -165,6 +166,8 @@ releaseledger release prepare VERSION [--previous VERSION]
+                                       [--git-base REF] [--git-head REF]
+                                       [--output-dir PATH]
+ releaseledger release check VERSION [--target-file PATH] [--strict]
++releaseledger release refresh VERSION --head REF [--base REF]
++                                      [--decisions-output PATH] [--allow-remove]
+ releaseledger release cancel VERSION [--reason TEXT]
+                                     [--superseded-by VERSION]
+                                     [--force-released-unshipped]
+@@ -181,6 +184,7 @@ releaseledger release rename OLD_VERSION NEW_VERSION [--previous VERSION]
+                                                       [--replace-existing-section]
+ releaseledger release chain check
+ releaseledger release chain repair [--dry-run] [--apply]
++releaseledger release import-tags [--version VERSION | --since VERSION | --until VERSION] [--apply]
+ releaseledger release list
+ releaseledger release show VERSION
+
+diff --git a/docs/commands.generated.md b/docs/commands.generated.md
+index 535436c..9ba585c 100644
+--- a/docs/commands.generated.md
++++ b/docs/commands.generated.md
+@@ -59,6 +59,7 @@
+ | `release list`             | read             | stable     | —                                       |
+ | `release prepare`          | external-write   | stable     | —                                       |
+ | `release reconcile`        | read             | stable     | —                                       |
++| `release refresh`          | ledger-write     | stable     | —                                       |
+ | `release rename`           | ledger-write     | stable     | —                                       |
+ | `release restore`          | ledger-write     | stable     | —                                       |
+ | `release review`           | read             | stable     | review                                  |
+diff --git a/docs/commands.md b/docs/commands.md
+index d2fac5b..988cf8a 100644
+--- a/docs/commands.md
++++ b/docs/commands.md
+@@ -87,6 +87,8 @@ releaseledger release restore VERSION --reason TEXT [--to STATUS]
+                                       [--from-tag TAG] [--git-base REF]
+                                       [--previous VERSION] [--clear-previous]
+                                       [--released-at YYYY-MM-DD] [--dry-run]
++releaseledger release refresh VERSION [--head REF] [--base REF]
++                                      [--decisions-output PATH] [--allow-remove]
+ releaseledger release prepare VERSION [--previous VERSION]
+                                       [--released-at YYYY-MM-DD]
+                                       [--git-base REF] [--git-head REF]
+@@ -116,6 +118,7 @@ releaseledger release rename OLD_VERSION NEW_VERSION [--previous VERSION]
+                                                       [--reason TEXT] [--dry-run]
+ releaseledger release chain check
+ releaseledger release chain repair [--dry-run] [--apply]
++releaseledger release import-tags [--version VERSION | --since VERSION | --until VERSION] [--apply]
+ releaseledger release chain check [--strict]
+ releaseledger release reconcile [--strict] [--target-file PATH]
+ releaseledger release list
+@@ -241,6 +244,10 @@ named changelog template profile.
+ `build` never invents entries from git commits. Git commit ranges require
+ `git scaffold` / audit / entry curation before a strict build can pass.
+
++### Current release refresh
++
++`releaseledger release refresh VERSION --head HEAD` updates the stored Git snapshot, refreshes the audit worksheet while preserving reviewed rows, and reports preserved, new, stale, and pending work. Add `--decisions-output PATH` to write a pending-only YAML worksheet. Use targeted builds and checks for routine release work. `release import-tags` is preview-only unless `--apply` is supplied; use `--version`, `--since`, or `--until` when importing historical metadata.
++
+ ### Full changelog rebuild
+
+ `releaseledger changelog build` with no `VERSION` (or `releaseledger changelog build --all`)
+diff --git a/releaseledger/cli.py b/releaseledger/cli.py
+index 5afae88..a5271af 100644
+--- a/releaseledger/cli.py
++++ b/releaseledger/cli.py
+@@ -108,6 +108,7 @@ from releaseledger.services.releases import (
+     list_release_records,
+     prepare_release,
+     reconcile_releases,
++    refresh_release,
+     remove_changelog_section,
+     rename_changelog_section,
+     rename_release,
+@@ -659,6 +660,10 @@ def release_update_command(
+     version: Annotated[str, typer.Argument(help="Release version string.")],
+     title: Annotated[str | None, typer.Option("--title")] = None,
+     status: Annotated[str | None, typer.Option("--status")] = None,
++    history_state: Annotated[
++        str | None,
++        typer.Option("--history-state", help="discovered|audited|curated."),
++    ] = None,
+     note: Annotated[str | None, typer.Option("--note")] = None,
+     previous_version: Annotated[str | None, typer.Option("--previous")] = None,
+     changelog_file: Annotated[str | None, typer.Option("--changelog-file")] = None,
+@@ -740,6 +745,7 @@ def release_update_command(
+         ) or any(
+             (
+                 clear_previous,
++                history_state,
+                 clear_changelog_file,
+                 clear_boundary_ref,
+                 clear_source_refs,
+@@ -793,6 +799,7 @@ def release_update_command(
+         result = update_release(
+             _paths(ctx).workspace_root,
+             version=version,
++            history_state=history_state,
+             title=title,
+             status=status,
+             note=note,
+@@ -902,6 +909,58 @@ def release_finalize_command(
+     )
+
+
++@release_app.command("refresh")
++def release_refresh_command(
++    ctx: typer.Context,
++    version: Annotated[str, typer.Argument(help="Release version string.")],
++    git_head: Annotated[
++        str,
++        typer.Option("--head", help="Git head ref to attach to the release."),
++    ] = GIT_DEFAULT_HEAD,
++    git_base: Annotated[
++        str | None,
++        typer.Option("--base", help="Git base ref override."),
++    ] = None,
++    decisions_output: Annotated[
++        Path | None,
++        typer.Option("--decisions-output", help="Write pending decisions YAML."),
++    ] = None,
++    allow_remove: Annotated[
++        bool,
++        typer.Option("--allow-remove", help="Allow rows removed by a rewritten range."),
++    ] = False,
++) -> None:
++    """Refresh the release snapshot, audit sheet, and pending decisions."""
++    state = cli_state_from_context(ctx)
++
++    def produce() -> CommandResult:
++        result = refresh_release(
++            _paths(ctx).workspace_root,
++            version=version,
++            git_head=git_head,
++            git_base=git_base,
++            decisions_output=decisions_output,
++            allow_remove=allow_remove,
++        )
++        human = (
++            f"refreshed {version}: old head {result.get('old_head') or '(none)'} "
++            f"-> {result.get('new_head')}"
++            f"; preserved {result['preserved_reviewed_rows']}, "
++            f"new {result['new_rows']}, stale {result['stale_rows']}, "
++            f"pending {result['pending_rows']}"
++        )
++        return result, _event_ids(result), human
++
++    run_command(
++        command="release.refresh",
++        result_type="release_refresh",
++        json_output=state.json_output,
++        produce=produce,
++        workspace_root=_paths(ctx).workspace_root,
++        mutating=True,
++    )
++
++
+ @release_app.command("restore")
+ def release_restore_command(
+     ctx: typer.Context,
+@@ -1174,12 +1233,30 @@ def release_import_tags_command(
+             help="Create missing release records. Without this flag, only dry-run.",
+         ),
+     ] = False,
++    version: Annotated[
++        str | None,
++        typer.Option("--version", help="Import only this tag version."),
++    ] = None,
++    since: Annotated[
++        str | None,
++        typer.Option("--since", help="Import tags from this version onward."),
++    ] = None,
++    until: Annotated[
++        str | None,
++        typer.Option("--until", help="Import tags through this version."),
++    ] = None,
+ ) -> None:
+     """Discover semver git tags and create missing release records."""
+     state = cli_state_from_context(ctx)
+
+     def produce() -> CommandResult:
+-        result = import_tags(_paths(ctx).workspace_root, apply=apply)
++        result = import_tags(
++            _paths(ctx).workspace_root,
++            apply=apply,
++            version=version,
++            since=since,
++            until=until,
++        )
+         planned = [
+             e
+             for e in result.get("plans", [])  # type: ignore[attr-defined]
+@@ -1241,6 +1318,13 @@ def release_check_command(
+             help="Proposed release date for --phase finalize.",
+         ),
+     ] = None,
++    history_scope: Annotated[
++        str,
++        typer.Option(
++            "--history-scope",
++            help="Validation scope: target (default) or full history.",
++        ),
++    ] = "target",
+ ) -> None:
+     """Run the consolidated read-only release gate."""
+     state = cli_state_from_context(ctx)
+@@ -1262,6 +1346,7 @@ def release_check_command(
+             git=True,
+             require_audit_sheet=require_audit_sheet,
+             include_history_health=True,
++            history_scope=history_scope,
+             phase=phase,
+             proposed_released_at=released_at,
+         )
+@@ -2483,6 +2568,13 @@ def review_command(
+             help="Require a commit audit sheet; gate when absent or incomplete.",
+         ),
+     ] = False,
++    history_scope: Annotated[
++        str,
++        typer.Option(
++            "--history-scope",
++            help="Validation scope: target (default) or full history.",
++        ),
++    ] = "target",
+     acknowledge_changelog_change: Annotated[
+         bool,
+         typer.Option(
+@@ -2508,6 +2600,7 @@ def review_command(
+             git_base=git_base,
+             git_head=git_head,
+             require_audit_sheet=require_audit_sheet,
++            history_scope=history_scope,
+             acknowledge_changelog_change=acknowledge_changelog_change,
+         )
+     except ReleaseledgerError as exc:
+@@ -2636,6 +2729,11 @@ def _render_review_human(version: str, result: dict[str, object]) -> str:
+         for rec in recommendations:
+             lines.append(f"  - {rec}")
+
++    lines.append(
++        f"Health scope: {result.get('scope', 'target')}; "
++        f"target_ready={result.get('target_ready', False)}; "
++        f"history_ready={result.get('history_ready', False)}"
++    )
+     lines.append("")
+     lines.append(f"Result: {'OK' if result.get('ok') else 'FAIL'}")
+     return "\n".join(lines)
+@@ -2668,6 +2766,14 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
+         if isinstance(complete, dict):
+             audit_complete_ok = bool(complete.get("ok", False))
+     lines = [f"RELEASE CHECK {version}", ""]
++    scope = str(result.get("scope", "target"))
++    history_findings = int(result.get("history_findings", 0))
++    lines.append(
++        f"Scope           {scope}  target_ready={result.get('target_ready', False)} "
++        f"history_ready={result.get('history_ready', False)}"
++    )
++    if history_findings:
++        lines.append(f"History health  WARN  {history_findings} unrelated finding(s)")
+     lines.append(
+         f"Snapshot        {'OK' if git_block else 'WARN'}  "
+         + (
+@@ -2861,7 +2967,14 @@ def build_command(
+         list[str] | None, typer.Option("--include-status")
+     ] = None,
+     strict: Annotated[bool, typer.Option("--strict")] = False,
+-    allow_empty: Annotated[bool, typer.Option("--allow-empty")] = False,
++    allow_empty_sections: Annotated[
++        bool,
++        typer.Option("--allow-empty-sections", help="Allow empty rendered sections."),
++    ] = False,
++    allow_empty: Annotated[
++        bool,
++        typer.Option("--allow-empty", hidden=True),
++    ] = False,
+ ) -> None:
+     """Build or rebuild CHANGELOG.md.
+
+@@ -2869,6 +2982,11 @@ def build_command(
+     --all, rebuild the complete target file from ledger state.
+     """
+     state = cli_state_from_context(ctx)
++    if allow_empty:
++        add_cli_warning(
++            deprecated_option_warning("--allow-empty", "--allow-empty-sections")
++        )
++        allow_empty_sections = True
+     if target_file is not None and output is None:
+         add_cli_warning(deprecated_option_warning("--target-file", "--output"))
+     target_file = output or target_file
+@@ -2923,7 +3041,7 @@ def build_command(
+                     include_release_statuses or ("released",)
+                 ),
+                 strict=strict,
+-                allow_empty=allow_empty,
++                allow_empty_sections=allow_empty_sections,
+                 preserve_unreleased=preserve_unreleased,
+                 unreleased_version=unreleased_version,
+             )
+@@ -2943,7 +3061,7 @@ def build_command(
+                 include_canceled=include_canceled,
+                 include_statuses=tuple(include_statuses or ("accepted",)),
+                 strict=strict,
+-                allow_empty=allow_empty,
++                allow_empty_sections=allow_empty_sections,
+             )
+     except ReleaseledgerError as exc:
+         emit_error(command="changelog build", error=exc, json_output=state.json_output)
+@@ -4681,6 +4799,13 @@ def audit_decisions_command(
+         Path,
+         typer.Option("--output", help="YAML worksheet path to write."),
+     ],
++    pending_only: Annotated[
++        bool,
++        typer.Option(
++            "--pending-only",
++            help="Emit only uninspected, incomplete, stale, or unresolved rows.",
++        ),
++    ] = False,
+ ) -> None:
+     """Generate a curated commit-audit decisions worksheet."""
+     state = cli_state_from_context(ctx)
+@@ -4690,6 +4815,7 @@ def audit_decisions_command(
+         template = render_commit_audit_decisions_template(
+             _paths(ctx).workspace_root,
+             version=version,
++            pending_only=pending_only,
+         )
+         text = _yaml.safe_dump(
+             template,
+@@ -4706,6 +4832,7 @@ def audit_decisions_command(
+         "version": version,
+         "output": str(written),
+         "row_count": len(template_rows) if isinstance(template_rows, list) else 0,
++        "pending_only": pending_only,
+     }
+     emit_payload(
+         command="audit.decisions",
+diff --git a/releaseledger/command_registry.py b/releaseledger/command_registry.py
+index ca43cf7..73aaee8 100644
+--- a/releaseledger/command_registry.py
++++ b/releaseledger/command_registry.py
+@@ -69,6 +69,7 @@ def build_command_inventory() -> CommandInventory:
+         ("finalize", "Finalize a release.", "ledger-write"),
+         ("restore", "Restore a canceled release.", "ledger-write"),
+         ("prepare", "Prepare release artifacts.", "external-write"),
++        ("refresh", "Refresh release snapshot and audit.", "ledger-write"),
+         ("list", "List releases."),
+         ("show", "Show one release."),
+         ("review", "Review release coverage and readiness.", "read", ("review",)),
+diff --git a/releaseledger/domain/audit.py b/releaseledger/domain/audit.py
+index 4dd5d26..fec9a9a 100644
+--- a/releaseledger/domain/audit.py
++++ b/releaseledger/domain/audit.py
+@@ -84,6 +84,7 @@ class CommitAuditRow:
+     target_entry_key: str | None = None
+     target_entry_id: str | None = None
+     notes: str | None = None
++    stale: bool = False
+
+
+ @dataclass(frozen=True, slots=True)
+@@ -264,6 +265,13 @@ def _row_from_dict(value: object) -> CommitAuditRow:
+         value.get("target_entry_id"), "target_entry_id"
+     )
+     notes = _require_optional_str(value.get("notes"), "notes")
++    stale_raw = value.get("stale", False)
++    if not isinstance(stale_raw, bool):
++        raise LaunchError(
++            "Audit field 'stale' must be a boolean.",
++            code=CODE_VALIDATION_ERROR,
++            exit_code=2,
++        )
+     return CommitAuditRow(
+         sha=sha,
+         source_ref=source_ref,
+@@ -279,6 +287,7 @@ def _row_from_dict(value: object) -> CommitAuditRow:
+         target_entry_key=target_entry_key,
+         target_entry_id=target_entry_id,
+         notes=notes,
++        stale=stale_raw,
+     )
+
+
+@@ -379,6 +388,7 @@ def _row_to_dict(row: CommitAuditRow) -> dict[str, object]:
+         "observed_behavior": row.observed_behavior,
+         "public_impact": row.public_impact,
+         "decision": row.decision,
++        "stale": row.stale,
+     }
+     if row.evidence_subject is not None:
+         data["evidence_subject"] = row.evidence_subject
+diff --git a/releaseledger/domain/release.py b/releaseledger/domain/release.py
+index f8af5e8..18a2751 100644
+--- a/releaseledger/domain/release.py
++++ b/releaseledger/domain/release.py
+@@ -38,6 +38,7 @@ RELEASE_FRONT_MATTER_KEY_ORDER = (
+     "versioning",
+     "version",
+     "status",
++    "history_state",
+     "title",
+     "released_at",
+     "previous_version",
+@@ -64,6 +65,7 @@ class ReleaseRecord:
+
+     version: str
+     status: str = "planned"
++    history_state: str = "curated"
+     title: str | None = None
+     versioning: RecordVersioning = field(default_factory=initial_versioning)
+     released_at: str | None = None
+@@ -95,6 +97,7 @@ class ReleaseRecord:
+             "version": self.version,
+             "status": self.status,
+             "title": self.title,
++            "history_state": self.history_state,
+             "released_at": self.released_at,
+             "previous_version": self.previous_version,
+             "cancel_reason": self.cancel_reason,
+@@ -297,10 +300,18 @@ def release_from_dict(data: dict[str, object]) -> ReleaseRecord:
+             code=CODE_VALIDATION_ERROR,
+             exit_code=2,
+         )
++    history_state = data.get("history_state", "curated")
++    if history_state not in {"discovered", "audited", "curated"}:
++        raise LaunchError(
++            f"Unsupported release history_state: {history_state!r}",
++            code=CODE_VALIDATION_ERROR,
++            exit_code=2,
++        )
+     return ReleaseRecord(
+         version=version,
+         status=status,
+         title=_require_optional_str(data.get("title"), "title"),
++        history_state=history_state,
+         versioning=versioning_from_dict(data.get("versioning")),
+         released_at=_require_optional_str(data.get("released_at"), "released_at"),
+         previous_version=_require_optional_str(
+diff --git a/releaseledger/protocol.py b/releaseledger/protocol.py
+new file mode 100644
+index 0000000..ec5c84f
+--- /dev/null
++++ b/releaseledger/protocol.py
+@@ -0,0 +1,51 @@
++"""CLI and external skill protocol compatibility metadata."""
++
++from __future__ import annotations
++
++from pathlib import Path
++from typing import Any
++
++import yaml
++
++SKILL_PROTOCOL_VERSION = 2
++
++
++def skill_path(workspace_root: Path) -> Path | None:
++    """Find the repository's external releaseledger skill."""
++    candidates = (
++        workspace_root / "skills" / "releaseledger" / "SKILL.md",
++        Path(__file__).resolve().parents[1] / "skills" / "releaseledger" / "SKILL.md",
++    )
++    return next((candidate for candidate in candidates if candidate.is_file()), None)
++
++
++def skill_protocol(path: Path | None) -> int | None:
++    """Read the protocol field from a skill front matter block."""
++    if path is None:
++        return None
++    text = path.read_text(encoding="utf-8")
++    if not text.startswith("---"):
++        return None
++    end = text.find("\n---", 3)
++    if end < 0:
++        return None
++    metadata: Any = yaml.safe_load(text[3:end])
++    if not isinstance(metadata, dict):
++        return None
++    value = metadata.get("protocol")
++    return value if isinstance(value, int) and not isinstance(value, bool) else None
++
++
++def protocol_diagnostics(workspace_root: Path) -> dict[str, object]:
++    """Return deterministic CLI/skill compatibility diagnostics."""
++    path = skill_path(workspace_root)
++    protocol = skill_protocol(path)
++    return {
++        "releaseledger_version": __import__(
++            "releaseledger", fromlist=["__version__"]
++        ).__version__,
++        "skill_protocol": SKILL_PROTOCOL_VERSION,
++        "skill_path": str(path) if path is not None else None,
++        "skill_declared_protocol": protocol,
++        "skill_matches_cli": protocol == SKILL_PROTOCOL_VERSION,
++    }
+diff --git a/releaseledger/services/audit.py b/releaseledger/services/audit.py
+index c0fc3b9..bc5b4b0 100644
+--- a/releaseledger/services/audit.py
++++ b/releaseledger/services/audit.py
+@@ -76,6 +76,7 @@ _MUTABLE_ROW_FIELDS = frozenset(
+         "target_entry_key",
+         "target_entry_id",
+         "notes",
++        "stale",
+     }
+ )
+ _COMPLETED_DECISIONS = frozenset({"accepted", "grouped", "internal", "rejected"})
+@@ -137,6 +138,7 @@ def _row_from_candidate(candidate: GitSourceCandidate) -> CommitAuditRow:
+         target_entry_key=None,
+         target_entry_id=None,
+         notes=None,
++        stale=False,
+     )
+
+
+@@ -183,6 +185,13 @@ def _refresh_row_from_existing(
+     fresh = _row_from_candidate(candidate)
+     if existing is None:
+         return fresh
++    stale = existing.stale or any(
++        (
++            fresh.evidence_subject != existing.evidence_subject,
++            fresh.changed_paths != existing.changed_paths,
++            fresh.stats != existing.stats,
++        )
++    )
+     return replace(
+         fresh,
+         inspected=existing.inspected,
+@@ -193,12 +202,22 @@ def _refresh_row_from_existing(
+         target_entry_key=existing.target_entry_key,
+         target_entry_id=existing.target_entry_id,
+         notes=existing.notes,
++        stale=stale,
+     )
+
+
+ def _validate_completed_rows(sheet: CommitAuditSheetRecord) -> list[dict[str, object]]:
+     issues: list[dict[str, object]] = []
+     for row in sheet.rows:
++        if row.stale:
++            issues.append(
++                _row_issue(
++                    row,
++                    field="stale",
++                    code="stale_row",
++                    message="Audit row changed after it was reviewed.",
++                )
++            )
+         if row.decision not in _COMPLETED_DECISIONS:
+             continue
+         if not row.inspected:
+@@ -714,8 +733,9 @@ def render_commit_audit_decisions_template(
+     workspace_root: Path,
+     *,
+     version: str,
++    pending_only: bool = False,
+ ) -> dict[str, object]:
+-    """Return a mutable, directly consumable audit-decision worksheet."""
++    """Return a mutable, round-trip-safe audit-decision worksheet."""
+     workspace_root = workspace_root.expanduser().resolve()
+     resolve_project_paths(workspace_root)
+     sheet = load_commit_audit_sheet(workspace_root, version)
+@@ -726,19 +746,40 @@ def render_commit_audit_decisions_template(
+             exit_code=2,
+             remediation=[f"Run `releaseledger audit init {version}` first."],
+         )
+-    rows = [
+-        {
+-            "sha": row.sha,
+-            "inspected": False,
+-            "inspected_paths": list(row.changed_paths),
+-            "observed_behavior": "",
+-            "public_impact": "unknown",
+-            "decision": "needs_review",
+-            "target_entry_key": None,
+-            "notes": "",
+-        }
+-        for row in sheet.rows
+-    ]
++    entries = load_entries(workspace_root, version)
++    entry_ids = {entry.entry_id for entry in entries}
++    entry_keys = entry_ids | {f"{version}/{entry_id}" for entry_id in entry_ids}
++    rows: list[dict[str, object]] = []
++    for row in sheet.rows:
++        target = row.target_entry_id or row.target_entry_key
++        target_missing = target is not None and target not in entry_keys
++        pending = (
++            not row.inspected
++            or row.decision == "needs_review"
++            or not row.inspected_paths
++            or (
++                row.decision in _COMPLETED_DECISIONS
++                and not row.observed_behavior.strip()
++            )
++            or target_missing
++            or row.stale
++        )
++        if pending_only and not pending:
++            continue
++        rows.append(
++            {
++                "sha": row.sha,
++                "inspected": row.inspected,
++                "inspected_paths": list(row.inspected_paths or row.changed_paths),
++                "observed_behavior": row.observed_behavior,
++                "public_impact": row.public_impact,
++                "decision": row.decision,
++                "target_entry_key": row.target_entry_key,
++                "target_entry_id": row.target_entry_id,
++                "notes": row.notes or "",
++                "stale": row.stale,
++            }
++        )
+     return {"rows": rows}
+
+
+@@ -1007,6 +1048,7 @@ def _build_checks(
+     return {
+         "all_rows_inspected": len(uninspected) == 0,
+         "all_rows_decided": len(needs_review) == 0,
++        "no_stale_rows": not any(issue["code"] == "stale_row" for issue in issues),
+         "all_inspected_rows_have_paths": not any(
+             issue["code"] == "missing_inspected_paths" for issue in issues
+         ),
+@@ -1040,6 +1082,8 @@ def _collect_strict_blockers(
+         blockers.append(f"{len(needs_review)} row(s) need review")
+     if uninspected:
+         blockers.append(f"{len(uninspected)} row(s) not inspected")
++    if any(issue["code"] == "stale_row" for issue in issues):
++        blockers.append("reviewed row(s) changed after refresh")
+     if any(issue["code"] == "missing_inspected_paths" for issue in issues):
+         blockers.append("inspected row(s) are missing inspected_paths")
+     if any(issue["code"] == "empty_observed_behavior" for issue in issues):
+diff --git a/releaseledger/services/changelog_build.py b/releaseledger/services/changelog_build.py
+index dccf6ec..9fe5c44 100644
+--- a/releaseledger/services/changelog_build.py
++++ b/releaseledger/services/changelog_build.py
+@@ -69,6 +69,7 @@ __all__ = [
+     "rename_release_section",
+     "render_changelog_section",
+     "render_full_changelog_document",
++    "reorder_managed_release_sections",
+     "replace_release_section",
+ ]
+
+@@ -791,6 +792,41 @@ def replace_release_section(text: str, version: str, section: str) -> str:
+     return _ensure_final_newline("".join(new_lines))
+
+
++def reorder_managed_release_sections(
++    text: str,
++    releases: list[ReleaseRecord],
++) -> str:
++    """Reassign existing managed release sections to canonical order."""
++    ordered, _warnings = _order_releases_for_changelog(releases)
++    section_spans = [
++        (record.version, find_release_section(text, record.version))
++        for record in ordered
++    ]
++    present = [(version, span) for version, span in section_spans if span is not None]
++    if len(present) < 2:
++        return _ensure_final_newline(text)
++    lines = text.splitlines(keepends=True)
++    slots = sorted((span for _version, span in present), key=lambda span: span.start)
++    source_sections = {
++        version: lines[span.start : span.end] for version, span in present
++    }
++    desired_versions = [version for version, _span in present]
++    desired_versions.sort(
++        key=lambda value: next(
++            index for index, record in enumerate(ordered) if record.version == value
++        )
++    )
++    desired_sections = [source_sections[version] for version in desired_versions]
++    output: list[str] = []
++    cursor = 0
++    for slot, replacement in zip(slots, desired_sections, strict=False):
++        output.extend(lines[cursor : slot.start])
++        output.extend(replacement)
++        cursor = slot.end
++    output.extend(lines[cursor:])
++    return _ensure_final_newline("".join(output))
++
++
+ def remove_release_section(
+     text: str,
+     version: str,
+@@ -1091,7 +1127,6 @@ def _strict_git_range_coverage(
+     entries: list[ReleaseEntryRecord],
+     all_entries: list[ReleaseEntryRecord],
+     include_internal: bool,
+-    allow_empty: bool,
+     statuses: tuple[str, ...],
+ ) -> tuple[list[str], int]:
+     """Enforce git-range commit coverage in strict builds.
+@@ -1126,7 +1161,7 @@ def _strict_git_range_coverage(
+     visible_refs = {ref for entry in entries for ref in entry.source_refs}
+
+     missing = sorted(expected - accepted_refs)
+-    if missing and not allow_empty:
++    if missing:
+         raise LaunchError(
+             f"Strict build for {release.version} has git commits not covered "
+             "by accepted entries: " + ", ".join(missing),
+@@ -1167,7 +1202,7 @@ def _run_strict_build_checks(
+     selected: list[ReleaseEntryRecord],
+     all_entries: list[ReleaseEntryRecord],
+     include_internal: bool,
+-    allow_empty: bool,
++    allow_empty_sections: bool,
+ ) -> tuple[list[str], int]:
+     """Run strict-mode validation checks for build_changelog_file.
+
+@@ -1189,10 +1224,10 @@ def _run_strict_build_checks(
+             code=CODE_VALIDATION_ERROR,
+             exit_code=2,
+         )
+-    if not selected and not allow_empty:
++    if not selected and not allow_empty_sections:
+         raise LaunchError(
+             "Strict build requires at least one included entry; "
+-            "pass --allow-empty to override.",
++            "pass --allow-empty-sections to override.",
+             code=CODE_VALIDATION_ERROR,
+             exit_code=2,
+         )
+@@ -1201,7 +1236,7 @@ def _run_strict_build_checks(
+         release_refs.add(release.boundary_ref)
+     entry_refs = {ref for entry in selected for ref in entry.source_refs}
+     uncovered = sorted(release_refs - entry_refs)
+-    if uncovered and not allow_empty:
++    if uncovered:
+         raise LaunchError(
+             "Strict build has release source refs not referenced by entries: "
+             + ", ".join(uncovered),
+@@ -1216,14 +1251,13 @@ def _run_strict_build_checks(
+         entries=selected,
+         all_entries=all_entries,
+         include_internal=include_internal,
+-        allow_empty=allow_empty,
+         statuses=statuses,
+     )
+     strict_warnings.extend(git_warnings)
+     return strict_warnings, hidden_internal_commit_count
+
+
+-def build_changelog_file(
++def build_changelog_file(  # noqa: C901
+     workspace_root: Path,
+     *,
+     version: str,
+@@ -1238,7 +1272,7 @@ def build_changelog_file(
+     include_canceled: bool = False,
+     include_statuses: tuple[str, ...] = ("accepted",),
+     strict: bool = False,
+-    allow_empty: bool = False,
++    allow_empty_sections: bool = False,
+ ) -> dict[str, object]:
+     """Render and optionally update the target changelog for ``version``.
+
+@@ -1311,7 +1345,7 @@ def build_changelog_file(
+             selected=selected,
+             all_entries=all_entries,
+             include_internal=include_internal,
+-            allow_empty=allow_empty,
++            allow_empty_sections=allow_empty_sections,
+         )
+
+     # In Keep a Changelog mode with strict, require a date for released sections
+@@ -1402,6 +1436,16 @@ def build_changelog_file(
+             existing, section, config=config, version=version
+         )
+
++    managed_releases = [
++        record
++        for record in list_releases(workspace_root)
++        if record.status != "canceled"
++    ]
++    reordered = reorder_managed_release_sections(merged, managed_releases)
++    if reordered != merged:
++        merged = reordered
++        warnings.append("Canonicalized managed release section order.")
++
+     # Update link references if in Keep a Changelog mode
+     is_kac = config.changelog_standard == "keepachangelog-1.1.0"
+     if is_kac and config.changelog_link_references:
+@@ -1665,7 +1709,7 @@ def _validate_folded_unreleased_strict(
+     folded: ReleaseRecord,
+     include_internal: bool,
+     statuses: tuple[str, ...],
+-    allow_empty: bool,
++    allow_empty_sections: bool,
+     warnings: list[str],
+ ) -> None:
+     """Apply strict lint/coverage/entries checks to a folded unreleased release.
+@@ -1694,10 +1738,11 @@ def _validate_folded_unreleased_strict(
+             code=CODE_VALIDATION_ERROR,
+             exit_code=2,
+         )
+-    if not folded_entries and not allow_empty:
++    if not folded_entries and not allow_empty_sections:
+         raise LaunchError(
+             f"Strict full build requires at least one included entry for "
+-            f"folded unreleased {unreleased_version}; pass --allow-empty.",
++            f"folded unreleased {unreleased_version}; "
++            "pass --allow-empty-sections to override.",
+             code=CODE_VALIDATION_ERROR,
+             exit_code=2,
+         )
+@@ -1706,7 +1751,7 @@ def _validate_folded_unreleased_strict(
+         release_refs.add(folded.boundary_ref)
+     entry_refs = {ref for entry in folded_entries for ref in entry.source_refs}
+     uncovered = sorted(release_refs - entry_refs)
+-    if uncovered and not allow_empty:
++    if uncovered:
+         raise LaunchError(
+             f"Strict full build for folded unreleased {unreleased_version} has "
+             "release source refs not referenced by entries: " + ", ".join(uncovered),
+@@ -1773,7 +1818,7 @@ def _validate_complete_history(
+             f"Complete-history validation found {len(missing)} tagged release(s) "
+             f"missing from releaseledger: {missing_str}.\n\n"
+             "Run:\n"
+-            "  releaseledger release import-tags --dry-run\n"
++            "  releaseledger release import-tags\n"
+             "  releaseledger release import-tags --apply\n"
+             "\nThen rebuild.",
+             code=CODE_VALIDATION_ERROR,
+@@ -1797,7 +1842,7 @@ def build_full_changelog_file(  # noqa: C901
+     include_statuses: tuple[str, ...] = ("accepted",),
+     include_release_statuses: tuple[str, ...] = ("released",),
+     strict: bool = False,
+-    allow_empty: bool = False,
++    allow_empty_sections: bool = False,
+     preserve_unreleased: bool = True,
+     unreleased_version: str | None = None,
+     require_complete_history: bool = False,
+@@ -1871,7 +1916,7 @@ def build_full_changelog_file(  # noqa: C901
+                 folded=folded,
+                 include_internal=include_internal,
+                 statuses=statuses,
+-                allow_empty=allow_empty,
++                allow_empty_sections=allow_empty_sections,
+                 warnings=warnings,
+             )
+         rendered_unreleased = render_release_groups_body(
+@@ -1907,6 +1952,20 @@ def build_full_changelog_file(  # noqa: C901
+             )
+
+     for release in selected:
++        if release.history_state == "discovered":
++            if strict:
++                raise LaunchError(
++                    f"Strict full build cannot treat metadata-only release {release.version} "
++                    "as curated changelog history.",
++                    code=CODE_VALIDATION_ERROR,
++                    exit_code=2,
++                    remediation=[
++                        f"Audit and curate {release.version} before a full-history build.",
++                    ],
++                )
++            warnings.append(
++                f"{release.version}: discovered release metadata has no curated history."
++            )
+         version = release.version
+         all_version_entries = load_entries(workspace_root, version)
+         version_entries = [
+@@ -1929,10 +1988,10 @@ def build_full_changelog_file(  # noqa: C901
+                     code=CODE_VALIDATION_ERROR,
+                     exit_code=2,
+                 )
+-            if not version_entries and not allow_empty:
++            if not version_entries and not allow_empty_sections:
+                 raise LaunchError(
+                     f"Strict full build requires at least one included entry "
+-                    f"for {version}; pass --allow-empty to override.",
++                    f"for {version}; pass --allow-empty-sections to override.",
+                     code=CODE_VALIDATION_ERROR,
+                     exit_code=2,
+                 )
+@@ -1948,7 +2007,7 @@ def build_full_changelog_file(  # noqa: C901
+                 release_refs.add(release.boundary_ref)
+             entry_refs = {ref for entry in version_entries for ref in entry.source_refs}
+             uncovered = sorted(release_refs - entry_refs)
+-            if uncovered and not allow_empty:
++            if uncovered:
+                 raise LaunchError(
+                     f"Strict full build for {version} has release source refs not "
+                     "referenced by entries: " + ", ".join(uncovered),
+@@ -1966,7 +2025,6 @@ def build_full_changelog_file(  # noqa: C901
+                 entries=version_entries,
+                 all_entries=all_version_entries,
+                 include_internal=include_internal,
+-                allow_empty=allow_empty,
+                 statuses=statuses,
+             )
+             warnings.extend(git_warnings)
+diff --git a/releaseledger/services/entry_lint.py b/releaseledger/services/entry_lint.py
+index 5f5df1b..6844d91 100644
+--- a/releaseledger/services/entry_lint.py
++++ b/releaseledger/services/entry_lint.py
+@@ -17,6 +17,7 @@ __all__ = [
+     "assert_entry_summary_valid",
+     "lint_entry_records",
+     "lint_release_entries",
++    "validate_entry_record",
+     "validate_entry_summary",
+ ]
+
+@@ -117,6 +118,45 @@ def validate_entry_summary(summary: str) -> list[dict[str, object]]:
+     return issues
+
+
++_KIND_ACTION_PREFIXES = {
++    "added": ("Added ",),
++    "changed": ("Changed ", "Improved "),
++    "deprecated": ("Deprecated ",),
++    "removed": ("Removed ",),
++    "fixed": ("Fixed ",),
++    "security": ("Secured ",),
++    "docs": ("Documented ",),
++    "quality": ("Improved ", "Changed "),
++}
++
++
++def validate_entry_record(entry: ReleaseEntryRecord) -> list[dict[str, object]]:
++    """Validate summary style and its action/kind consistency."""
++    issues = validate_entry_summary(entry.summary)
++    if entry.kind not in {"internal"}:
++        expected = _KIND_ACTION_PREFIXES.get(entry.kind, ())
++        if expected and not entry.summary.startswith(expected):
++            actual = next(
++                (
++                    prefix.rstrip()
++                    for prefix in _ACTION_PREFIXES
++                    if entry.summary.startswith(prefix)
++                ),
++                None,
++            )
++            issues.append(
++                _issue(
++                    "warning",
++                    f"Summary action {actual or 'unknown'} does not match entry kind {entry.kind!r}.",
++                    code="kind_action_mismatch",
++                    expected_actions=[prefix.rstrip() for prefix in expected],
++                    actual_action=actual,
++                    kind=entry.kind,
++                )
++            )
++    return issues
++
++
+ def lint_entry_records(
+     entries: list[ReleaseEntryRecord],
+     *,
+@@ -127,7 +167,7 @@ def lint_entry_records(
+     entry_results: list[dict[str, object]] = []
+     for entry in entries:
+         entry_issues: list[dict[str, object]] = []
+-        for issue in validate_entry_summary(entry.summary):
++        for issue in validate_entry_record(entry):
+             enriched: dict[str, object] = {
+                 **issue,
+                 "entry_id": entry.entry_id,
+diff --git a/releaseledger/services/project_state.py b/releaseledger/services/project_state.py
+index 16dd567..ec914e6 100644
+--- a/releaseledger/services/project_state.py
++++ b/releaseledger/services/project_state.py
+@@ -4,6 +4,7 @@ from __future__ import annotations
+
+ from pathlib import Path
+
++from releaseledger.protocol import protocol_diagnostics
+ from releaseledger.services.config import config_show, storage_where
+ from releaseledger.services.entries import list_release_entries
+ from releaseledger.services.releases import list_release_records
+@@ -186,11 +187,29 @@ def project_doctor(root: Path, *, check: bool = False) -> dict[str, object]:
+             "remediation": [],
+         }
+     )
++    protocol = protocol_diagnostics(root)
++    protocol_matches = bool(protocol["skill_matches_cli"])
++    checks.append(
++        {
++            "code": "skill_protocol",
++            "status": "pass" if protocol_matches else "fail",
++            "message": (
++                "Releaseledger skill protocol matches the CLI."
++                if protocol_matches
++                else "Releaseledger skill protocol does not match the CLI.",
++            ),
++            "remediation": []
++            if protocol_matches
++            else ["Install or update skills/releaseledger/SKILL.md."],
++            "data": protocol,
++        },
++    )
+     passed = all(item["status"] == "pass" for item in checks)
+     result: dict[str, object] = {
+         "kind": "doctor",
+         "ok": passed,
+         "checks": checks,
++        "protocol": protocol,
+         "passed": passed if check else True,
+     }
+     return result
+diff --git a/releaseledger/services/releases.py b/releaseledger/services/releases.py
+index 93f6742..524fcc8 100644
+--- a/releaseledger/services/releases.py
++++ b/releaseledger/services/releases.py
+@@ -447,6 +447,7 @@ def create_release(
+     version: str,
+     title: str | None = None,
+     status: str = "planned",
++    history_state: str = "curated",
+     note: str | None = None,
+     previous_version: str | None = None,
+     changelog_file: str | None = None,
+@@ -463,6 +464,12 @@ def create_release(
+             code=CODE_VALIDATION_ERROR,
+             exit_code=2,
+         )
++    if history_state not in {"discovered", "audited", "curated"}:
++        raise LaunchError(
++            f"Unsupported release history_state: {history_state!r}",
++            code=CODE_VALIDATION_ERROR,
++            exit_code=2,
++        )
+     if released_at is not None:
+         _validate_date(released_at, "--released-at")
+     _validate_released_at_for_status(status, released_at)
+@@ -481,6 +488,7 @@ def create_release(
+     record = ReleaseRecord(
+         version=version,
+         status=status,
++        history_state=history_state,
+         title=title,
+         released_at=released_at,
+         previous_version=previous_version,
+@@ -852,6 +860,7 @@ def update_release(
+     *,
+     version: str,
+     title: str | None = None,
++    history_state: str | None = None,
+     status: str | None = None,
+     note: str | None = None,
+     previous_version: Any = UNSET,
+@@ -888,6 +897,16 @@ def update_release(
+             code=CODE_VALIDATION_ERROR,
+             exit_code=2,
+         )
++    if history_state is not None and history_state not in {
++        "discovered",
++        "audited",
++        "curated",
++    }:
++        raise LaunchError(
++            f"Unsupported release history_state: {history_state!r}",
++            code=CODE_VALIDATION_ERROR,
++            exit_code=2,
++        )
+     _validate_generic_status_transition(existing, status)
+     effective_status = status if status is not None else existing.status
+     if clear_released_at and effective_status == "released" and not force:
+@@ -966,6 +985,9 @@ def update_release(
+     )
+     values: dict[str, object] = {
+         "title": title if title is not None else existing.title,
++        "history_state": history_state
++        if history_state is not None
++        else existing.history_state,
+         "status": status if status is not None else existing.status,
+         "note": note if note is not None else existing.note,
+         "previous_version": resolved_previous,
+@@ -984,6 +1006,9 @@ def update_release(
+         )
+     updated = replace(
+         existing,
++        history_state=history_state
++        if history_state is not None
++        else existing.history_state,
+         title=title if title is not None else existing.title,
+         status=status if status is not None else existing.status,
+         note=note if note is not None else existing.note,
+@@ -1097,6 +1122,76 @@ def show_release(workspace_root: Path, version: str) -> dict[str, object]:
+     return payload
+
+
++def refresh_release(
++    workspace_root: Path,
++    *,
++    version: str,
++    git_head: str = GIT_DEFAULT_HEAD,
++    git_base: str | None = None,
++    decisions_output: Path | None = None,
++    allow_remove: bool = False,
++) -> dict[str, object]:
++    """Refresh a release snapshot and its audit worksheet in one operation."""
++    resolved_version = resolve_release_selector(workspace_root, version)
++    release = load_release(workspace_root, resolved_version)
++    old_head = release.git_head_sha or release.git_head_ref
++    update_kwargs: dict[str, object] = {
++        "version": resolved_version,
++        "git_head_ref": git_head,
++    }
++    if git_base is not None:
++        update_kwargs["git_base_ref"] = git_base
++    update_release(workspace_root, **update_kwargs)  # type: ignore[arg-type]
++    refreshed = load_release(workspace_root, resolved_version)
++    existing_sheet = load_commit_audit_sheet(workspace_root, resolved_version)
++    if existing_sheet is None:
++        audit_result = create_commit_audit_sheet(
++            workspace_root, version=resolved_version
++        )
++        audit_result = dict(audit_result)
++        audit_result.setdefault("preserved_reviewed_rows", 0)
++        audit_result.setdefault("removed_rows", 0)
++        audit_result.setdefault("new_rows", audit_result.get("row_count", 0))
++    else:
++        audit_result = refresh_commit_audit_sheet(
++            workspace_root,
++            version=resolved_version,
++            git_base=git_base,
++            git_head=git_head,
++            allow_remove=allow_remove,
++        )
++    pending = render_commit_audit_decisions_template(
++        workspace_root, version=resolved_version, pending_only=True
++    )
++    pending_rows = pending.get("rows", [])
++    pending_count = len(pending_rows) if isinstance(pending_rows, list) else 0
++    if decisions_output is not None:
++        output = Path(decisions_output)
++        if not output.is_absolute():
++            output = workspace_root / output
++        output.parent.mkdir(parents=True, exist_ok=True)
++        output.write_text(
++            yaml.safe_dump(pending, sort_keys=False, default_flow_style=False),
++            encoding="utf-8",
++        )
++    sheet = load_commit_audit_sheet(workspace_root, resolved_version)
++    stale_count = sum(1 for row in sheet.rows if row.stale) if sheet else 0
++    return {
++        "kind": "release_refresh",
++        "version": refreshed.version,
++        "old_head": old_head,
++        "new_head": refreshed.git_head_sha or refreshed.git_head_ref,
++        "git_base_ref": refreshed.git_base_ref,
++        "git_range": refreshed.git_range,
++        "preserved_reviewed_rows": audit_result.get("preserved_reviewed_rows", 0),
++        "new_rows": audit_result.get("new_rows", 0),
++        "stale_rows": stale_count,
++        "pending_rows": pending_count,
++        "decisions_output": str(decisions_output) if decisions_output else None,
++        "audit": audit_result,
++    }
++
++
+ def prepare_release(
+     workspace_root: Path,
+     *,
+@@ -2114,6 +2209,9 @@ def import_tags(
+     workspace_root: Path,
+     *,
+     apply: bool = False,
++    version: str | None = None,
++    since: str | None = None,
++    until: str | None = None,
+ ) -> dict[str, object]:
+     """Discover Git tags and create only truly missing release identities."""
+     tags_by_identity, tag_dates, _git_result = _load_git_tags(workspace_root)
+@@ -2126,7 +2224,42 @@ def import_tags(
+         semver = parse_release_version_tuple(version_str)
+         return (semver is None, semver or (), version_str)
+
+-    sorted_tags = sorted(tags_by_identity.items(), key=_sort_key)
++    if sum(value is not None for value in (version, since, until)) > 1:
++        raise LaunchError(
++            "Use only one of --version, --since, or --until for tag import.",
++            code=CODE_USAGE_ERROR,
++            exit_code=2,
++        )
++    selected_identity = release_identity_key(version) if version else None
++    lower_identity = release_identity_key(since) if since else None
++    upper_identity = release_identity_key(until) if until else None
++
++    def _within_boundary(identity: str, boundary: str | None, *, lower: bool) -> bool:
++        if boundary is None:
++            return True
++        candidate_semver = parse_release_version_tuple(identity)
++        boundary_semver = parse_release_version_tuple(boundary)
++        if candidate_semver is not None and boundary_semver is not None:
++            return (
++                candidate_semver >= boundary_semver
++                if lower
++                else candidate_semver <= boundary_semver
++            )
++        return identity >= boundary if lower else identity <= boundary
++
++    def _selected(identity: str) -> bool:
++        return (
++            (selected_identity is None or identity == selected_identity)
++            and _within_boundary(identity, lower_identity, lower=True)
++            and _within_boundary(identity, upper_identity, lower=False)
++        )
++
++    selected_tags = {
++        identity: tags
++        for identity, tags in tags_by_identity.items()
++        if _selected(identity)
++    }
++    sorted_tags = sorted(selected_tags.items(), key=_sort_key)
+     earliest_identity: str | None = sorted_tags[0][0] if sorted_tags else None
+
+     def owner_for(identity: str) -> str | None:
+@@ -2214,6 +2347,7 @@ def import_tags(
+                 workspace_root,
+                 version=identity,
+                 status="released",
++                history_state="discovered",
+                 released_at=tag_date or _today(),
+                 previous_version=predecessor,
+             )
+@@ -2235,6 +2369,12 @@ def import_tags(
+         "kind": "release_import_tags",
+         "applied": apply,
+         "discovered_tag_count": len(tags_by_identity),
++        "selected_tag_count": len(selected_tags),
++        "import_scope": {
++            "version": version,
++            "since": since,
++            "until": until,
++        },
+         "existing_release_count": len(existing_versions),
+         "planned_count": len([e for e in planned if e["action"] == "create"]),
+         "applied_count": len(applied_versions),
+@@ -2342,13 +2482,21 @@ def check_release_chain(
+             predecessor = by_version.get(root.previous_version)
+             problems.append(
+                 {
+-                    "kind": "root_has_previous",
++                    "kind": (
++                        "root_has_previous"
++                        if predecessor is not None
++                        else "truncated_history_previous"
++                    ),
+                     "version": root.version,
+                     "previous_version": root.previous_version,
+                     "record_status": root.status,
+                     "predecessor_status": predecessor.status if predecessor else None,
+                     "comparison_basis": "semantic_version",
+-                    "detail": "Earliest semantic release should have no predecessor.",
++                    "detail": (
++                        "Earliest semantic release should have no predecessor."
++                        if predecessor is not None
++                        else "Oldest recorded release references history outside the ledger."
++                    ),
+                 }
+             )
+     problems.sort(key=lambda item: (str(item["kind"]), str(item["version"])))
+diff --git a/releaseledger/services/review.py b/releaseledger/services/review.py
+index c747bbf..bd870e2 100644
+--- a/releaseledger/services/review.py
++++ b/releaseledger/services/review.py
+@@ -28,7 +28,11 @@ from releaseledger.services.git_sources import (
+     release_snapshot_drift_report,
+     resolve_release_snapshot,
+ )
+-from releaseledger.services.releases import check_release_chain, reconcile_releases
++from releaseledger.services.releases import (
++    check_release_chain,
++    list_release_records,
++    reconcile_releases,
++)
+ from releaseledger.storage.store import (
+     load_commit_audit_sheet,
+     load_entries,
+@@ -326,10 +330,11 @@ def _compute_git_coverage(
+
+ def _problem_next_action(
+     problem: dict[str, object], *, target_file: str, version: str
+-) -> dict[str, str] | None:
+-    """Return one deterministic remediation for a reconciliation problem."""
++) -> dict[str, object] | None:
++    """Return one deterministic, explicitly scoped remediation action."""
+     kind = str(problem.get("kind", ""))
+     problem_version = str(problem.get("version", version))
++    scope = str(problem.get("scope", "history"))
+     if kind == "changelog_without_release":
+         return {
+             "code": "remove_stale_changelog_section",
+@@ -337,11 +342,38 @@ def _problem_next_action(
+                 "releaseledger changelog-section remove-section "
+                 f"{problem_version} --target-file {target_file}"
+             ),
++            "mutates": True,
++            "requires_confirmation": True,
++            "scope": scope,
++        }
++    if kind == "tag_without_release":
++        return {
++            "code": "import_release_tag",
++            "command": f"releaseledger release import-tags --version {problem_version} --apply",
++            "mutates": True,
++            "requires_confirmation": True,
++            "scope": scope,
++        }
++    if kind == "planned_with_tag":
++        return {
++            "code": "verify_and_finalize_tagged_release",
++            "command": (
++                f"releaseledger release finalize {problem_version} "
++                "--released-at YYYY-MM-DD"
++            ),
++            "mutates": True,
++            "requires_confirmation": True,
++            "scope": scope,
++            "reason": "Verify that the tag represents the shipped release first.",
+         }
+     if kind == "release_without_tag":
+         return {
+-            "code": "reconcile_release_tag",
+-            "command": "releaseledger release reconcile --strict",
++            "code": "inspect_release_tag_state",
++            "command": f"releaseledger release review {problem_version}",
++            "mutates": False,
++            "reason": "Creating the Git tag is an explicit release decision outside releaseledger.",
++            "requires_confirmation": False,
++            "scope": scope,
+         }
+     if kind in {"released_without_changelog", "release_changelog_date_mismatch"}:
+         return {
+@@ -350,6 +382,9 @@ def _problem_next_action(
+                 f"releaseledger changelog build {problem_version} "
+                 f"--output {target_file} --strict --replace-existing"
+             ),
++            "mutates": True,
++            "requires_confirmation": True,
++            "scope": scope,
+         }
+     if kind in {
+         "missing_previous",
+@@ -358,8 +393,12 @@ def _problem_next_action(
+         "noncanonical_previous",
+     }:
+         return {
+-            "code": "repair_release_chain",
+-            "command": "releaseledger release reconcile --strict",
++            "code": "repair_release_chain_preview",
++            "command": "releaseledger release chain repair --dry-run",
++            "mutates": False,
++            "requires_confirmation": False,
++            "scope": scope,
++            "follow_up": "releaseledger release chain repair --apply",
+         }
+     return None
+
+@@ -373,10 +412,10 @@ def _build_next_actions(
+     audit: dict[str, object] | None,
+     changelog: dict[str, object],
+     checks: dict[str, object],
+-) -> list[dict[str, str]]:
++) -> list[dict[str, object]]:
+     """Build stable, machine-actionable release-check next actions."""
+     target_display = str(target_file or "CHANGELOG.md")
+-    actions: list[dict[str, str]] = []
++    actions: list[dict[str, object]] = []
+
+     for block in (chain, reconciliation):
+         problems = block.get("problems", [])
+@@ -398,6 +437,9 @@ def _build_next_actions(
+                 f"releaseledger changelog build {version} --output "
+                 f"{target_display} --strict"
+             ),
++            "mutates": False,
++            "requires_confirmation": False,
++            "scope": "target",
+         }
+         if action not in actions:
+             actions.append(action)
+@@ -405,6 +447,9 @@ def _build_next_actions(
+         action = {
+             "code": "complete_commit_audit",
+             "command": f"releaseledger audit validate {version} --phase evidence --strict",
++            "mutates": False,
++            "requires_confirmation": False,
++            "scope": "target",
+         }
+         if action not in actions:
+             actions.append(action)
+@@ -412,6 +457,9 @@ def _build_next_actions(
+         action = {
+             "code": "fix_entry_lint",
+             "command": f"releaseledger entry lint {version}",
++            "mutates": False,
++            "requires_confirmation": False,
++            "scope": "target",
+         }
+         if action not in actions:
+             actions.append(action)
+@@ -455,8 +503,51 @@ def _failed_checks(
+     return failed
+
+
++def _scope_health_block(
++    block: dict[str, object],
++    *,
++    version: str,
++    release: ReleaseRecord,
++    records: list[dict[str, object]],
++    history_scope: str,
++) -> dict[str, object]:
++    """Classify repository findings without making unrelated history fatal."""
++    affected = {version}
++    if release.previous_version:
++        affected.add(release.previous_version)
++    for record in records:
++        if str(record.get("previous_version", "")) == version:
++            affected.add(str(record.get("version", "")))
++    raw = block.get("problems", [])
++    problems: list[dict[str, object]] = []
++    for item in raw if isinstance(raw, list) else []:
++        if not isinstance(item, dict):
++            continue
++        related = (
++            str(item.get("version", "")) in affected
++            or str(item.get("previous_version", "")) in affected
++            or str(item.get("expected_previous", "")) in affected
++        )
++        annotated = dict(item)
++        annotated["scope"] = "target" if related else "history"
++        annotated["severity"] = "failure" if related else "warning"
++        problems.append(annotated)
++    target_problems = [item for item in problems if item["scope"] == "target"]
++    history_problems = [item for item in problems if item["scope"] == "history"]
++    result = dict(block)
++    result["problems"] = problems
++    result["problem_count"] = len(problems)
++    result["target_problem_count"] = len(target_problems)
++    result["history_problem_count"] = len(history_problems)
++    result["target_ok"] = not target_problems
++    result["history_ok"] = not history_problems
++    result["ok"] = not target_problems if history_scope == "target" else not problems
++    result["history_scope"] = history_scope
++    return result
++
++
+ def _phase_reconciliation(block: dict[str, object], *, phase: str) -> dict[str, object]:
+-    """Apply release-check phase severity to reconciliation findings."""
++    """Apply release-check phase severity to scoped reconciliation findings."""
+     raw_problems = block.get("problems", [])
+     problems = (
+         [problem for problem in raw_problems if isinstance(problem, dict)]
+@@ -469,13 +560,21 @@ def _phase_reconciliation(block: dict[str, object], *, phase: str) -> dict[str,
+         if phase == "finalize" and kind == "release_without_tag":
+             continue
+         annotated = dict(problem)
+-        annotated["severity"] = "failure"
++        scope = str(annotated.get("scope", "target"))
++        annotated["severity"] = "failure" if scope == "target" else "warning"
+         filtered.append(annotated)
++    target_problems = [
++        problem for problem in filtered if problem.get("scope", "target") == "target"
++    ]
+     result = dict(block)
+     result["phase"] = phase
+     result["problems"] = filtered
+     result["problem_count"] = len(filtered)
+-    result["ok"] = not filtered
++    result["target_problem_count"] = len(target_problems)
++    result["target_ok"] = not target_problems
++    result["ok"] = (
++        not filtered if result.get("history_scope") == "full" else not target_problems
++    )
+     return result
+
+
+@@ -628,6 +727,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+     include_merges: str = "nontrivial",
+     require_audit_sheet: bool = False,
+     include_history_health: bool = False,
++    history_scope: str = "target",
+     phase: str = "current",
+     proposed_released_at: str | None = None,
+     acknowledge_changelog_change: bool = False,
+@@ -655,6 +755,12 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+             code="USAGE_ERROR",
+             exit_code=2,
+         )
++    if history_scope not in {"target", "full"}:
++        raise LaunchError(
++            f"Unsupported history scope {history_scope!r}. Use target or full.",
++            code="USAGE_ERROR",
++            exit_code=2,
++        )
+     workspace_root = workspace_root.expanduser().resolve()
+     release = load_release(workspace_root, version)
+     from releaseledger.storage.config import load_project_config
+@@ -761,17 +867,38 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+         include_statuses=statuses,
+     )
+     lint_summary = _lint_summary(lint_result)
+-    if include_history_health:
+-        chain_block = check_release_chain(workspace_root)
+-        reconciliation_block = reconcile_releases(
+-            workspace_root, changelog_file=target_file
++    if include_history_health or history_scope == "full":
++        records = list_release_records(workspace_root)
++        chain_block = _scope_health_block(
++            check_release_chain(workspace_root),
++            version=version,
++            release=release,
++            records=records,
++            history_scope=history_scope,
++        )
++        reconciliation_block = _scope_health_block(
++            reconcile_releases(workspace_root, changelog_file=target_file),
++            version=version,
++            release=release,
++            records=records,
++            history_scope=history_scope,
+         )
+     else:
+-        chain_block = {"kind": "release_chain_check", "ok": True, "skipped": True}
++        chain_block = {
++            "kind": "release_chain_check",
++            "ok": True,
++            "target_ok": True,
++            "history_ok": True,
++            "skipped": True,
++            "history_scope": history_scope,
++        }
+         reconciliation_block = {
+             "kind": "release_reconcile",
+             "ok": True,
++            "target_ok": True,
++            "history_ok": True,
+             "skipped": True,
++            "history_scope": history_scope,
+         }
+
+     # 7. Changelog dry-run. Try a strict dry-run when requested so the review
+@@ -807,8 +934,20 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+         release_state_ok = release.status == "released" and bool(release.released_at)
+     else:
+         release_state_ok = not (release.released_at and release.status != "released")
+-    chain_ok = bool(chain_block.get("ok", False))
+-    reconciliation_ok = bool(reconciliation_block.get("ok", False))
++    chain_target_ok = bool(chain_block.get("target_ok", chain_block.get("ok", False)))
++    reconciliation_target_ok = bool(
++        reconciliation_block.get("target_ok", reconciliation_block.get("ok", False))
++    )
++    chain_ok = (
++        chain_target_ok
++        if history_scope == "target"
++        else bool(chain_block.get("ok", False))
++    )
++    reconciliation_ok = (
++        reconciliation_target_ok
++        if history_scope == "target"
++        else bool(reconciliation_block.get("ok", False))
++    )
+     snapshot_drift = git_block.get("snapshot_drift") if git_block else None
+     snapshot_ok = not (
+         isinstance(snapshot_drift, dict) and snapshot_drift.get("status") == "drifted"
+@@ -836,13 +975,25 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+     if phase in {"finalize", "published"}:
+         reconciliation_block = _phase_reconciliation(reconciliation_block, phase=phase)
+         reconciliation_ok = bool(reconciliation_block.get("ok", False))
++    chain_target_ok = bool(chain_block.get("target_ok", chain_block.get("ok", False)))
++    reconciliation_target_ok = bool(
++        reconciliation_block.get("target_ok", reconciliation_block.get("ok", False))
++    )
++    chain_history_ok = bool(chain_block.get("history_ok", chain_block.get("ok", False)))
++    reconciliation_history_ok = bool(
++        reconciliation_block.get("history_ok", reconciliation_block.get("ok", False))
++    )
+     checks: dict[str, object] = {
+         "coverage_ok": coverage_ok,
+         "lint_ok": lint_ok,
+         "changelog_ok": changelog_ok,
+         "release_state_ok": release_state_ok,
+         "chain_ok": chain_ok,
++        "chain_target_ok": chain_target_ok,
++        "chain_history_ok": chain_history_ok,
+         "reconciliation_ok": reconciliation_ok,
++        "reconciliation_target_ok": reconciliation_target_ok,
++        "reconciliation_history_ok": reconciliation_history_ok,
+         "snapshot_ok": snapshot_ok,
+         "target_changelog_ok": target_changelog_ok,
+         "audit_evidence_ok": audit_evidence_ok,
+@@ -851,7 +1002,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+     }
+     if git_block is not None:
+         checks["git_coverage_ok"] = git_coverage_ok
+-    ok = (
++    target_ready = (
+         coverage_ok
+         and lint_ok
+         and (
+@@ -859,16 +1010,17 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+             or (
+                 changelog_ok
+                 and release_state_ok
+-                and chain_ok
+-                and reconciliation_ok
++                and chain_target_ok
++                and reconciliation_target_ok
+                 and target_changelog_ok
+             )
+         )
++        and audit_evidence_ok
++        and audit_complete_ok
++        and (not strict or not git_block or git_coverage_ok)
+     )
+-    if strict and git_block is not None:
+-        ok = ok and git_coverage_ok
+-    if audit_block is not None:
+-        ok = ok and audit_evidence_ok and audit_complete_ok
++    history_ready = chain_history_ok and reconciliation_history_ok
++    ok = target_ready if history_scope == "target" else target_ready and history_ready
+
+     recommendations = _build_review_recommendations(
+         coverage=coverage,
+@@ -929,6 +1081,16 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+         "checks": checks,
+         "ok": ok,
+         "strict": strict,
++        "scope": history_scope,
++        "target_ready": target_ready,
++        "history_ready": history_ready,
++        "history_findings": sum(
++            value if isinstance(value, int) else 0
++            for value in (
++                chain_block.get("history_problem_count", 0),
++                reconciliation_block.get("history_problem_count", 0),
++            )
++        ),
+         "include_internal": bool(include_internal),
+         "include_statuses": list(statuses),
+         "phase": phase,
+@@ -1060,7 +1222,7 @@ def _run_changelog_dry_run(
+             replace_existing=False,
+             include_statuses=statuses,
+             strict=strict,
+-            allow_empty=False,
++            allow_empty_sections=False,
+         )
+         block["dry_run_ok"] = True
+         block["section_heading"] = result.get("section_heading")
+diff --git a/skills/releaseledger/SKILL.md b/skills/releaseledger/SKILL.md
+index edafaa4..de4b143 100644
+--- a/skills/releaseledger/SKILL.md
++++ b/skills/releaseledger/SKILL.md
+@@ -1,5 +1,6 @@
+ ---
+ name: releaseledger
++protocol: 2
+ description: Manage project-local release records, release entries, changelog source, and CHANGELOG.md builds
+ license: Apache-2.0
+ compatibility: opencode
+@@ -57,6 +58,7 @@ releaseledger release show VERSION
+ releaseledger release create VERSION
+ releaseledger release update VERSION
+ releaseledger release prepare VERSION
++releaseledger release refresh VERSION --head HEAD [--base REF] [--decisions-output PATH]
+ releaseledger release tag VERSION
+ releaseledger release finalize VERSION
+ releaseledger release restore VERSION --reason TEXT [--from-tag TAG] [--dry-run]
+@@ -82,9 +84,11 @@ releaseledger git import VERSION [--base REF] [--head REF] --output PATH
+ releaseledger git evidence VERSION [--base REF] [--head REF] --output-dir DIR
+ releaseledger audit init VERSION [--base REF] [--head REF] [--overwrite]
+ releaseledger audit show VERSION [--format markdown|json|yaml] [--output PATH]
+-releaseledger audit decisions VERSION --output PATH
++releaseledger audit decisions VERSION --output PATH [--pending-only]
+ releaseledger audit apply VERSION --file PATH [--dry-run]
+ releaseledger audit refresh VERSION [--base REF] [--head REF] [--allow-remove]
++releaseledger release import-tags [--version VERSION | --since VERSION | --until VERSION]
++releaseledger release import-tags --apply [--version VERSION | --since VERSION | --until VERSION]
+ releaseledger audit update VERSION --file PATH
+ releaseledger audit validate VERSION [--phase evidence|complete] [--strict] [--include-internal]
+ releaseledger audit sync VERSION
+@@ -301,7 +305,8 @@ Use this for any git-backed changelog or release-note backfill.
+ 3. Create the sheet with `releaseledger audit init VERSION`.
+ 4. Generate the mutable decisions worksheet with
+    `releaseledger audit decisions VERSION --output audit-decisions.yaml`.
+-   It pre-fills changed paths but never marks a commit inspected.
++   It preserves existing annotations and leaves only new, stale, incomplete, or
++   unresolved rows for review. Add `--pending-only` to emit only those rows.
+ 5. Curate row annotations and run `audit apply --dry-run`; completed decisions
+    must include `inspected: true`, `inspected_paths`, and `observed_behavior`.
+    Apply only after the dry-run reports no evidence deficiencies.
+@@ -316,8 +321,10 @@ Use this for any git-backed changelog or release-note backfill.
+    followed by
+    `releaseledger entry apply VERSION --file entries.yaml --strict --guard-commit-subjects --sync-audit`.
+ 10. Validate the complete phase after entries exist:
+-    `releaseledger audit validate VERSION --phase complete --strict --include-internal`.
+-11. Run `releaseledger release check VERSION --phase finalize --released-at DATE --strict --target-file CHANGELOG.md` before any final build. Use the
++11. Validate the complete public phase after entries exist:
++    `releaseledger audit validate VERSION --phase complete --strict`.
++    Add `--include-internal` only when internal changelog-entry coverage is explicitly requested.
++12. Run `releaseledger release check VERSION --phase finalize --released-at DATE --strict --target-file CHANGELOG.md` before any final build. Use the
+     `published` phase after finalization and tagging.
+
+ `audit init` writes one `needs_review` row per git candidate commit. Decisions
+@@ -391,14 +398,28 @@ If review only passes with `--include-internal`, tell the user that public
+ `CHANGELOG.md` will omit internal-only entries. Use `--include-internal` only for
+ internal release notes.
+
++## Normal current-release protocol
++
++For routine work on one release, keep validation scoped to the target. Do not import unrelated historical tags or rebuild the full changelog.
++
++```text
++1. releaseledger release refresh VERSION --head HEAD --decisions-output pending.yaml
++2. inspect and apply the pending audit decisions
++3. releaseledger entry lint VERSION --strict
++4. releaseledger changelog build VERSION --strict --replace-existing
++5. releaseledger release check VERSION --strict
++```
++
++Use `release refresh` as the orchestration layer. It updates the stored snapshot, preserves reviewed audit rows, reports new and stale rows, and optionally writes a pending-only worksheet.
++
+ ## Complete historical reconstruction protocol
+
+ When the user requests "all versions," "all changes," "full history," or equivalent:
+
+ ```text
+ 1. releaseledger release reconcile --strict
+-2. releaseledger release import-tags --dry-run
+-3. releaseledger release import-tags --apply
++2. releaseledger release import-tags
++   (preview is the default; use --apply only for the explicit mutation)
+ 4. For every release in ascending semantic order:
+    a. verify tag/date/predecessor/range
+    b. initialize or refresh audit sheet
+@@ -406,7 +427,8 @@ When the user requests "all versions," "all changes," "full history," or equival
+    d. curate entries without copying commit subjects
+    e. preserve PR/contributor metadata
+    f. validate audit completeness
+-5. releaseledger changelog build --all --strict --require-complete-history
++5. releaseledger changelog build --all --strict
++   (full-history validation is included by strict full builds)
+ 6. releaseledger release reconcile --strict
+ ```
+
+@@ -455,12 +477,11 @@ generated_sentinel = "<!-- releaseledger:generated-file -->"
+ Use `release import-tags` to discover and backfill git tags:
+
+ ```bash
+-releaseledger release import-tags --dry-run
++releaseledger release import-tags
+ releaseledger release import-tags --apply
+ ```
+
+-This creates released records for every semver tag that does not already have one.
+-The command is idempotent and never overwrites existing records.
++This creates released metadata records for selected semver tags that do not already have one. Use `--version`, `--since`, or `--until` to keep imports narrow. Imported records are marked as discovered metadata, not curated release history. The command is idempotent and never overwrites existing records. A strict full-history build requires discovered records to be audited and curated first.
+
+ ## Release review protocol
+
+@@ -701,7 +722,10 @@ from releaseledger.api.entries import (
+     build_entry_prompt,
+ )
+ from releaseledger.api.review import build_release_review
+-from releaseledger.api.config import load_project_locator, render_default_releaseledger_toml
++from releaseledger.api.config import (
++    load_project_locator,
++    render_default_releaseledger_toml,
++)
+ ```
+
+ Do not couple external code to internal storage paths or private service functions unless the user explicitly requests package development work.
+diff --git a/tests/test_commit_audit_cli.py b/tests/test_commit_audit_cli.py
+index 6264324..c65530a 100644
+--- a/tests/test_commit_audit_cli.py
++++ b/tests/test_commit_audit_cli.py
+@@ -516,6 +516,78 @@ class TestAuditRefresh:
+         assert row["target_entry_key"] == "entry-a"
+
+
++class TestAuditDecisionsTemplate:
++    def test_decisions_round_trip_and_pending_only(self, tmp_path: Path) -> None:
++        repo, sha_a, _sha_b = _seed_range(tmp_path)
++        assert _run(repo, "audit", "init", "0.2.0").exit_code == 0
++        entries = {
++            "entries": [
++                {
++                    "kind": "added",
++                    "summary": "Added the reviewed feature from diff evidence",
++                    "source_refs": [f"git:{sha_a}"],
++                    "status": "accepted",
++                }
++            ]
++        }
++        entries_path = repo / "entries.yaml"
++        entries_path.write_text(yaml.safe_dump(entries))
++        assert (
++            _run(
++                repo, "entry", "add-many", "0.2.0", "--file", str(entries_path)
++            ).exit_code
++            == 0
++        )
++        decisions = {
++            "rows": [
++                {
++                    "sha": sha_a,
++                    "inspected": True,
++                    "inspected_paths": ["a.txt"],
++                    "observed_behavior": "Reviewed behavior for commit A",
++                    "public_impact": "public",
++                    "decision": "accepted",
++                    "target_entry_key": "entry-0001",
++                    "target_entry_id": "entry-0001",
++                    "notes": "Keep this reviewed annotation",
++                }
++            ]
++        }
++        decisions_path = repo / "decisions.yaml"
++        decisions_path.write_text(yaml.safe_dump(decisions))
++        assert (
++            _run(
++                repo, "audit", "apply", "0.2.0", "--file", str(decisions_path)
++            ).exit_code
++            == 0
++        )
++        _commit(repo, "feat: add c", "c.txt")
++        assert _run(repo, "audit", "refresh", "0.2.0", "--head", "HEAD").exit_code == 0
++        full_path = repo / "full-decisions.yaml"
++        full = _run(repo, "audit", "decisions", "0.2.0", "--output", str(full_path))
++        assert full.exit_code == 0, _human_error(full)
++        full_rows = yaml.safe_load(full_path.read_text())["rows"]
++        old = next(row for row in full_rows if row["sha"] == sha_a)
++        assert old["inspected"] is True
++        assert old["target_entry_id"] == "entry-0001"
++        assert old["notes"] == "Keep this reviewed annotation"
++        pending_path = repo / "pending-decisions.yaml"
++        pending = _run(
++            repo,
++            "audit",
++            "decisions",
++            "0.2.0",
++            "--output",
++            str(pending_path),
++            "--pending-only",
++        )
++        assert pending.exit_code == 0, _human_error(pending)
++        pending_rows = yaml.safe_load(pending_path.read_text())["rows"]
++        assert [row["sha"] for row in pending_rows] == [
++            row["sha"] for row in full_rows if row["sha"] != sha_a
++        ]
++
++
+ class TestEntryGuardCommitSubjects:
+     def test_guard_rejects_summary_matching_subject(self, tmp_path: Path) -> None:
+         repo, sha_a, _sha_b = _seed_range(tmp_path)
+diff --git a/tests/test_entry_lint.py b/tests/test_entry_lint.py
+new file mode 100644
+index 0000000..6692033
+--- /dev/null
++++ b/tests/test_entry_lint.py
+@@ -0,0 +1,38 @@
++from __future__ import annotations
++
++from releaseledger.domain.entry import ReleaseEntryRecord
++from releaseledger.services.entry_lint import lint_entry_records, validate_entry_record
++
++
++def _entry(kind: str, summary: str) -> ReleaseEntryRecord:
++    return ReleaseEntryRecord(
++        entry_id="entry-0001",
++        release_version="1.0.0",
++        kind=kind,
++        summary=summary,
++    )
++
++
++def test_changed_entry_rejects_added_action_in_strict_lint() -> None:
++    result = lint_entry_records(
++        [_entry("changed", "Added a feature from reviewed behavior")], strict=True
++    )
++    mismatch = next(
++        issue for issue in result["issues"] if issue["code"] == "kind_action_mismatch"
++    )
++    assert mismatch["severity"] == "warning"
++    assert mismatch["actual_action"] == "Added"
++    assert result["passed"] is False
++
++
++def test_changed_entry_accepts_changed_and_improved_actions() -> None:
++    for summary in ("Changed the feature behavior", "Improved the feature behavior"):
++        issues = validate_entry_record(_entry("changed", summary))
++        assert not any(issue["code"] == "kind_action_mismatch" for issue in issues)
++
++
++def test_summary_helper_remains_kind_agnostic() -> None:
++    result = lint_entry_records(
++        [_entry("changed", "Added a feature from reviewed behavior")], strict=False
++    )
++    assert any(issue["code"] == "kind_action_mismatch" for issue in result["issues"])
+diff --git a/tests/test_git_cli.py b/tests/test_git_cli.py
+index cffeaf1..92d8434 100644
+--- a/tests/test_git_cli.py
++++ b/tests/test_git_cli.py
+@@ -419,6 +419,30 @@ def test_release_prepare_default_workspace_is_versioned_and_refreshable(
+     assert refreshed.exit_code == 0, refreshed.output
+
+
++def test_release_refresh_updates_snapshot_and_pending_decisions(
++    tmp_path: Path,
++) -> None:
++    repo, _sha_a, sha_b = _setup_release(tmp_path)
++    prepared = _jrun(repo, "release", "prepare", "0.2.0")
++    assert prepared["result_type"] == "release_prepare"
++    _commit(repo, "fix: new behavior", "new.txt")
++    output = tmp_path / "pending.yaml"
++    refreshed = _jrun(
++        repo,
++        "release",
++        "refresh",
++        "0.2.0",
++        "--decisions-output",
++        str(output),
++    )
++    result = refreshed["result"]
++    assert result["old_head"] == sha_b
++    assert result["new_rows"] == 1
++    assert result["pending_rows"] == 3
++    pending = yaml.safe_load(output.read_text(encoding="utf-8"))
++    assert len(pending["rows"]) == 3
++
++
+ def test_prepare_to_apply_two_commit_end_to_end(tmp_path: Path) -> None:
+     repo, _sha_a, _sha_b = _setup_release(tmp_path)
+     payload = _jrun(repo, "release", "prepare", "0.2.0")
+@@ -427,7 +451,8 @@ def test_prepare_to_apply_two_commit_end_to_end(tmp_path: Path) -> None:
+     batch = yaml.safe_load(batch_path.read_text(encoding="utf-8"))
+     for index, entry in enumerate(batch["entries"], 1):
+         entry["status"] = "accepted"
+-        entry["summary"] = f"Added user-visible behavior {index}"
++        action = {"added": "Added", "fixed": "Fixed"}[entry["kind"]]
++        entry["summary"] = f"{action} user-visible behavior {index}"
+     batch_path.write_text(yaml.safe_dump(batch, sort_keys=False), encoding="utf-8")
+     applied = _jrun(
+         repo,
+@@ -446,6 +471,7 @@ def test_prepare_to_apply_two_commit_end_to_end(tmp_path: Path) -> None:
+         row["inspected"] = True
+         row["decision"] = "accepted"
+         row["observed_behavior"] = "Reviewed behavior from the patch."
++        row["inspected_paths"] = ["."]
+     decisions_path.write_text(
+         yaml.safe_dump(decisions, sort_keys=False), encoding="utf-8"
+     )
+diff --git a/tests/test_release_reconcile.py b/tests/test_release_reconcile.py
+index a0d52f6..1333102 100644
+--- a/tests/test_release_reconcile.py
++++ b/tests/test_release_reconcile.py
+@@ -11,6 +11,7 @@ from releaseledger.services.releases import (
+     reconcile_releases,
+ )
+ from releaseledger.storage.paths import ensure_canonical_project
++from releaseledger.storage.store import load_release
+
+
+ def test_reconcile_reports_tag_and_changelog_mismatches(
+@@ -160,6 +161,19 @@ def test_import_tags_dry_run(tmp_path: Path, monkeypatch) -> None:
+     assert len(plans) == 3
+
+
++def test_import_tags_can_be_scoped_to_one_version(tmp_path: Path, monkeypatch) -> None:
++    ensure_canonical_project(tmp_path)
++    monkeypatch.setattr(
++        releases_service.subprocess,
++        "run",
++        _tag_run("v0.8.3\nv0.8.4\nv0.9.0\n"),
++    )
++    result = import_tags(tmp_path, version="0.8.4")
++    assert result["selected_tag_count"] == 1
++    assert [plan["version"] for plan in result["plans"]] == ["0.8.4"]
++    assert result["applied_count"] == 0
++
++
+ def test_import_tags_apply(tmp_path: Path, monkeypatch) -> None:
+     """Apply creates release records for missing tags."""
+     ensure_canonical_project(tmp_path)
+@@ -181,6 +195,7 @@ def test_import_tags_apply(tmp_path: Path, monkeypatch) -> None:
+     result = import_tags(tmp_path, apply=True)
+     assert result["applied"] is True
+     assert result["applied_count"] == 2  # 0.2.0 and 0.3.0
++    assert load_release(tmp_path, "0.2.0").history_state == "discovered"
+     assert result["skipped_count"] == 1  # 0.1.0 already existed
+
+
+diff --git a/tests/test_release_replace.py b/tests/test_release_replace.py
+index f457e29..f9e4e7b 100644
+--- a/tests/test_release_replace.py
++++ b/tests/test_release_replace.py
+@@ -7,10 +7,50 @@ import pytest
+
+ from releaseledger.domain.versioning import bump_versioning
+ from releaseledger.errors import LaunchError
++from releaseledger.services.changelog_build import reorder_managed_release_sections
+ from releaseledger.services.entries import add_release_entry
+ from releaseledger.services.releases import create_release, rename_release
+ from releaseledger.storage.paths import ensure_canonical_project
+-from releaseledger.storage.store import load_entries, load_release
++from releaseledger.storage.store import list_releases, load_entries, load_release
++
++
++def test_targeted_reorder_preserves_unreleased_and_custom_sections(
++    tmp_path: Path,
++) -> None:
++    ensure_canonical_project(tmp_path)
++    create_release(
++        tmp_path, version="0.9.0", status="released", released_at="2026-01-01"
++    )
++    create_release(
++        tmp_path,
++        version="0.9.1",
++        status="released",
++        released_at="2026-02-01",
++        previous_version="0.9.0",
++    )
++    create_release(
++        tmp_path,
++        version="0.9.2",
++        status="released",
++        released_at="2026-03-01",
++        previous_version="0.9.1",
++    )
++    text = (
++        "# Changelog\n\n"
++        "custom preamble\n\n"
++        "## [Unreleased]\n\nkeep this\n\n"
++        "## [0.9.0]\n\nold zero\n\n"
++        "## Custom\n\nkeep custom\n\n"
++        "## [0.9.1]\n\none\n"
++    )
++    reordered = reorder_managed_release_sections(text, list_releases(tmp_path))
++    assert reordered.index("## [0.9.1]") < reordered.index("## [0.9.0]")
++    assert "## Custom\n\nkeep custom" in reordered
++    assert "## [Unreleased]\n\nkeep this" in reordered
++    assert (
++        reorder_managed_release_sections(reordered, list_releases(tmp_path))
++        == reordered
++    )
+
+
+ def _fixture(tmp_path: Path) -> None:
+diff --git a/tests/test_release_review.py b/tests/test_release_review.py
+index 6d73ba4..ea06b28 100644
+--- a/tests/test_release_review.py
++++ b/tests/test_release_review.py
+@@ -15,6 +15,8 @@ from pathlib import Path
+ from typer.testing import CliRunner
+
+ from releaseledger.cli import app
++from releaseledger.domain.release import ReleaseRecord
++from releaseledger.services.review import _scope_health_block
+
+ runner = CliRunner()
+
+@@ -85,6 +87,37 @@ def _create_release(
+     assert result.exit_code == 0, result.stdout
+
+
++def test_target_scope_separates_unrelated_history_findings() -> None:
++    release = ReleaseRecord(version="2.0.0", previous_version="1.9.0")
++    block = {
++        "kind": "release_reconcile",
++        "ok": False,
++        "problems": [
++            {"kind": "tag_without_release", "version": "0.1.0"},
++            {"kind": "released_without_changelog", "version": "0.1.0"},
++        ],
++    }
++    target = _scope_health_block(
++        block,
++        version="2.0.0",
++        release=release,
++        records=[],
++        history_scope="target",
++    )
++    assert target["target_ok"] is True
++    assert target["history_ok"] is False
++    assert target["ok"] is True
++    assert target["history_problem_count"] == 2
++    full = _scope_health_block(
++        block,
++        version="2.0.0",
++        release=release,
++        records=[],
++        history_scope="full",
++    )
++    assert full["ok"] is False
++
++
+ # ---------------------------------------------------------------------------
+ # 1. covered
+ # ---------------------------------------------------------------------------
+diff --git a/tests/test_releaseledger_skill_protocol.py b/tests/test_releaseledger_skill_protocol.py
+index 41758c8..85457aa 100644
+--- a/tests/test_releaseledger_skill_protocol.py
++++ b/tests/test_releaseledger_skill_protocol.py
+@@ -35,7 +35,8 @@ def test_skill_disallows_parallel_releaseledger_mutations() -> None:
+ def test_skill_uses_phase_aware_audit_validation_and_release_check() -> None:
+     text = SKILL.read_text(encoding="utf-8")
+     assert "audit validate VERSION --phase evidence --strict" in text
+-    assert "audit validate VERSION --phase complete --strict --include-internal" in text
++    assert "audit validate VERSION --phase complete --strict`" in text
++    assert "--include-internal" in text
+     assert "release check VERSION --strict --target-file CHANGELOG.md" in text
+
+
+diff --git a/tests/test_removed_features.py b/tests/test_removed_features.py
+index fbc06ea..1b21df9 100644
+--- a/tests/test_removed_features.py
++++ b/tests/test_removed_features.py
+@@ -599,11 +599,11 @@ def test_strict_build_empty_and_source_coverage_gates(tmp_path: Path) -> None:
+         "1.0.0",
+         "--dry-run",
+         "--strict",
+-        "--allow-empty",
++        "--allow-empty-sections",
+         "--release-date",
+         "2026-06-14",
+     )
+-    assert allowed.exit_code == 0, allowed.output
++    assert allowed.exit_code != 0
+
+     assert (
+         _run(
+diff --git a/tests/test_version_correction_workflow.py b/tests/test_version_correction_workflow.py
+index 38831f1..0aaa916 100644
+--- a/tests/test_version_correction_workflow.py
++++ b/tests/test_version_correction_workflow.py
+@@ -407,7 +407,9 @@ def test_audit_decisions_command_generates_curatable_template(tmp_path: Path) ->
+                 "public_impact": "unknown",
+                 "decision": "needs_review",
+                 "target_entry_key": None,
++                "target_entry_id": None,
+                 "notes": "",
++                "stale": False,
+             }
+         ]
+     }
