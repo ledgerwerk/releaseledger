@@ -76,6 +76,7 @@ _MUTABLE_ROW_FIELDS = frozenset(
         "target_entry_key",
         "target_entry_id",
         "notes",
+        "stale",
     }
 )
 _COMPLETED_DECISIONS = frozenset({"accepted", "grouped", "internal", "rejected"})
@@ -137,6 +138,7 @@ def _row_from_candidate(candidate: GitSourceCandidate) -> CommitAuditRow:
         target_entry_key=None,
         target_entry_id=None,
         notes=None,
+        stale=False,
     )
 
 
@@ -183,6 +185,13 @@ def _refresh_row_from_existing(
     fresh = _row_from_candidate(candidate)
     if existing is None:
         return fresh
+    stale = existing.stale or any(
+        (
+            fresh.evidence_subject != existing.evidence_subject,
+            fresh.changed_paths != existing.changed_paths,
+            fresh.stats != existing.stats,
+        )
+    )
     return replace(
         fresh,
         inspected=existing.inspected,
@@ -193,12 +202,22 @@ def _refresh_row_from_existing(
         target_entry_key=existing.target_entry_key,
         target_entry_id=existing.target_entry_id,
         notes=existing.notes,
+        stale=stale,
     )
 
 
 def _validate_completed_rows(sheet: CommitAuditSheetRecord) -> list[dict[str, object]]:
     issues: list[dict[str, object]] = []
     for row in sheet.rows:
+        if row.stale:
+            issues.append(
+                _row_issue(
+                    row,
+                    field="stale",
+                    code="stale_row",
+                    message="Audit row changed after it was reviewed.",
+                )
+            )
         if row.decision not in _COMPLETED_DECISIONS:
             continue
         if not row.inspected:
@@ -714,8 +733,9 @@ def render_commit_audit_decisions_template(
     workspace_root: Path,
     *,
     version: str,
+    pending_only: bool = False,
 ) -> dict[str, object]:
-    """Return a mutable, directly consumable audit-decision worksheet."""
+    """Return a mutable, round-trip-safe audit-decision worksheet."""
     workspace_root = workspace_root.expanduser().resolve()
     resolve_project_paths(workspace_root)
     sheet = load_commit_audit_sheet(workspace_root, version)
@@ -726,19 +746,40 @@ def render_commit_audit_decisions_template(
             exit_code=2,
             remediation=[f"Run `releaseledger audit init {version}` first."],
         )
-    rows = [
-        {
-            "sha": row.sha,
-            "inspected": False,
-            "inspected_paths": list(row.changed_paths),
-            "observed_behavior": "",
-            "public_impact": "unknown",
-            "decision": "needs_review",
-            "target_entry_key": None,
-            "notes": "",
-        }
-        for row in sheet.rows
-    ]
+    entries = load_entries(workspace_root, version)
+    entry_ids = {entry.entry_id for entry in entries}
+    entry_keys = entry_ids | {f"{version}/{entry_id}" for entry_id in entry_ids}
+    rows: list[dict[str, object]] = []
+    for row in sheet.rows:
+        target = row.target_entry_id or row.target_entry_key
+        target_missing = target is not None and target not in entry_keys
+        pending = (
+            not row.inspected
+            or row.decision == "needs_review"
+            or not row.inspected_paths
+            or (
+                row.decision in _COMPLETED_DECISIONS
+                and not row.observed_behavior.strip()
+            )
+            or target_missing
+            or row.stale
+        )
+        if pending_only and not pending:
+            continue
+        rows.append(
+            {
+                "sha": row.sha,
+                "inspected": row.inspected,
+                "inspected_paths": list(row.inspected_paths or row.changed_paths),
+                "observed_behavior": row.observed_behavior,
+                "public_impact": row.public_impact,
+                "decision": row.decision,
+                "target_entry_key": row.target_entry_key,
+                "target_entry_id": row.target_entry_id,
+                "notes": row.notes or "",
+                "stale": row.stale,
+            }
+        )
     return {"rows": rows}
 
 
@@ -1007,6 +1048,7 @@ def _build_checks(
     return {
         "all_rows_inspected": len(uninspected) == 0,
         "all_rows_decided": len(needs_review) == 0,
+        "no_stale_rows": not any(issue["code"] == "stale_row" for issue in issues),
         "all_inspected_rows_have_paths": not any(
             issue["code"] == "missing_inspected_paths" for issue in issues
         ),
@@ -1040,6 +1082,8 @@ def _collect_strict_blockers(
         blockers.append(f"{len(needs_review)} row(s) need review")
     if uninspected:
         blockers.append(f"{len(uninspected)} row(s) not inspected")
+    if any(issue["code"] == "stale_row" for issue in issues):
+        blockers.append("reviewed row(s) changed after refresh")
     if any(issue["code"] == "missing_inspected_paths" for issue in issues):
         blockers.append("inspected row(s) are missing inspected_paths")
     if any(issue["code"] == "empty_observed_behavior" for issue in issues):

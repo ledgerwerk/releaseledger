@@ -28,7 +28,11 @@ from releaseledger.services.git_sources import (
     release_snapshot_drift_report,
     resolve_release_snapshot,
 )
-from releaseledger.services.releases import check_release_chain, reconcile_releases
+from releaseledger.services.releases import (
+    check_release_chain,
+    list_release_records,
+    reconcile_releases,
+)
 from releaseledger.storage.store import (
     load_commit_audit_sheet,
     load_entries,
@@ -326,10 +330,11 @@ def _compute_git_coverage(
 
 def _problem_next_action(
     problem: dict[str, object], *, target_file: str, version: str
-) -> dict[str, str] | None:
-    """Return one deterministic remediation for a reconciliation problem."""
+) -> dict[str, object] | None:
+    """Return one deterministic, explicitly scoped remediation action."""
     kind = str(problem.get("kind", ""))
     problem_version = str(problem.get("version", version))
+    scope = str(problem.get("scope", "history"))
     if kind == "changelog_without_release":
         return {
             "code": "remove_stale_changelog_section",
@@ -337,11 +342,38 @@ def _problem_next_action(
                 "releaseledger changelog-section remove-section "
                 f"{problem_version} --target-file {target_file}"
             ),
+            "mutates": True,
+            "requires_confirmation": True,
+            "scope": scope,
+        }
+    if kind == "tag_without_release":
+        return {
+            "code": "import_release_tag",
+            "command": f"releaseledger release import-tags --version {problem_version} --apply",
+            "mutates": True,
+            "requires_confirmation": True,
+            "scope": scope,
+        }
+    if kind == "planned_with_tag":
+        return {
+            "code": "verify_and_finalize_tagged_release",
+            "command": (
+                f"releaseledger release finalize {problem_version} "
+                "--released-at YYYY-MM-DD"
+            ),
+            "mutates": True,
+            "requires_confirmation": True,
+            "scope": scope,
+            "reason": "Verify that the tag represents the shipped release first.",
         }
     if kind == "release_without_tag":
         return {
-            "code": "reconcile_release_tag",
-            "command": "releaseledger release reconcile --strict",
+            "code": "inspect_release_tag_state",
+            "command": f"releaseledger release review {problem_version}",
+            "mutates": False,
+            "reason": "Creating the Git tag is an explicit release decision outside releaseledger.",
+            "requires_confirmation": False,
+            "scope": scope,
         }
     if kind in {"released_without_changelog", "release_changelog_date_mismatch"}:
         return {
@@ -350,6 +382,9 @@ def _problem_next_action(
                 f"releaseledger changelog build {problem_version} "
                 f"--output {target_file} --strict --replace-existing"
             ),
+            "mutates": True,
+            "requires_confirmation": True,
+            "scope": scope,
         }
     if kind in {
         "missing_previous",
@@ -358,8 +393,12 @@ def _problem_next_action(
         "noncanonical_previous",
     }:
         return {
-            "code": "repair_release_chain",
-            "command": "releaseledger release reconcile --strict",
+            "code": "repair_release_chain_preview",
+            "command": "releaseledger release chain repair --dry-run",
+            "mutates": False,
+            "requires_confirmation": False,
+            "scope": scope,
+            "follow_up": "releaseledger release chain repair --apply",
         }
     return None
 
@@ -373,10 +412,10 @@ def _build_next_actions(
     audit: dict[str, object] | None,
     changelog: dict[str, object],
     checks: dict[str, object],
-) -> list[dict[str, str]]:
+) -> list[dict[str, object]]:
     """Build stable, machine-actionable release-check next actions."""
     target_display = str(target_file or "CHANGELOG.md")
-    actions: list[dict[str, str]] = []
+    actions: list[dict[str, object]] = []
 
     for block in (chain, reconciliation):
         problems = block.get("problems", [])
@@ -398,6 +437,9 @@ def _build_next_actions(
                 f"releaseledger changelog build {version} --output "
                 f"{target_display} --strict"
             ),
+            "mutates": False,
+            "requires_confirmation": False,
+            "scope": "target",
         }
         if action not in actions:
             actions.append(action)
@@ -405,6 +447,9 @@ def _build_next_actions(
         action = {
             "code": "complete_commit_audit",
             "command": f"releaseledger audit validate {version} --phase evidence --strict",
+            "mutates": False,
+            "requires_confirmation": False,
+            "scope": "target",
         }
         if action not in actions:
             actions.append(action)
@@ -412,6 +457,9 @@ def _build_next_actions(
         action = {
             "code": "fix_entry_lint",
             "command": f"releaseledger entry lint {version}",
+            "mutates": False,
+            "requires_confirmation": False,
+            "scope": "target",
         }
         if action not in actions:
             actions.append(action)
@@ -455,8 +503,51 @@ def _failed_checks(
     return failed
 
 
+def _scope_health_block(
+    block: dict[str, object],
+    *,
+    version: str,
+    release: ReleaseRecord,
+    records: list[dict[str, object]],
+    history_scope: str,
+) -> dict[str, object]:
+    """Classify repository findings without making unrelated history fatal."""
+    affected = {version}
+    if release.previous_version:
+        affected.add(release.previous_version)
+    for record in records:
+        if str(record.get("previous_version", "")) == version:
+            affected.add(str(record.get("version", "")))
+    raw = block.get("problems", [])
+    problems: list[dict[str, object]] = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        related = (
+            str(item.get("version", "")) in affected
+            or str(item.get("previous_version", "")) in affected
+            or str(item.get("expected_previous", "")) in affected
+        )
+        annotated = dict(item)
+        annotated["scope"] = "target" if related else "history"
+        annotated["severity"] = "failure" if related else "warning"
+        problems.append(annotated)
+    target_problems = [item for item in problems if item["scope"] == "target"]
+    history_problems = [item for item in problems if item["scope"] == "history"]
+    result = dict(block)
+    result["problems"] = problems
+    result["problem_count"] = len(problems)
+    result["target_problem_count"] = len(target_problems)
+    result["history_problem_count"] = len(history_problems)
+    result["target_ok"] = not target_problems
+    result["history_ok"] = not history_problems
+    result["ok"] = not target_problems if history_scope == "target" else not problems
+    result["history_scope"] = history_scope
+    return result
+
+
 def _phase_reconciliation(block: dict[str, object], *, phase: str) -> dict[str, object]:
-    """Apply release-check phase severity to reconciliation findings."""
+    """Apply release-check phase severity to scoped reconciliation findings."""
     raw_problems = block.get("problems", [])
     problems = (
         [problem for problem in raw_problems if isinstance(problem, dict)]
@@ -469,13 +560,21 @@ def _phase_reconciliation(block: dict[str, object], *, phase: str) -> dict[str, 
         if phase == "finalize" and kind == "release_without_tag":
             continue
         annotated = dict(problem)
-        annotated["severity"] = "failure"
+        scope = str(annotated.get("scope", "target"))
+        annotated["severity"] = "failure" if scope == "target" else "warning"
         filtered.append(annotated)
+    target_problems = [
+        problem for problem in filtered if problem.get("scope", "target") == "target"
+    ]
     result = dict(block)
     result["phase"] = phase
     result["problems"] = filtered
     result["problem_count"] = len(filtered)
-    result["ok"] = not filtered
+    result["target_problem_count"] = len(target_problems)
+    result["target_ok"] = not target_problems
+    result["ok"] = (
+        not filtered if result.get("history_scope") == "full" else not target_problems
+    )
     return result
 
 
@@ -628,6 +727,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
     include_merges: str = "nontrivial",
     require_audit_sheet: bool = False,
     include_history_health: bool = False,
+    history_scope: str = "target",
     phase: str = "current",
     proposed_released_at: str | None = None,
     acknowledge_changelog_change: bool = False,
@@ -652,6 +752,12 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         raise LaunchError(
             f"Unsupported release check phase {phase!r}. "
             "Use current, finalize, or published.",
+            code="USAGE_ERROR",
+            exit_code=2,
+        )
+    if history_scope not in {"target", "full"}:
+        raise LaunchError(
+            f"Unsupported history scope {history_scope!r}. Use target or full.",
             code="USAGE_ERROR",
             exit_code=2,
         )
@@ -761,17 +867,38 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         include_statuses=statuses,
     )
     lint_summary = _lint_summary(lint_result)
-    if include_history_health:
-        chain_block = check_release_chain(workspace_root)
-        reconciliation_block = reconcile_releases(
-            workspace_root, changelog_file=target_file
+    if include_history_health or history_scope == "full":
+        records = list_release_records(workspace_root)
+        chain_block = _scope_health_block(
+            check_release_chain(workspace_root),
+            version=version,
+            release=release,
+            records=records,
+            history_scope=history_scope,
+        )
+        reconciliation_block = _scope_health_block(
+            reconcile_releases(workspace_root, changelog_file=target_file),
+            version=version,
+            release=release,
+            records=records,
+            history_scope=history_scope,
         )
     else:
-        chain_block = {"kind": "release_chain_check", "ok": True, "skipped": True}
+        chain_block = {
+            "kind": "release_chain_check",
+            "ok": True,
+            "target_ok": True,
+            "history_ok": True,
+            "skipped": True,
+            "history_scope": history_scope,
+        }
         reconciliation_block = {
             "kind": "release_reconcile",
             "ok": True,
+            "target_ok": True,
+            "history_ok": True,
             "skipped": True,
+            "history_scope": history_scope,
         }
 
     # 7. Changelog dry-run. Try a strict dry-run when requested so the review
@@ -807,8 +934,20 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         release_state_ok = release.status == "released" and bool(release.released_at)
     else:
         release_state_ok = not (release.released_at and release.status != "released")
-    chain_ok = bool(chain_block.get("ok", False))
-    reconciliation_ok = bool(reconciliation_block.get("ok", False))
+    chain_target_ok = bool(chain_block.get("target_ok", chain_block.get("ok", False)))
+    reconciliation_target_ok = bool(
+        reconciliation_block.get("target_ok", reconciliation_block.get("ok", False))
+    )
+    chain_ok = (
+        chain_target_ok
+        if history_scope == "target"
+        else bool(chain_block.get("ok", False))
+    )
+    reconciliation_ok = (
+        reconciliation_target_ok
+        if history_scope == "target"
+        else bool(reconciliation_block.get("ok", False))
+    )
     snapshot_drift = git_block.get("snapshot_drift") if git_block else None
     snapshot_ok = not (
         isinstance(snapshot_drift, dict) and snapshot_drift.get("status") == "drifted"
@@ -836,13 +975,25 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
     if phase in {"finalize", "published"}:
         reconciliation_block = _phase_reconciliation(reconciliation_block, phase=phase)
         reconciliation_ok = bool(reconciliation_block.get("ok", False))
+    chain_target_ok = bool(chain_block.get("target_ok", chain_block.get("ok", False)))
+    reconciliation_target_ok = bool(
+        reconciliation_block.get("target_ok", reconciliation_block.get("ok", False))
+    )
+    chain_history_ok = bool(chain_block.get("history_ok", chain_block.get("ok", False)))
+    reconciliation_history_ok = bool(
+        reconciliation_block.get("history_ok", reconciliation_block.get("ok", False))
+    )
     checks: dict[str, object] = {
         "coverage_ok": coverage_ok,
         "lint_ok": lint_ok,
         "changelog_ok": changelog_ok,
         "release_state_ok": release_state_ok,
         "chain_ok": chain_ok,
+        "chain_target_ok": chain_target_ok,
+        "chain_history_ok": chain_history_ok,
         "reconciliation_ok": reconciliation_ok,
+        "reconciliation_target_ok": reconciliation_target_ok,
+        "reconciliation_history_ok": reconciliation_history_ok,
         "snapshot_ok": snapshot_ok,
         "target_changelog_ok": target_changelog_ok,
         "audit_evidence_ok": audit_evidence_ok,
@@ -851,7 +1002,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
     }
     if git_block is not None:
         checks["git_coverage_ok"] = git_coverage_ok
-    ok = (
+    target_ready = (
         coverage_ok
         and lint_ok
         and (
@@ -859,16 +1010,17 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
             or (
                 changelog_ok
                 and release_state_ok
-                and chain_ok
-                and reconciliation_ok
+                and chain_target_ok
+                and reconciliation_target_ok
                 and target_changelog_ok
             )
         )
+        and audit_evidence_ok
+        and audit_complete_ok
+        and (not strict or not git_block or git_coverage_ok)
     )
-    if strict and git_block is not None:
-        ok = ok and git_coverage_ok
-    if audit_block is not None:
-        ok = ok and audit_evidence_ok and audit_complete_ok
+    history_ready = chain_history_ok and reconciliation_history_ok
+    ok = target_ready if history_scope == "target" else target_ready and history_ready
 
     recommendations = _build_review_recommendations(
         coverage=coverage,
@@ -929,6 +1081,16 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         "checks": checks,
         "ok": ok,
         "strict": strict,
+        "scope": history_scope,
+        "target_ready": target_ready,
+        "history_ready": history_ready,
+        "history_findings": sum(
+            value if isinstance(value, int) else 0
+            for value in (
+                chain_block.get("history_problem_count", 0),
+                reconciliation_block.get("history_problem_count", 0),
+            )
+        ),
         "include_internal": bool(include_internal),
         "include_statuses": list(statuses),
         "phase": phase,
@@ -1060,7 +1222,7 @@ def _run_changelog_dry_run(
             replace_existing=False,
             include_statuses=statuses,
             strict=strict,
-            allow_empty=False,
+            allow_empty_sections=False,
         )
         block["dry_run_ok"] = True
         block["section_heading"] = result.get("section_heading")

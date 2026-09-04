@@ -516,6 +516,78 @@ class TestAuditRefresh:
         assert row["target_entry_key"] == "entry-a"
 
 
+class TestAuditDecisionsTemplate:
+    def test_decisions_round_trip_and_pending_only(self, tmp_path: Path) -> None:
+        repo, sha_a, _sha_b = _seed_range(tmp_path)
+        assert _run(repo, "audit", "init", "0.2.0").exit_code == 0
+        entries = {
+            "entries": [
+                {
+                    "kind": "added",
+                    "summary": "Added the reviewed feature from diff evidence",
+                    "source_refs": [f"git:{sha_a}"],
+                    "status": "accepted",
+                }
+            ]
+        }
+        entries_path = repo / "entries.yaml"
+        entries_path.write_text(yaml.safe_dump(entries))
+        assert (
+            _run(
+                repo, "entry", "add-many", "0.2.0", "--file", str(entries_path)
+            ).exit_code
+            == 0
+        )
+        decisions = {
+            "rows": [
+                {
+                    "sha": sha_a,
+                    "inspected": True,
+                    "inspected_paths": ["a.txt"],
+                    "observed_behavior": "Reviewed behavior for commit A",
+                    "public_impact": "public",
+                    "decision": "accepted",
+                    "target_entry_key": "entry-0001",
+                    "target_entry_id": "entry-0001",
+                    "notes": "Keep this reviewed annotation",
+                }
+            ]
+        }
+        decisions_path = repo / "decisions.yaml"
+        decisions_path.write_text(yaml.safe_dump(decisions))
+        assert (
+            _run(
+                repo, "audit", "apply", "0.2.0", "--file", str(decisions_path)
+            ).exit_code
+            == 0
+        )
+        _commit(repo, "feat: add c", "c.txt")
+        assert _run(repo, "audit", "refresh", "0.2.0", "--head", "HEAD").exit_code == 0
+        full_path = repo / "full-decisions.yaml"
+        full = _run(repo, "audit", "decisions", "0.2.0", "--output", str(full_path))
+        assert full.exit_code == 0, _human_error(full)
+        full_rows = yaml.safe_load(full_path.read_text())["rows"]
+        old = next(row for row in full_rows if row["sha"] == sha_a)
+        assert old["inspected"] is True
+        assert old["target_entry_id"] == "entry-0001"
+        assert old["notes"] == "Keep this reviewed annotation"
+        pending_path = repo / "pending-decisions.yaml"
+        pending = _run(
+            repo,
+            "audit",
+            "decisions",
+            "0.2.0",
+            "--output",
+            str(pending_path),
+            "--pending-only",
+        )
+        assert pending.exit_code == 0, _human_error(pending)
+        pending_rows = yaml.safe_load(pending_path.read_text())["rows"]
+        assert [row["sha"] for row in pending_rows] == [
+            row["sha"] for row in full_rows if row["sha"] != sha_a
+        ]
+
+
 class TestEntryGuardCommitSubjects:
     def test_guard_rejects_summary_matching_subject(self, tmp_path: Path) -> None:
         repo, sha_a, _sha_b = _seed_range(tmp_path)

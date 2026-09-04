@@ -108,6 +108,7 @@ from releaseledger.services.releases import (
     list_release_records,
     prepare_release,
     reconcile_releases,
+    refresh_release,
     remove_changelog_section,
     rename_changelog_section,
     rename_release,
@@ -659,6 +660,10 @@ def release_update_command(
     version: Annotated[str, typer.Argument(help="Release version string.")],
     title: Annotated[str | None, typer.Option("--title")] = None,
     status: Annotated[str | None, typer.Option("--status")] = None,
+    history_state: Annotated[
+        str | None,
+        typer.Option("--history-state", help="discovered|audited|curated."),
+    ] = None,
     note: Annotated[str | None, typer.Option("--note")] = None,
     previous_version: Annotated[str | None, typer.Option("--previous")] = None,
     changelog_file: Annotated[str | None, typer.Option("--changelog-file")] = None,
@@ -740,6 +745,7 @@ def release_update_command(
         ) or any(
             (
                 clear_previous,
+                history_state,
                 clear_changelog_file,
                 clear_boundary_ref,
                 clear_source_refs,
@@ -793,6 +799,7 @@ def release_update_command(
         result = update_release(
             _paths(ctx).workspace_root,
             version=version,
+            history_state=history_state,
             title=title,
             status=status,
             note=note,
@@ -899,6 +906,58 @@ def release_finalize_command(
         result_type="release",
         json_output=state.json_output,
         produce=produce,
+    )
+
+
+@release_app.command("refresh")
+def release_refresh_command(
+    ctx: typer.Context,
+    version: Annotated[str, typer.Argument(help="Release version string.")],
+    git_head: Annotated[
+        str,
+        typer.Option("--head", help="Git head ref to attach to the release."),
+    ] = GIT_DEFAULT_HEAD,
+    git_base: Annotated[
+        str | None,
+        typer.Option("--base", help="Git base ref override."),
+    ] = None,
+    decisions_output: Annotated[
+        Path | None,
+        typer.Option("--decisions-output", help="Write pending decisions YAML."),
+    ] = None,
+    allow_remove: Annotated[
+        bool,
+        typer.Option("--allow-remove", help="Allow rows removed by a rewritten range."),
+    ] = False,
+) -> None:
+    """Refresh the release snapshot, audit sheet, and pending decisions."""
+    state = cli_state_from_context(ctx)
+
+    def produce() -> CommandResult:
+        result = refresh_release(
+            _paths(ctx).workspace_root,
+            version=version,
+            git_head=git_head,
+            git_base=git_base,
+            decisions_output=decisions_output,
+            allow_remove=allow_remove,
+        )
+        human = (
+            f"refreshed {version}: old head {result.get('old_head') or '(none)'} "
+            f"-> {result.get('new_head')}"
+            f"; preserved {result['preserved_reviewed_rows']}, "
+            f"new {result['new_rows']}, stale {result['stale_rows']}, "
+            f"pending {result['pending_rows']}"
+        )
+        return result, _event_ids(result), human
+
+    run_command(
+        command="release.refresh",
+        result_type="release_refresh",
+        json_output=state.json_output,
+        produce=produce,
+        workspace_root=_paths(ctx).workspace_root,
+        mutating=True,
     )
 
 
@@ -1174,12 +1233,30 @@ def release_import_tags_command(
             help="Create missing release records. Without this flag, only dry-run.",
         ),
     ] = False,
+    version: Annotated[
+        str | None,
+        typer.Option("--version", help="Import only this tag version."),
+    ] = None,
+    since: Annotated[
+        str | None,
+        typer.Option("--since", help="Import tags from this version onward."),
+    ] = None,
+    until: Annotated[
+        str | None,
+        typer.Option("--until", help="Import tags through this version."),
+    ] = None,
 ) -> None:
     """Discover semver git tags and create missing release records."""
     state = cli_state_from_context(ctx)
 
     def produce() -> CommandResult:
-        result = import_tags(_paths(ctx).workspace_root, apply=apply)
+        result = import_tags(
+            _paths(ctx).workspace_root,
+            apply=apply,
+            version=version,
+            since=since,
+            until=until,
+        )
         planned = [
             e
             for e in result.get("plans", [])  # type: ignore[attr-defined]
@@ -1241,6 +1318,13 @@ def release_check_command(
             help="Proposed release date for --phase finalize.",
         ),
     ] = None,
+    history_scope: Annotated[
+        str,
+        typer.Option(
+            "--history-scope",
+            help="Validation scope: target (default) or full history.",
+        ),
+    ] = "target",
 ) -> None:
     """Run the consolidated read-only release gate."""
     state = cli_state_from_context(ctx)
@@ -1262,6 +1346,7 @@ def release_check_command(
             git=True,
             require_audit_sheet=require_audit_sheet,
             include_history_health=True,
+            history_scope=history_scope,
             phase=phase,
             proposed_released_at=released_at,
         )
@@ -2483,6 +2568,13 @@ def review_command(
             help="Require a commit audit sheet; gate when absent or incomplete.",
         ),
     ] = False,
+    history_scope: Annotated[
+        str,
+        typer.Option(
+            "--history-scope",
+            help="Validation scope: target (default) or full history.",
+        ),
+    ] = "target",
     acknowledge_changelog_change: Annotated[
         bool,
         typer.Option(
@@ -2508,6 +2600,7 @@ def review_command(
             git_base=git_base,
             git_head=git_head,
             require_audit_sheet=require_audit_sheet,
+            history_scope=history_scope,
             acknowledge_changelog_change=acknowledge_changelog_change,
         )
     except ReleaseledgerError as exc:
@@ -2636,6 +2729,11 @@ def _render_review_human(version: str, result: dict[str, object]) -> str:
         for rec in recommendations:
             lines.append(f"  - {rec}")
 
+    lines.append(
+        f"Health scope: {result.get('scope', 'target')}; "
+        f"target_ready={result.get('target_ready', False)}; "
+        f"history_ready={result.get('history_ready', False)}"
+    )
     lines.append("")
     lines.append(f"Result: {'OK' if result.get('ok') else 'FAIL'}")
     return "\n".join(lines)
@@ -2668,6 +2766,14 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
         if isinstance(complete, dict):
             audit_complete_ok = bool(complete.get("ok", False))
     lines = [f"RELEASE CHECK {version}", ""]
+    scope = str(result.get("scope", "target"))
+    history_findings = int(result.get("history_findings", 0))
+    lines.append(
+        f"Scope           {scope}  target_ready={result.get('target_ready', False)} "
+        f"history_ready={result.get('history_ready', False)}"
+    )
+    if history_findings:
+        lines.append(f"History health  WARN  {history_findings} unrelated finding(s)")
     lines.append(
         f"Snapshot        {'OK' if git_block else 'WARN'}  "
         + (
@@ -2861,7 +2967,14 @@ def build_command(
         list[str] | None, typer.Option("--include-status")
     ] = None,
     strict: Annotated[bool, typer.Option("--strict")] = False,
-    allow_empty: Annotated[bool, typer.Option("--allow-empty")] = False,
+    allow_empty_sections: Annotated[
+        bool,
+        typer.Option("--allow-empty-sections", help="Allow empty rendered sections."),
+    ] = False,
+    allow_empty: Annotated[
+        bool,
+        typer.Option("--allow-empty", hidden=True),
+    ] = False,
 ) -> None:
     """Build or rebuild CHANGELOG.md.
 
@@ -2869,6 +2982,11 @@ def build_command(
     --all, rebuild the complete target file from ledger state.
     """
     state = cli_state_from_context(ctx)
+    if allow_empty:
+        add_cli_warning(
+            deprecated_option_warning("--allow-empty", "--allow-empty-sections")
+        )
+        allow_empty_sections = True
     if target_file is not None and output is None:
         add_cli_warning(deprecated_option_warning("--target-file", "--output"))
     target_file = output or target_file
@@ -2923,7 +3041,7 @@ def build_command(
                     include_release_statuses or ("released",)
                 ),
                 strict=strict,
-                allow_empty=allow_empty,
+                allow_empty_sections=allow_empty_sections,
                 preserve_unreleased=preserve_unreleased,
                 unreleased_version=unreleased_version,
             )
@@ -2943,7 +3061,7 @@ def build_command(
                 include_canceled=include_canceled,
                 include_statuses=tuple(include_statuses or ("accepted",)),
                 strict=strict,
-                allow_empty=allow_empty,
+                allow_empty_sections=allow_empty_sections,
             )
     except ReleaseledgerError as exc:
         emit_error(command="changelog build", error=exc, json_output=state.json_output)
@@ -4681,6 +4799,13 @@ def audit_decisions_command(
         Path,
         typer.Option("--output", help="YAML worksheet path to write."),
     ],
+    pending_only: Annotated[
+        bool,
+        typer.Option(
+            "--pending-only",
+            help="Emit only uninspected, incomplete, stale, or unresolved rows.",
+        ),
+    ] = False,
 ) -> None:
     """Generate a curated commit-audit decisions worksheet."""
     state = cli_state_from_context(ctx)
@@ -4690,6 +4815,7 @@ def audit_decisions_command(
         template = render_commit_audit_decisions_template(
             _paths(ctx).workspace_root,
             version=version,
+            pending_only=pending_only,
         )
         text = _yaml.safe_dump(
             template,
@@ -4706,6 +4832,7 @@ def audit_decisions_command(
         "version": version,
         "output": str(written),
         "row_count": len(template_rows) if isinstance(template_rows, list) else 0,
+        "pending_only": pending_only,
     }
     emit_payload(
         command="audit.decisions",

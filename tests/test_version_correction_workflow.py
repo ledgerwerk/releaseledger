@@ -407,7 +407,9 @@ def test_audit_decisions_command_generates_curatable_template(tmp_path: Path) ->
                 "public_impact": "unknown",
                 "decision": "needs_review",
                 "target_entry_key": None,
+                "target_entry_id": None,
                 "notes": "",
+                "stale": False,
             }
         ]
     }

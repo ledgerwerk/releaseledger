@@ -59,6 +59,7 @@
 | `release list`             | read             | stable     | —                                       |
 | `release prepare`          | external-write   | stable     | —                                       |
 | `release reconcile`        | read             | stable     | —                                       |
+| `release refresh`          | ledger-write     | stable     | —                                       |
 | `release rename`           | ledger-write     | stable     | —                                       |
 | `release restore`          | ledger-write     | stable     | —                                       |
 | `release review`           | read             | stable     | review                                  |

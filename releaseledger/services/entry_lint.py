@@ -17,6 +17,7 @@ __all__ = [
     "assert_entry_summary_valid",
     "lint_entry_records",
     "lint_release_entries",
+    "validate_entry_record",
     "validate_entry_summary",
 ]
 
@@ -117,6 +118,45 @@ def validate_entry_summary(summary: str) -> list[dict[str, object]]:
     return issues
 
 
+_KIND_ACTION_PREFIXES = {
+    "added": ("Added ",),
+    "changed": ("Changed ", "Improved "),
+    "deprecated": ("Deprecated ",),
+    "removed": ("Removed ",),
+    "fixed": ("Fixed ",),
+    "security": ("Secured ",),
+    "docs": ("Documented ",),
+    "quality": ("Improved ", "Changed "),
+}
+
+
+def validate_entry_record(entry: ReleaseEntryRecord) -> list[dict[str, object]]:
+    """Validate summary style and its action/kind consistency."""
+    issues = validate_entry_summary(entry.summary)
+    if entry.kind not in {"internal"}:
+        expected = _KIND_ACTION_PREFIXES.get(entry.kind, ())
+        if expected and not entry.summary.startswith(expected):
+            actual = next(
+                (
+                    prefix.rstrip()
+                    for prefix in _ACTION_PREFIXES
+                    if entry.summary.startswith(prefix)
+                ),
+                None,
+            )
+            issues.append(
+                _issue(
+                    "warning",
+                    f"Summary action {actual or 'unknown'} does not match entry kind {entry.kind!r}.",
+                    code="kind_action_mismatch",
+                    expected_actions=[prefix.rstrip() for prefix in expected],
+                    actual_action=actual,
+                    kind=entry.kind,
+                )
+            )
+    return issues
+
+
 def lint_entry_records(
     entries: list[ReleaseEntryRecord],
     *,
@@ -127,7 +167,7 @@ def lint_entry_records(
     entry_results: list[dict[str, object]] = []
     for entry in entries:
         entry_issues: list[dict[str, object]] = []
-        for issue in validate_entry_summary(entry.summary):
+        for issue in validate_entry_record(entry):
             enriched: dict[str, object] = {
                 **issue,
                 "entry_id": entry.entry_id,

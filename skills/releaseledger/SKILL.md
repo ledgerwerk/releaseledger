@@ -1,5 +1,6 @@
 ---
 name: releaseledger
+protocol: 2
 description: Manage project-local release records, release entries, changelog source, and CHANGELOG.md builds
 license: Apache-2.0
 compatibility: opencode
@@ -57,6 +58,7 @@ releaseledger release show VERSION
 releaseledger release create VERSION
 releaseledger release update VERSION
 releaseledger release prepare VERSION
+releaseledger release refresh VERSION --head HEAD [--base REF] [--decisions-output PATH]
 releaseledger release tag VERSION
 releaseledger release finalize VERSION
 releaseledger release restore VERSION --reason TEXT [--from-tag TAG] [--dry-run]
@@ -82,9 +84,11 @@ releaseledger git import VERSION [--base REF] [--head REF] --output PATH
 releaseledger git evidence VERSION [--base REF] [--head REF] --output-dir DIR
 releaseledger audit init VERSION [--base REF] [--head REF] [--overwrite]
 releaseledger audit show VERSION [--format markdown|json|yaml] [--output PATH]
-releaseledger audit decisions VERSION --output PATH
+releaseledger audit decisions VERSION --output PATH [--pending-only]
 releaseledger audit apply VERSION --file PATH [--dry-run]
 releaseledger audit refresh VERSION [--base REF] [--head REF] [--allow-remove]
+releaseledger release import-tags [--version VERSION | --since VERSION | --until VERSION]
+releaseledger release import-tags --apply [--version VERSION | --since VERSION | --until VERSION]
 releaseledger audit update VERSION --file PATH
 releaseledger audit validate VERSION [--phase evidence|complete] [--strict] [--include-internal]
 releaseledger audit sync VERSION
@@ -301,7 +305,8 @@ Use this for any git-backed changelog or release-note backfill.
 3. Create the sheet with `releaseledger audit init VERSION`.
 4. Generate the mutable decisions worksheet with
    `releaseledger audit decisions VERSION --output audit-decisions.yaml`.
-   It pre-fills changed paths but never marks a commit inspected.
+   It preserves existing annotations and leaves only new, stale, incomplete, or
+   unresolved rows for review. Add `--pending-only` to emit only those rows.
 5. Curate row annotations and run `audit apply --dry-run`; completed decisions
    must include `inspected: true`, `inspected_paths`, and `observed_behavior`.
    Apply only after the dry-run reports no evidence deficiencies.
@@ -316,8 +321,10 @@ Use this for any git-backed changelog or release-note backfill.
    followed by
    `releaseledger entry apply VERSION --file entries.yaml --strict --guard-commit-subjects --sync-audit`.
 10. Validate the complete phase after entries exist:
-    `releaseledger audit validate VERSION --phase complete --strict --include-internal`.
-11. Run `releaseledger release check VERSION --phase finalize --released-at DATE --strict --target-file CHANGELOG.md` before any final build. Use the
+11. Validate the complete public phase after entries exist:
+    `releaseledger audit validate VERSION --phase complete --strict`.
+    Add `--include-internal` only when internal changelog-entry coverage is explicitly requested.
+12. Run `releaseledger release check VERSION --phase finalize --released-at DATE --strict --target-file CHANGELOG.md` before any final build. Use the
     `published` phase after finalization and tagging.
 
 `audit init` writes one `needs_review` row per git candidate commit. Decisions
@@ -391,14 +398,28 @@ If review only passes with `--include-internal`, tell the user that public
 `CHANGELOG.md` will omit internal-only entries. Use `--include-internal` only for
 internal release notes.
 
+## Normal current-release protocol
+
+For routine work on one release, keep validation scoped to the target. Do not import unrelated historical tags or rebuild the full changelog.
+
+```text
+1. releaseledger release refresh VERSION --head HEAD --decisions-output pending.yaml
+2. inspect and apply the pending audit decisions
+3. releaseledger entry lint VERSION --strict
+4. releaseledger changelog build VERSION --strict --replace-existing
+5. releaseledger release check VERSION --strict
+```
+
+Use `release refresh` as the orchestration layer. It updates the stored snapshot, preserves reviewed audit rows, reports new and stale rows, and optionally writes a pending-only worksheet.
+
 ## Complete historical reconstruction protocol
 
 When the user requests "all versions," "all changes," "full history," or equivalent:
 
 ```text
 1. releaseledger release reconcile --strict
-2. releaseledger release import-tags --dry-run
-3. releaseledger release import-tags --apply
+2. releaseledger release import-tags
+   (preview is the default; use --apply only for the explicit mutation)
 4. For every release in ascending semantic order:
    a. verify tag/date/predecessor/range
    b. initialize or refresh audit sheet
@@ -406,7 +427,8 @@ When the user requests "all versions," "all changes," "full history," or equival
    d. curate entries without copying commit subjects
    e. preserve PR/contributor metadata
    f. validate audit completeness
-5. releaseledger changelog build --all --strict --require-complete-history
+5. releaseledger changelog build --all --strict
+   (full-history validation is included by strict full builds)
 6. releaseledger release reconcile --strict
 ```
 
@@ -455,12 +477,11 @@ generated_sentinel = "<!-- releaseledger:generated-file -->"
 Use `release import-tags` to discover and backfill git tags:
 
 ```bash
-releaseledger release import-tags --dry-run
+releaseledger release import-tags
 releaseledger release import-tags --apply
 ```
 
-This creates released records for every semver tag that does not already have one.
-The command is idempotent and never overwrites existing records.
+This creates released metadata records for selected semver tags that do not already have one. Use `--version`, `--since`, or `--until` to keep imports narrow. Imported records are marked as discovered metadata, not curated release history. The command is idempotent and never overwrites existing records. A strict full-history build requires discovered records to be audited and curated first.
 
 ## Release review protocol
 
@@ -701,7 +722,10 @@ from releaseledger.api.entries import (
     build_entry_prompt,
 )
 from releaseledger.api.review import build_release_review
-from releaseledger.api.config import load_project_locator, render_default_releaseledger_toml
+from releaseledger.api.config import (
+    load_project_locator,
+    render_default_releaseledger_toml,
+)
 ```
 
 Do not couple external code to internal storage paths or private service functions unless the user explicitly requests package development work.

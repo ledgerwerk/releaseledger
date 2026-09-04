@@ -11,6 +11,7 @@ from releaseledger.services.releases import (
     reconcile_releases,
 )
 from releaseledger.storage.paths import ensure_canonical_project
+from releaseledger.storage.store import load_release
 
 
 def test_reconcile_reports_tag_and_changelog_mismatches(
@@ -160,6 +161,19 @@ def test_import_tags_dry_run(tmp_path: Path, monkeypatch) -> None:
     assert len(plans) == 3
 
 
+def test_import_tags_can_be_scoped_to_one_version(tmp_path: Path, monkeypatch) -> None:
+    ensure_canonical_project(tmp_path)
+    monkeypatch.setattr(
+        releases_service.subprocess,
+        "run",
+        _tag_run("v0.8.3\nv0.8.4\nv0.9.0\n"),
+    )
+    result = import_tags(tmp_path, version="0.8.4")
+    assert result["selected_tag_count"] == 1
+    assert [plan["version"] for plan in result["plans"]] == ["0.8.4"]
+    assert result["applied_count"] == 0
+
+
 def test_import_tags_apply(tmp_path: Path, monkeypatch) -> None:
     """Apply creates release records for missing tags."""
     ensure_canonical_project(tmp_path)
@@ -181,6 +195,7 @@ def test_import_tags_apply(tmp_path: Path, monkeypatch) -> None:
     result = import_tags(tmp_path, apply=True)
     assert result["applied"] is True
     assert result["applied_count"] == 2  # 0.2.0 and 0.3.0
+    assert load_release(tmp_path, "0.2.0").history_state == "discovered"
     assert result["skipped_count"] == 1  # 0.1.0 already existed
 
 

@@ -15,6 +15,8 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from releaseledger.cli import app
+from releaseledger.domain.release import ReleaseRecord
+from releaseledger.services.review import _scope_health_block
 
 runner = CliRunner()
 
@@ -83,6 +85,37 @@ def _create_release(
         cmd += ["--boundary-ref", boundary_ref]
     result = _run(tmp_path, *cmd)
     assert result.exit_code == 0, result.stdout
+
+
+def test_target_scope_separates_unrelated_history_findings() -> None:
+    release = ReleaseRecord(version="2.0.0", previous_version="1.9.0")
+    block = {
+        "kind": "release_reconcile",
+        "ok": False,
+        "problems": [
+            {"kind": "tag_without_release", "version": "0.1.0"},
+            {"kind": "released_without_changelog", "version": "0.1.0"},
+        ],
+    }
+    target = _scope_health_block(
+        block,
+        version="2.0.0",
+        release=release,
+        records=[],
+        history_scope="target",
+    )
+    assert target["target_ok"] is True
+    assert target["history_ok"] is False
+    assert target["ok"] is True
+    assert target["history_problem_count"] == 2
+    full = _scope_health_block(
+        block,
+        version="2.0.0",
+        release=release,
+        records=[],
+        history_scope="full",
+    )
+    assert full["ok"] is False
 
 
 # ---------------------------------------------------------------------------

@@ -599,11 +599,11 @@ def test_strict_build_empty_and_source_coverage_gates(tmp_path: Path) -> None:
         "1.0.0",
         "--dry-run",
         "--strict",
-        "--allow-empty",
+        "--allow-empty-sections",
         "--release-date",
         "2026-06-14",
     )
-    assert allowed.exit_code == 0, allowed.output
+    assert allowed.exit_code != 0
 
     assert (
         _run(

@@ -69,6 +69,7 @@ def build_command_inventory() -> CommandInventory:
         ("finalize", "Finalize a release.", "ledger-write"),
         ("restore", "Restore a canceled release.", "ledger-write"),
         ("prepare", "Prepare release artifacts.", "external-write"),
+        ("refresh", "Refresh release snapshot and audit.", "ledger-write"),
         ("list", "List releases."),
         ("show", "Show one release."),
         ("review", "Review release coverage and readiness.", "read", ("review",)),

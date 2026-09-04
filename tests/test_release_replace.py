@@ -7,10 +7,50 @@ import pytest
 
 from releaseledger.domain.versioning import bump_versioning
 from releaseledger.errors import LaunchError
+from releaseledger.services.changelog_build import reorder_managed_release_sections
 from releaseledger.services.entries import add_release_entry
 from releaseledger.services.releases import create_release, rename_release
 from releaseledger.storage.paths import ensure_canonical_project
-from releaseledger.storage.store import load_entries, load_release
+from releaseledger.storage.store import list_releases, load_entries, load_release
+
+
+def test_targeted_reorder_preserves_unreleased_and_custom_sections(
+    tmp_path: Path,
+) -> None:
+    ensure_canonical_project(tmp_path)
+    create_release(
+        tmp_path, version="0.9.0", status="released", released_at="2026-01-01"
+    )
+    create_release(
+        tmp_path,
+        version="0.9.1",
+        status="released",
+        released_at="2026-02-01",
+        previous_version="0.9.0",
+    )
+    create_release(
+        tmp_path,
+        version="0.9.2",
+        status="released",
+        released_at="2026-03-01",
+        previous_version="0.9.1",
+    )
+    text = (
+        "# Changelog\n\n"
+        "custom preamble\n\n"
+        "## [Unreleased]\n\nkeep this\n\n"
+        "## [0.9.0]\n\nold zero\n\n"
+        "## Custom\n\nkeep custom\n\n"
+        "## [0.9.1]\n\none\n"
+    )
+    reordered = reorder_managed_release_sections(text, list_releases(tmp_path))
+    assert reordered.index("## [0.9.1]") < reordered.index("## [0.9.0]")
+    assert "## Custom\n\nkeep custom" in reordered
+    assert "## [Unreleased]\n\nkeep this" in reordered
+    assert (
+        reorder_managed_release_sections(reordered, list_releases(tmp_path))
+        == reordered
+    )
 
 
 def _fixture(tmp_path: Path) -> None:

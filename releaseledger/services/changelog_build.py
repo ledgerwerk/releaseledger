@@ -69,6 +69,7 @@ __all__ = [
     "rename_release_section",
     "render_changelog_section",
     "render_full_changelog_document",
+    "reorder_managed_release_sections",
     "replace_release_section",
 ]
 
@@ -791,6 +792,41 @@ def replace_release_section(text: str, version: str, section: str) -> str:
     return _ensure_final_newline("".join(new_lines))
 
 
+def reorder_managed_release_sections(
+    text: str,
+    releases: list[ReleaseRecord],
+) -> str:
+    """Reassign existing managed release sections to canonical order."""
+    ordered, _warnings = _order_releases_for_changelog(releases)
+    section_spans = [
+        (record.version, find_release_section(text, record.version))
+        for record in ordered
+    ]
+    present = [(version, span) for version, span in section_spans if span is not None]
+    if len(present) < 2:
+        return _ensure_final_newline(text)
+    lines = text.splitlines(keepends=True)
+    slots = sorted((span for _version, span in present), key=lambda span: span.start)
+    source_sections = {
+        version: lines[span.start : span.end] for version, span in present
+    }
+    desired_versions = [version for version, _span in present]
+    desired_versions.sort(
+        key=lambda value: next(
+            index for index, record in enumerate(ordered) if record.version == value
+        )
+    )
+    desired_sections = [source_sections[version] for version in desired_versions]
+    output: list[str] = []
+    cursor = 0
+    for slot, replacement in zip(slots, desired_sections, strict=False):
+        output.extend(lines[cursor : slot.start])
+        output.extend(replacement)
+        cursor = slot.end
+    output.extend(lines[cursor:])
+    return _ensure_final_newline("".join(output))
+
+
 def remove_release_section(
     text: str,
     version: str,
@@ -1091,7 +1127,6 @@ def _strict_git_range_coverage(
     entries: list[ReleaseEntryRecord],
     all_entries: list[ReleaseEntryRecord],
     include_internal: bool,
-    allow_empty: bool,
     statuses: tuple[str, ...],
 ) -> tuple[list[str], int]:
     """Enforce git-range commit coverage in strict builds.
@@ -1126,7 +1161,7 @@ def _strict_git_range_coverage(
     visible_refs = {ref for entry in entries for ref in entry.source_refs}
 
     missing = sorted(expected - accepted_refs)
-    if missing and not allow_empty:
+    if missing:
         raise LaunchError(
             f"Strict build for {release.version} has git commits not covered "
             "by accepted entries: " + ", ".join(missing),
@@ -1167,7 +1202,7 @@ def _run_strict_build_checks(
     selected: list[ReleaseEntryRecord],
     all_entries: list[ReleaseEntryRecord],
     include_internal: bool,
-    allow_empty: bool,
+    allow_empty_sections: bool,
 ) -> tuple[list[str], int]:
     """Run strict-mode validation checks for build_changelog_file.
 
@@ -1189,10 +1224,10 @@ def _run_strict_build_checks(
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
         )
-    if not selected and not allow_empty:
+    if not selected and not allow_empty_sections:
         raise LaunchError(
             "Strict build requires at least one included entry; "
-            "pass --allow-empty to override.",
+            "pass --allow-empty-sections to override.",
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
         )
@@ -1201,7 +1236,7 @@ def _run_strict_build_checks(
         release_refs.add(release.boundary_ref)
     entry_refs = {ref for entry in selected for ref in entry.source_refs}
     uncovered = sorted(release_refs - entry_refs)
-    if uncovered and not allow_empty:
+    if uncovered:
         raise LaunchError(
             "Strict build has release source refs not referenced by entries: "
             + ", ".join(uncovered),
@@ -1216,14 +1251,13 @@ def _run_strict_build_checks(
         entries=selected,
         all_entries=all_entries,
         include_internal=include_internal,
-        allow_empty=allow_empty,
         statuses=statuses,
     )
     strict_warnings.extend(git_warnings)
     return strict_warnings, hidden_internal_commit_count
 
 
-def build_changelog_file(
+def build_changelog_file(  # noqa: C901
     workspace_root: Path,
     *,
     version: str,
@@ -1238,7 +1272,7 @@ def build_changelog_file(
     include_canceled: bool = False,
     include_statuses: tuple[str, ...] = ("accepted",),
     strict: bool = False,
-    allow_empty: bool = False,
+    allow_empty_sections: bool = False,
 ) -> dict[str, object]:
     """Render and optionally update the target changelog for ``version``.
 
@@ -1311,7 +1345,7 @@ def build_changelog_file(
             selected=selected,
             all_entries=all_entries,
             include_internal=include_internal,
-            allow_empty=allow_empty,
+            allow_empty_sections=allow_empty_sections,
         )
 
     # In Keep a Changelog mode with strict, require a date for released sections
@@ -1401,6 +1435,16 @@ def build_changelog_file(
         merged = insert_release_section(
             existing, section, config=config, version=version
         )
+
+    managed_releases = [
+        record
+        for record in list_releases(workspace_root)
+        if record.status != "canceled"
+    ]
+    reordered = reorder_managed_release_sections(merged, managed_releases)
+    if reordered != merged:
+        merged = reordered
+        warnings.append("Canonicalized managed release section order.")
 
     # Update link references if in Keep a Changelog mode
     is_kac = config.changelog_standard == "keepachangelog-1.1.0"
@@ -1665,7 +1709,7 @@ def _validate_folded_unreleased_strict(
     folded: ReleaseRecord,
     include_internal: bool,
     statuses: tuple[str, ...],
-    allow_empty: bool,
+    allow_empty_sections: bool,
     warnings: list[str],
 ) -> None:
     """Apply strict lint/coverage/entries checks to a folded unreleased release.
@@ -1694,10 +1738,11 @@ def _validate_folded_unreleased_strict(
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
         )
-    if not folded_entries and not allow_empty:
+    if not folded_entries and not allow_empty_sections:
         raise LaunchError(
             f"Strict full build requires at least one included entry for "
-            f"folded unreleased {unreleased_version}; pass --allow-empty.",
+            f"folded unreleased {unreleased_version}; "
+            "pass --allow-empty-sections to override.",
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
         )
@@ -1706,7 +1751,7 @@ def _validate_folded_unreleased_strict(
         release_refs.add(folded.boundary_ref)
     entry_refs = {ref for entry in folded_entries for ref in entry.source_refs}
     uncovered = sorted(release_refs - entry_refs)
-    if uncovered and not allow_empty:
+    if uncovered:
         raise LaunchError(
             f"Strict full build for folded unreleased {unreleased_version} has "
             "release source refs not referenced by entries: " + ", ".join(uncovered),
@@ -1773,7 +1818,7 @@ def _validate_complete_history(
             f"Complete-history validation found {len(missing)} tagged release(s) "
             f"missing from releaseledger: {missing_str}.\n\n"
             "Run:\n"
-            "  releaseledger release import-tags --dry-run\n"
+            "  releaseledger release import-tags\n"
             "  releaseledger release import-tags --apply\n"
             "\nThen rebuild.",
             code=CODE_VALIDATION_ERROR,
@@ -1797,7 +1842,7 @@ def build_full_changelog_file(  # noqa: C901
     include_statuses: tuple[str, ...] = ("accepted",),
     include_release_statuses: tuple[str, ...] = ("released",),
     strict: bool = False,
-    allow_empty: bool = False,
+    allow_empty_sections: bool = False,
     preserve_unreleased: bool = True,
     unreleased_version: str | None = None,
     require_complete_history: bool = False,
@@ -1871,7 +1916,7 @@ def build_full_changelog_file(  # noqa: C901
                 folded=folded,
                 include_internal=include_internal,
                 statuses=statuses,
-                allow_empty=allow_empty,
+                allow_empty_sections=allow_empty_sections,
                 warnings=warnings,
             )
         rendered_unreleased = render_release_groups_body(
@@ -1907,6 +1952,20 @@ def build_full_changelog_file(  # noqa: C901
             )
 
     for release in selected:
+        if release.history_state == "discovered":
+            if strict:
+                raise LaunchError(
+                    f"Strict full build cannot treat metadata-only release {release.version} "
+                    "as curated changelog history.",
+                    code=CODE_VALIDATION_ERROR,
+                    exit_code=2,
+                    remediation=[
+                        f"Audit and curate {release.version} before a full-history build.",
+                    ],
+                )
+            warnings.append(
+                f"{release.version}: discovered release metadata has no curated history."
+            )
         version = release.version
         all_version_entries = load_entries(workspace_root, version)
         version_entries = [
@@ -1929,10 +1988,10 @@ def build_full_changelog_file(  # noqa: C901
                     code=CODE_VALIDATION_ERROR,
                     exit_code=2,
                 )
-            if not version_entries and not allow_empty:
+            if not version_entries and not allow_empty_sections:
                 raise LaunchError(
                     f"Strict full build requires at least one included entry "
-                    f"for {version}; pass --allow-empty to override.",
+                    f"for {version}; pass --allow-empty-sections to override.",
                     code=CODE_VALIDATION_ERROR,
                     exit_code=2,
                 )
@@ -1948,7 +2007,7 @@ def build_full_changelog_file(  # noqa: C901
                 release_refs.add(release.boundary_ref)
             entry_refs = {ref for entry in version_entries for ref in entry.source_refs}
             uncovered = sorted(release_refs - entry_refs)
-            if uncovered and not allow_empty:
+            if uncovered:
                 raise LaunchError(
                     f"Strict full build for {version} has release source refs not "
                     "referenced by entries: " + ", ".join(uncovered),
@@ -1966,7 +2025,6 @@ def build_full_changelog_file(  # noqa: C901
                 entries=version_entries,
                 all_entries=all_version_entries,
                 include_internal=include_internal,
-                allow_empty=allow_empty,
                 statuses=statuses,
             )
             warnings.extend(git_warnings)

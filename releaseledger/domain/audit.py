@@ -84,6 +84,7 @@ class CommitAuditRow:
     target_entry_key: str | None = None
     target_entry_id: str | None = None
     notes: str | None = None
+    stale: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,6 +265,13 @@ def _row_from_dict(value: object) -> CommitAuditRow:
         value.get("target_entry_id"), "target_entry_id"
     )
     notes = _require_optional_str(value.get("notes"), "notes")
+    stale_raw = value.get("stale", False)
+    if not isinstance(stale_raw, bool):
+        raise LaunchError(
+            "Audit field 'stale' must be a boolean.",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
     return CommitAuditRow(
         sha=sha,
         source_ref=source_ref,
@@ -279,6 +287,7 @@ def _row_from_dict(value: object) -> CommitAuditRow:
         target_entry_key=target_entry_key,
         target_entry_id=target_entry_id,
         notes=notes,
+        stale=stale_raw,
     )
 
 
@@ -379,6 +388,7 @@ def _row_to_dict(row: CommitAuditRow) -> dict[str, object]:
         "observed_behavior": row.observed_behavior,
         "public_impact": row.public_impact,
         "decision": row.decision,
+        "stale": row.stale,
     }
     if row.evidence_subject is not None:
         data["evidence_subject"] = row.evidence_subject

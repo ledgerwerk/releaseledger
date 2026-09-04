@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from releaseledger.protocol import protocol_diagnostics
 from releaseledger.services.config import config_show, storage_where
 from releaseledger.services.entries import list_release_entries
 from releaseledger.services.releases import list_release_records
@@ -186,11 +187,29 @@ def project_doctor(root: Path, *, check: bool = False) -> dict[str, object]:
             "remediation": [],
         }
     )
+    protocol = protocol_diagnostics(root)
+    protocol_matches = bool(protocol["skill_matches_cli"])
+    checks.append(
+        {
+            "code": "skill_protocol",
+            "status": "pass" if protocol_matches else "fail",
+            "message": (
+                "Releaseledger skill protocol matches the CLI."
+                if protocol_matches
+                else "Releaseledger skill protocol does not match the CLI.",
+            ),
+            "remediation": []
+            if protocol_matches
+            else ["Install or update skills/releaseledger/SKILL.md."],
+            "data": protocol,
+        },
+    )
     passed = all(item["status"] == "pass" for item in checks)
     result: dict[str, object] = {
         "kind": "doctor",
         "ok": passed,
         "checks": checks,
+        "protocol": protocol,
         "passed": passed if check else True,
     }
     return result

@@ -419,6 +419,30 @@ def test_release_prepare_default_workspace_is_versioned_and_refreshable(
     assert refreshed.exit_code == 0, refreshed.output
 
 
+def test_release_refresh_updates_snapshot_and_pending_decisions(
+    tmp_path: Path,
+) -> None:
+    repo, _sha_a, sha_b = _setup_release(tmp_path)
+    prepared = _jrun(repo, "release", "prepare", "0.2.0")
+    assert prepared["result_type"] == "release_prepare"
+    _commit(repo, "fix: new behavior", "new.txt")
+    output = tmp_path / "pending.yaml"
+    refreshed = _jrun(
+        repo,
+        "release",
+        "refresh",
+        "0.2.0",
+        "--decisions-output",
+        str(output),
+    )
+    result = refreshed["result"]
+    assert result["old_head"] == sha_b
+    assert result["new_rows"] == 1
+    assert result["pending_rows"] == 3
+    pending = yaml.safe_load(output.read_text(encoding="utf-8"))
+    assert len(pending["rows"]) == 3
+
+
 def test_prepare_to_apply_two_commit_end_to_end(tmp_path: Path) -> None:
     repo, _sha_a, _sha_b = _setup_release(tmp_path)
     payload = _jrun(repo, "release", "prepare", "0.2.0")
@@ -427,7 +451,8 @@ def test_prepare_to_apply_two_commit_end_to_end(tmp_path: Path) -> None:
     batch = yaml.safe_load(batch_path.read_text(encoding="utf-8"))
     for index, entry in enumerate(batch["entries"], 1):
         entry["status"] = "accepted"
-        entry["summary"] = f"Added user-visible behavior {index}"
+        action = {"added": "Added", "fixed": "Fixed"}[entry["kind"]]
+        entry["summary"] = f"{action} user-visible behavior {index}"
     batch_path.write_text(yaml.safe_dump(batch, sort_keys=False), encoding="utf-8")
     applied = _jrun(
         repo,
@@ -446,6 +471,7 @@ def test_prepare_to_apply_two_commit_end_to_end(tmp_path: Path) -> None:
         row["inspected"] = True
         row["decision"] = "accepted"
         row["observed_behavior"] = "Reviewed behavior from the patch."
+        row["inspected_paths"] = ["."]
     decisions_path.write_text(
         yaml.safe_dump(decisions, sort_keys=False), encoding="utf-8"
     )

@@ -447,6 +447,7 @@ def create_release(
     version: str,
     title: str | None = None,
     status: str = "planned",
+    history_state: str = "curated",
     note: str | None = None,
     previous_version: str | None = None,
     changelog_file: str | None = None,
@@ -460,6 +461,12 @@ def create_release(
     if status not in RELEASE_STATUSES:
         raise LaunchError(
             f"Unsupported release status: {status!r}",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
+    if history_state not in {"discovered", "audited", "curated"}:
+        raise LaunchError(
+            f"Unsupported release history_state: {history_state!r}",
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
         )
@@ -481,6 +488,7 @@ def create_release(
     record = ReleaseRecord(
         version=version,
         status=status,
+        history_state=history_state,
         title=title,
         released_at=released_at,
         previous_version=previous_version,
@@ -852,6 +860,7 @@ def update_release(
     *,
     version: str,
     title: str | None = None,
+    history_state: str | None = None,
     status: str | None = None,
     note: str | None = None,
     previous_version: Any = UNSET,
@@ -885,6 +894,16 @@ def update_release(
     if status is not None and status not in RELEASE_STATUSES:
         raise LaunchError(
             f"Unsupported release status: {status!r}",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
+    if history_state is not None and history_state not in {
+        "discovered",
+        "audited",
+        "curated",
+    }:
+        raise LaunchError(
+            f"Unsupported release history_state: {history_state!r}",
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
         )
@@ -966,6 +985,9 @@ def update_release(
     )
     values: dict[str, object] = {
         "title": title if title is not None else existing.title,
+        "history_state": history_state
+        if history_state is not None
+        else existing.history_state,
         "status": status if status is not None else existing.status,
         "note": note if note is not None else existing.note,
         "previous_version": resolved_previous,
@@ -984,6 +1006,9 @@ def update_release(
         )
     updated = replace(
         existing,
+        history_state=history_state
+        if history_state is not None
+        else existing.history_state,
         title=title if title is not None else existing.title,
         status=status if status is not None else existing.status,
         note=note if note is not None else existing.note,
@@ -1095,6 +1120,76 @@ def show_release(workspace_root: Path, version: str) -> dict[str, object]:
     if drift is not None:
         payload["snapshot_drift"] = drift
     return payload
+
+
+def refresh_release(
+    workspace_root: Path,
+    *,
+    version: str,
+    git_head: str = GIT_DEFAULT_HEAD,
+    git_base: str | None = None,
+    decisions_output: Path | None = None,
+    allow_remove: bool = False,
+) -> dict[str, object]:
+    """Refresh a release snapshot and its audit worksheet in one operation."""
+    resolved_version = resolve_release_selector(workspace_root, version)
+    release = load_release(workspace_root, resolved_version)
+    old_head = release.git_head_sha or release.git_head_ref
+    update_kwargs: dict[str, object] = {
+        "version": resolved_version,
+        "git_head_ref": git_head,
+    }
+    if git_base is not None:
+        update_kwargs["git_base_ref"] = git_base
+    update_release(workspace_root, **update_kwargs)  # type: ignore[arg-type]
+    refreshed = load_release(workspace_root, resolved_version)
+    existing_sheet = load_commit_audit_sheet(workspace_root, resolved_version)
+    if existing_sheet is None:
+        audit_result = create_commit_audit_sheet(
+            workspace_root, version=resolved_version
+        )
+        audit_result = dict(audit_result)
+        audit_result.setdefault("preserved_reviewed_rows", 0)
+        audit_result.setdefault("removed_rows", 0)
+        audit_result.setdefault("new_rows", audit_result.get("row_count", 0))
+    else:
+        audit_result = refresh_commit_audit_sheet(
+            workspace_root,
+            version=resolved_version,
+            git_base=git_base,
+            git_head=git_head,
+            allow_remove=allow_remove,
+        )
+    pending = render_commit_audit_decisions_template(
+        workspace_root, version=resolved_version, pending_only=True
+    )
+    pending_rows = pending.get("rows", [])
+    pending_count = len(pending_rows) if isinstance(pending_rows, list) else 0
+    if decisions_output is not None:
+        output = Path(decisions_output)
+        if not output.is_absolute():
+            output = workspace_root / output
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            yaml.safe_dump(pending, sort_keys=False, default_flow_style=False),
+            encoding="utf-8",
+        )
+    sheet = load_commit_audit_sheet(workspace_root, resolved_version)
+    stale_count = sum(1 for row in sheet.rows if row.stale) if sheet else 0
+    return {
+        "kind": "release_refresh",
+        "version": refreshed.version,
+        "old_head": old_head,
+        "new_head": refreshed.git_head_sha or refreshed.git_head_ref,
+        "git_base_ref": refreshed.git_base_ref,
+        "git_range": refreshed.git_range,
+        "preserved_reviewed_rows": audit_result.get("preserved_reviewed_rows", 0),
+        "new_rows": audit_result.get("new_rows", 0),
+        "stale_rows": stale_count,
+        "pending_rows": pending_count,
+        "decisions_output": str(decisions_output) if decisions_output else None,
+        "audit": audit_result,
+    }
 
 
 def prepare_release(
@@ -2114,6 +2209,9 @@ def import_tags(
     workspace_root: Path,
     *,
     apply: bool = False,
+    version: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
 ) -> dict[str, object]:
     """Discover Git tags and create only truly missing release identities."""
     tags_by_identity, tag_dates, _git_result = _load_git_tags(workspace_root)
@@ -2126,7 +2224,42 @@ def import_tags(
         semver = parse_release_version_tuple(version_str)
         return (semver is None, semver or (), version_str)
 
-    sorted_tags = sorted(tags_by_identity.items(), key=_sort_key)
+    if sum(value is not None for value in (version, since, until)) > 1:
+        raise LaunchError(
+            "Use only one of --version, --since, or --until for tag import.",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+        )
+    selected_identity = release_identity_key(version) if version else None
+    lower_identity = release_identity_key(since) if since else None
+    upper_identity = release_identity_key(until) if until else None
+
+    def _within_boundary(identity: str, boundary: str | None, *, lower: bool) -> bool:
+        if boundary is None:
+            return True
+        candidate_semver = parse_release_version_tuple(identity)
+        boundary_semver = parse_release_version_tuple(boundary)
+        if candidate_semver is not None and boundary_semver is not None:
+            return (
+                candidate_semver >= boundary_semver
+                if lower
+                else candidate_semver <= boundary_semver
+            )
+        return identity >= boundary if lower else identity <= boundary
+
+    def _selected(identity: str) -> bool:
+        return (
+            (selected_identity is None or identity == selected_identity)
+            and _within_boundary(identity, lower_identity, lower=True)
+            and _within_boundary(identity, upper_identity, lower=False)
+        )
+
+    selected_tags = {
+        identity: tags
+        for identity, tags in tags_by_identity.items()
+        if _selected(identity)
+    }
+    sorted_tags = sorted(selected_tags.items(), key=_sort_key)
     earliest_identity: str | None = sorted_tags[0][0] if sorted_tags else None
 
     def owner_for(identity: str) -> str | None:
@@ -2214,6 +2347,7 @@ def import_tags(
                 workspace_root,
                 version=identity,
                 status="released",
+                history_state="discovered",
                 released_at=tag_date or _today(),
                 previous_version=predecessor,
             )
@@ -2235,6 +2369,12 @@ def import_tags(
         "kind": "release_import_tags",
         "applied": apply,
         "discovered_tag_count": len(tags_by_identity),
+        "selected_tag_count": len(selected_tags),
+        "import_scope": {
+            "version": version,
+            "since": since,
+            "until": until,
+        },
         "existing_release_count": len(existing_versions),
         "planned_count": len([e for e in planned if e["action"] == "create"]),
         "applied_count": len(applied_versions),
@@ -2342,13 +2482,21 @@ def check_release_chain(
             predecessor = by_version.get(root.previous_version)
             problems.append(
                 {
-                    "kind": "root_has_previous",
+                    "kind": (
+                        "root_has_previous"
+                        if predecessor is not None
+                        else "truncated_history_previous"
+                    ),
                     "version": root.version,
                     "previous_version": root.previous_version,
                     "record_status": root.status,
                     "predecessor_status": predecessor.status if predecessor else None,
                     "comparison_basis": "semantic_version",
-                    "detail": "Earliest semantic release should have no predecessor.",
+                    "detail": (
+                        "Earliest semantic release should have no predecessor."
+                        if predecessor is not None
+                        else "Oldest recorded release references history outside the ledger."
+                    ),
                 }
             )
     problems.sort(key=lambda item: (str(item["kind"]), str(item["version"])))

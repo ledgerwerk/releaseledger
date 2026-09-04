@@ -87,6 +87,8 @@ releaseledger release restore VERSION --reason TEXT [--to STATUS]
                                       [--from-tag TAG] [--git-base REF]
                                       [--previous VERSION] [--clear-previous]
                                       [--released-at YYYY-MM-DD] [--dry-run]
+releaseledger release refresh VERSION [--head REF] [--base REF]
+                                      [--decisions-output PATH] [--allow-remove]
 releaseledger release prepare VERSION [--previous VERSION]
                                       [--released-at YYYY-MM-DD]
                                       [--git-base REF] [--git-head REF]
@@ -116,6 +118,7 @@ releaseledger release rename OLD_VERSION NEW_VERSION [--previous VERSION]
                                                       [--reason TEXT] [--dry-run]
 releaseledger release chain check
 releaseledger release chain repair [--dry-run] [--apply]
+releaseledger release import-tags [--version VERSION | --since VERSION | --until VERSION] [--apply]
 releaseledger release chain check [--strict]
 releaseledger release reconcile [--strict] [--target-file PATH]
 releaseledger release list
@@ -240,6 +243,10 @@ named changelog template profile.
 
 `build` never invents entries from git commits. Git commit ranges require
 `git scaffold` / audit / entry curation before a strict build can pass.
+
+### Current release refresh
+
+`releaseledger release refresh VERSION --head HEAD` updates the stored Git snapshot, refreshes the audit worksheet while preserving reviewed rows, and reports preserved, new, stale, and pending work. Add `--decisions-output PATH` to write a pending-only YAML worksheet. Use targeted builds and checks for routine release work. `release import-tags` is preview-only unless `--apply` is supplied; use `--version`, `--since`, or `--until` when importing historical metadata.
 
 ### Full changelog rebuild
 

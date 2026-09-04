@@ -35,7 +35,8 @@ def test_skill_disallows_parallel_releaseledger_mutations() -> None:
 def test_skill_uses_phase_aware_audit_validation_and_release_check() -> None:
     text = SKILL.read_text(encoding="utf-8")
     assert "audit validate VERSION --phase evidence --strict" in text
-    assert "audit validate VERSION --phase complete --strict --include-internal" in text
+    assert "audit validate VERSION --phase complete --strict`" in text
+    assert "--include-internal" in text
     assert "release check VERSION --strict --target-file CHANGELOG.md" in text
 
 

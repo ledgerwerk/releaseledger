@@ -38,6 +38,7 @@ RELEASE_FRONT_MATTER_KEY_ORDER = (
     "versioning",
     "version",
     "status",
+    "history_state",
     "title",
     "released_at",
     "previous_version",
@@ -64,6 +65,7 @@ class ReleaseRecord:
 
     version: str
     status: str = "planned"
+    history_state: str = "curated"
     title: str | None = None
     versioning: RecordVersioning = field(default_factory=initial_versioning)
     released_at: str | None = None
@@ -95,6 +97,7 @@ class ReleaseRecord:
             "version": self.version,
             "status": self.status,
             "title": self.title,
+            "history_state": self.history_state,
             "released_at": self.released_at,
             "previous_version": self.previous_version,
             "cancel_reason": self.cancel_reason,
@@ -297,10 +300,18 @@ def release_from_dict(data: dict[str, object]) -> ReleaseRecord:
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
         )
+    history_state = data.get("history_state", "curated")
+    if history_state not in {"discovered", "audited", "curated"}:
+        raise LaunchError(
+            f"Unsupported release history_state: {history_state!r}",
+            code=CODE_VALIDATION_ERROR,
+            exit_code=2,
+        )
     return ReleaseRecord(
         version=version,
         status=status,
         title=_require_optional_str(data.get("title"), "title"),
+        history_state=history_state,
         versioning=versioning_from_dict(data.get("versioning")),
         released_at=_require_optional_str(data.get("released_at"), "released_at"),
         previous_version=_require_optional_str(
