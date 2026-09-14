@@ -1,0 +1,57 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.4.6
+entries:
+  - kind: added
+    summary: Added GitHub-aware changelog attribution for contributors, pull requests, and comparison links
+    status: accepted
+    source_refs:
+      - git:99d03b10f6853e0103cee5b6349bee7db88b06d9
+    paths:
+      - releaseledger/services/changelog_build.py
+      - releaseledger/cli.py
+      - docs/commands.md
+      - docs/quickstart.md
+      - tests/test_changelog_github.py
+  - kind: added
+    summary: Added safe rebinding for generated index caches before ledger writes
+    status: accepted
+    sources:
+      - git:99d03b10f6853e0103cee5b6349bee7db88b06d9
+    paths:
+      - releaseledger/ledgercore_backend.py
+      - releaseledger/services/config.py
+      - releaseledger/services/project_state.py
+      - releaseledger/storage/store.py
+      - tests/test_index_binding.py
+      - tests/test_stale_marker_workflow.py
+  - kind: changed
+    summary: Changed release preparation and changelog builds to support proposed dates and explicit output paths
+    status: accepted
+    sources:
+      - git:99d03b10f6853e0103cee5b6349bee7db88b06d9
+    paths:
+      - releaseledger/cli.py
+      - releaseledger/services/releases.py
+      - releaseledger/services/changelog_build.py
+      - docs/commands.md
+      - docs/quickstart.md
+      - skills/releaseledger/SKILL.md
+  - kind: fixed
+    summary: Fixed entry batch validation to reject unknown fields with actionable suggestions
+    status: accepted
+    sources:
+      - git:99d03b10f6853e0103cee5b6349bee7db88b06d9
+    paths:
+      - releaseledger/services/entries.py
+      - tests/test_entry_atomicity.py
+  - kind: changed
+    summary: Changed release reviews to treat symbolic snapshot drift as advisory while preserving pinned snapshots
+    status: accepted
+    sources:
+      - git:99d03b10f6853e0103cee5b6349bee7db88b06d9
+    paths:
+      - releaseledger/services/review.py
+      - tests/test_git_review.py

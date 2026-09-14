@@ -1,0 +1,127 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: v0.4.6
+git_base_ref: v0.4.5
+git_base_sha: 84bf0b47d02d346940e7496a560b7589b26f5428
+git_head_ref: HEAD
+git_head_sha: 95109145aa3a64687ced6253309922eca3b53ecf
+git_range: 84bf0b47d02d346940e7496a560b7589b26f5428..95109145aa3a64687ced6253309922eca3b53ecf
+commit_count: 2
+rows:
+  - sha: 99d03b10f6853e0103cee5b6349bee7db88b06d9
+    source_ref: git:99d03b10f6853e0103cee5b6349bee7db88b06d9
+    short_sha: 99d03b1
+    changed_paths:
+      - docs/commands.md
+      - docs/quickstart.md
+      - releaseledger/cli.py
+      - releaseledger/ledgercore_backend.py
+      - releaseledger/migration.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/config.py
+      - releaseledger/services/entries.py
+      - releaseledger/services/project_state.py
+      - releaseledger/services/releases.py
+      - releaseledger/services/review.py
+      - releaseledger/storage/paths.py
+      - releaseledger/storage/store.py
+      - skills/releaseledger/SKILL.md
+      - tests/test_changelog_github.py
+      - tests/test_entry_atomicity.py
+      - tests/test_git_review.py
+      - tests/test_index_binding.py
+      - tests/test_stale_marker_workflow.py
+    stats:
+      files_changed: 0
+      insertions: 890
+      deletions: 95
+    inspected: true
+    inspected_paths:
+      - docs/commands.md
+      - docs/quickstart.md
+      - releaseledger/cli.py
+      - releaseledger/ledgercore_backend.py
+      - releaseledger/migration.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/config.py
+      - releaseledger/services/entries.py
+      - releaseledger/services/project_state.py
+      - releaseledger/services/releases.py
+      - releaseledger/services/review.py
+      - releaseledger/storage/paths.py
+      - releaseledger/storage/store.py
+      - skills/releaseledger/SKILL.md
+      - tests/test_changelog_github.py
+      - tests/test_entry_atomicity.py
+      - tests/test_git_review.py
+      - tests/test_index_binding.py
+      - tests/test_stale_marker_workflow.py
+    observed_behavior:
+      Added GitHub-aware changelog metadata and rendering, safer generated-index
+      rebinding before writes, explicit output-path and proposed-date workflows, contributor-preserving
+      entry batches, and actionable unknown-field validation.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: better parameter naming"
+    target_entry_key: entry-0001
+    target_entry_id: entry-0001
+    notes:
+      Reviewed the complete patch and tests. Public behavior is covered by the
+      v0.4.6 entries.
+  - sha: 95109145aa3a64687ced6253309922eca3b53ecf
+    source_ref: git:95109145aa3a64687ced6253309922eca3b53ecf
+    short_sha: "9510914"
+    changed_paths:
+      - .ledger/releaseledger/data/ledgers/main/events/events.jsonl
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.4.5/release.md
+      - docs/changelog.md
+      - releaseledger/cli.py
+      - releaseledger/ledgercore_backend.py
+      - releaseledger/migration.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/config.py
+      - releaseledger/services/entries.py
+      - releaseledger/services/review.py
+      - releaseledger/storage/store.py
+      - skills/releaseledger/SKILL.md
+      - tests/test_changelog_github.py
+      - tests/test_entry_atomicity.py
+      - tests/test_index_binding.py
+      - tests/test_stale_marker_workflow.py
+    stats:
+      files_changed: 0
+      insertions: 111
+      deletions: 81
+    inspected: true
+    inspected_paths:
+      - .ledger/releaseledger/data/ledgers/main/events/events.jsonl
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.4.5/release.md
+      - docs/changelog.md
+      - releaseledger/cli.py
+      - releaseledger/ledgercore_backend.py
+      - releaseledger/migration.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/config.py
+      - releaseledger/services/entries.py
+      - releaseledger/services/review.py
+      - releaseledger/storage/store.py
+      - skills/releaseledger/SKILL.md
+      - tests/test_changelog_github.py
+      - tests/test_entry_atomicity.py
+      - tests/test_index_binding.py
+      - tests/test_stale_marker_workflow.py
+    observed_behavior:
+      Applied pre-commit formatting and recorded the prior v0.4.5 finalization
+      and changelog date; it adds no separate v0.4.6 product behavior.
+    public_impact: internal
+    decision: internal
+    stale: false
+    evidence_subject: "chore: pre-commit"
+    target_entry_id: entry-0006
+    notes:
+      Internal release bookkeeping and formatting after the v0.4.5 tag. Excluded
+      from public v0.4.6 notes.

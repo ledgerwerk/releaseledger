@@ -1,0 +1,568 @@
+ .../data/ledgers/main/events/events.jsonl          |  1 +
+ .../data/ledgers/main/releases/v0.4.5/release.md   |  6 ++--
+ docs/changelog.md                                  |  2 +-
+ releaseledger/cli.py                               |  4 +--
+ releaseledger/ledgercore_backend.py                | 27 ++++++++++-------
+ releaseledger/migration.py                         |  4 +--
+ releaseledger/services/changelog_build.py          | 34 ++++++++++++----------
+ releaseledger/services/config.py                   |  8 ++---
+ releaseledger/services/entries.py                  |  6 ++--
+ releaseledger/services/review.py                   | 18 +++++++-----
+ releaseledger/storage/store.py                     |  6 ++--
+ skills/releaseledger/SKILL.md                      |  1 +
+ tests/test_changelog_github.py                     |  5 +++-
+ tests/test_entry_atomicity.py                      | 30 ++++++++++---------
+ tests/test_index_binding.py                        | 17 ++++++++---
+ tests/test_stale_marker_workflow.py                | 23 ++++++++++-----
+ 16 files changed, 111 insertions(+), 81 deletions(-)
+
+diff --git a/.ledger/releaseledger/data/ledgers/main/events/events.jsonl b/.ledger/releaseledger/data/ledgers/main/events/events.jsonl
+index c78a4fb..a44b085 100644
+--- a/.ledger/releaseledger/data/ledgers/main/events/events.jsonl
++++ b/.ledger/releaseledger/data/ledgers/main/events/events.jsonl
+@@ -124,3 +124,4 @@
+ {"data":{"row_count":1},"event":"audit.created","event_id":"event-0124","record_revisions":{"commit_audit_sheet":1},"release_version":"v0.4.5","schema_version":2}
+ {"data":{"updated_rows":1},"event":"audit.updated","event_id":"event-0125","record_revisions":{"commit_audit_sheet":2},"release_version":"v0.4.5","schema_version":2}
+ {"data":{"entry_ids":["entry-0001","entry-0002","entry-0003"],"synced_audit_rows":1},"event":"entry.batch_added","event_id":"event-0126","record_revisions":{"commit_audit_sheet":3,"entry:v0.4.5/entry-0001":1,"entry:v0.4.5/entry-0002":1,"entry:v0.4.5/entry-0003":1,"release:v0.4.5":3},"release_version":"v0.4.5","schema_version":2}
++{"data":{"released_at":"2026-09-14"},"event":"release.finalized","event_id":"event-0127","record_revisions":{"release:v0.4.5":4},"release_version":"v0.4.5","schema_version":2}
+diff --git a/.ledger/releaseledger/data/ledgers/main/releases/v0.4.5/release.md b/.ledger/releaseledger/data/ledgers/main/releases/v0.4.5/release.md
+index 1af372f..f2e3020 100644
+--- a/.ledger/releaseledger/data/ledgers/main/releases/v0.4.5/release.md
++++ b/.ledger/releaseledger/data/ledgers/main/releases/v0.4.5/release.md
+@@ -3,12 +3,12 @@ schema_version: 2
+ object_type: release
+ versioning:
+   schema_version: 1
+-  revision: 3
++  revision: 4
+ version: v0.4.5
+-status: planned
++status: released
+ history_state: curated
+ title: null
+-released_at: null
++released_at: "2026-09-14"
+ previous_version: v0.4.4
+ cancel_reason: null
+ superseded_by: null
+diff --git a/docs/changelog.md b/docs/changelog.md
+index 3754ec1..87c5755 100644
+--- a/docs/changelog.md
++++ b/docs/changelog.md
+@@ -6,7 +6,7 @@ All notable changes to this project will be documented in this file.
+
+ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+-## [v0.4.5] - Unreleased
++## [v0.4.5] - 2026-09-14
+
+ ### Added
+
+diff --git a/releaseledger/cli.py b/releaseledger/cli.py
+index 3cbe4fe..d99a13b 100644
+--- a/releaseledger/cli.py
++++ b/releaseledger/cli.py
+@@ -2779,9 +2779,7 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
+     scope = str(result.get("scope", "target"))
+     history_findings_value = result.get("history_findings", 0)
+     history_findings = (
+-        history_findings_value
+-        if isinstance(history_findings_value, int)
+-        else 0
++        history_findings_value if isinstance(history_findings_value, int) else 0
+     )
+     lines.append(
+         f"Scope           {scope}  target_ready={result.get('target_ready', False)} "
+diff --git a/releaseledger/ledgercore_backend.py b/releaseledger/ledgercore_backend.py
+index 200bc9b..f32bb98 100644
+--- a/releaseledger/ledgercore_backend.py
++++ b/releaseledger/ledgercore_backend.py
+@@ -863,15 +863,11 @@ def _cache_relative_path(root: Path, path: Path) -> Path:
+ def classify_releaseledger_index_cache(root: Path) -> IndexCacheClassification:
+     """Classify cache contents before adopting an unbound index directory."""
+     if root.is_symlink():
+-        return IndexCacheClassification(
+-            "foreign", (_cache_relative_path(root, root),)
+-        )
++        return IndexCacheClassification("foreign", (_cache_relative_path(root, root),))
+     if not root.exists():
+         return IndexCacheClassification("missing")
+     if not root.is_dir():
+-        return IndexCacheClassification(
+-            "foreign", (_cache_relative_path(root, root),)
+-        )
++        return IndexCacheClassification("foreign", (_cache_relative_path(root, root),))
+     children = sorted(root.iterdir(), key=lambda path: path.name)
+     if not children:
+         return IndexCacheClassification("empty")
+@@ -897,7 +893,11 @@ def classify_releaseledger_index_cache(root: Path) -> IndexCacheClassification:
+                     unexpected.append(_cache_relative_path(root, ledger_dir))
+                     continue
+                 for child in sorted(ledger_dir.iterdir(), key=lambda path: path.name):
+-                    if child.is_symlink() or not child.is_file() or child.name not in generated_files:
++                    if (
++                        child.is_symlink()
++                        or not child.is_file()
++                        or child.name not in generated_files
++                    ):
+                         unexpected.append(_cache_relative_path(root, child))
+         if not unexpected:
+             return IndexCacheClassification("generated-current")
+@@ -907,7 +907,11 @@ def classify_releaseledger_index_cache(root: Path) -> IndexCacheClassification:
+         unexpected.append(_cache_relative_path(root, child))
+         if child.is_dir() and not child.is_symlink():
+             for nested in child.rglob("*"):
+-                if nested.is_symlink() or not nested.is_dir() and nested.name not in generated_files:
++                if (
++                    nested.is_symlink()
++                    or not nested.is_dir()
++                    and nested.name not in generated_files
++                ):
+                     unexpected.append(_cache_relative_path(root, nested))
+     return IndexCacheClassification("foreign", tuple(unexpected))
+
+@@ -916,7 +920,7 @@ def ensure_releaseledger_indexes_binding(
+     layout: ReleaseledgerLedgerLayout,
+     *,
+     preflight: bool = False,
+- ) -> Any:
++) -> Any:
+     """Ensure the disposable index cache has a valid Ledgercore binding."""
+     mount_root = layout.indexes_root
+     marker = layout.indexes_binding_path
+@@ -961,7 +965,9 @@ def ensure_releaseledger_indexes_binding(
+                 "mount": INDEXES_MOUNT,
+                 "path": str(mount_root),
+                 "classification": classification.state,
+-                "unexpected_paths": [str(path) for path in classification.unexpected_paths],
++                "unexpected_paths": [
++                    str(path) for path in classification.unexpected_paths
++                ],
+             },
+             remediation=["Inspect or explicitly repair the disposable index cache."],
+         )
+@@ -986,6 +992,7 @@ def ensure_releaseledger_indexes_binding(
+             },
+         ) from exc
+
++
+ def ensure_releaseledger_config_binding(
+     prepared_target: PreparedReleaseledgerTarget,
+ ) -> Any:
+diff --git a/releaseledger/migration.py b/releaseledger/migration.py
+index e2ce253..879d15d 100644
+--- a/releaseledger/migration.py
++++ b/releaseledger/migration.py
+@@ -1122,9 +1122,7 @@ def validate_domain_records(data_root: Path) -> dict[str, object]:
+         ledger_reports[ref] = report
+         failure_rows = report.get("failures", [])
+         if isinstance(failure_rows, list):
+-            failures.extend(
+-                row for row in failure_rows if isinstance(row, dict)
+-            )
++            failures.extend(row for row in failure_rows if isinstance(row, dict))
+
+     refs = [r for r, _ in iter_legacy_ledger_roots(data_root)]
+
+diff --git a/releaseledger/services/changelog_build.py b/releaseledger/services/changelog_build.py
+index c753566..05789b6 100644
+--- a/releaseledger/services/changelog_build.py
++++ b/releaseledger/services/changelog_build.py
+@@ -139,7 +139,6 @@ def _as_object_list(value: object) -> list[object]:
+     return value if isinstance(value, list) else []
+
+
+-
+ def _github_pr_label(value: str) -> str:
+     if value.startswith("github:pr-"):
+         number = value.removeprefix("github:pr-")
+@@ -149,9 +148,7 @@ def _github_pr_label(value: str) -> str:
+     return f"[{value}]"
+
+
+-def _github_entry_summary(
+-    entry: dict[str, object], config: ProjectConfig
+- ) -> str:
++def _github_entry_summary(entry: dict[str, object], config: ProjectConfig) -> str:
+     summary = str(entry.get("summary", ""))
+     if not config.changelog_github_attribution:
+         return summary
+@@ -169,7 +166,7 @@ def _github_entry_summary(
+
+ def _apply_github_attribution(
+     section: str, entries: list[dict[str, object]], config: ProjectConfig
+- ) -> str:
++) -> str:
+     if not config.changelog_github_attribution:
+         return section
+     lines = section.splitlines()
+@@ -188,7 +185,7 @@ def _apply_github_attribution(
+
+ def _github_compare_url(
+     config: ProjectConfig, previous_version: str, current_version: str
+- ) -> str | None:
++) -> str | None:
+     if not config.changelog_repository_url:
+         return None
+     previous_tag = _format_tag(previous_version, config.changelog_tag_prefix)
+@@ -206,21 +203,26 @@ def _github_compare_url(
+     )
+
+
+-def _render_github_additions(
+-    context: dict[str, object], config: ProjectConfig
+- ) -> str:
++def _render_github_additions(context: dict[str, object], config: ProjectConfig) -> str:
+     additions: list[str] = []
+     entries = context.get("entries", [])
+     if not isinstance(entries, list):
+         entries = []
+-    if config.changelog_github_whats_changed and config.changelog_github_duplicate_categorized_entries:
++    if (
++        config.changelog_github_whats_changed
++        and config.changelog_github_duplicate_categorized_entries
++    ):
+         additions.extend(["### What's Changed", ""])
+         for entry in entries:
+             if isinstance(entry, dict):
+                 additions.append(f"- {_github_entry_summary(entry, config)}")
+         additions.append("")
+     new_contributors = context.get("github_new_contributors", [])
+-    if config.changelog_github_new_contributors and isinstance(new_contributors, list) and new_contributors:
++    if (
++        config.changelog_github_new_contributors
++        and isinstance(new_contributors, list)
++        and new_contributors
++    ):
+         additions.extend(["### New Contributors", ""])
+         for contributor in new_contributors:
+             additions.append(f"- {contributor} made their first contribution")
+@@ -234,8 +236,12 @@ def _render_github_additions(
+             if url:
+                 previous_tag = _format_tag(previous, config.changelog_tag_prefix)
+                 current_tag = _format_tag(current, config.changelog_tag_prefix)
+-                additions.extend([f"**Full Changelog**: [{previous_tag}...{current_tag}]({url})", ""])
++                additions.extend(
++                    [f"**Full Changelog**: [{previous_tag}...{current_tag}]({url})", ""]
++                )
+     return "\n".join(additions).strip()
++
++
+ def _grouped_entries(
+     entries: list[ReleaseEntryRecord],
+     *,
+@@ -407,9 +413,7 @@ def build_changelog_render_context(
+                 break
+     current_contributors: list[str] = []
+     for entry_payload in current_entries:
+-        for contributor in _as_object_list(
+-            entry_payload.get("contributors", [])
+-        ):
++        for contributor in _as_object_list(entry_payload.get("contributors", [])):
+             value = str(contributor)
+             if value not in current_contributors:
+                 current_contributors.append(value)
+diff --git a/releaseledger/services/config.py b/releaseledger/services/config.py
+index 47f2f8f..e8992d7 100644
+--- a/releaseledger/services/config.py
++++ b/releaseledger/services/config.py
+@@ -105,12 +105,8 @@ def storage_where(workspace_root: Path) -> dict[str, object]:
+                             "Generated cache is safe to rebind before the next write."
+                         )
+                     elif classification.unexpected_paths:
+-                        reason = (
+-                            "Foreign cache content: "
+-                            + ", ".join(
+-                                str(path)
+-                                for path in classification.unexpected_paths
+-                            )
++                        reason = "Foreign cache content: " + ", ".join(
++                            str(path) for path in classification.unexpected_paths
+                         )
+                 bindings[mount_name] = {
+                     "valid": valid,
+diff --git a/releaseledger/services/entries.py b/releaseledger/services/entries.py
+index 256484a..268b269 100644
+--- a/releaseledger/services/entries.py
++++ b/releaseledger/services/entries.py
+@@ -110,7 +110,6 @@ def _string_tuple(value: object, field_name: str) -> tuple[str, ...]:
+     return tuple(value)
+
+
+-
+ _ENTRY_BATCH_KEYS = frozenset(
+     {
+         "kind",
+@@ -155,6 +154,7 @@ def _validate_entry_batch_item(data: dict[str, object], index: int) -> None:
+         exit_code=2,
+     )
+
++
+ def _optional_string(value: object, field_name: str) -> str | None:
+     if value is None:
+         return None
+@@ -559,7 +559,9 @@ def update_release_entry(
+         issues=issues if issues is not None else existing.issues,
+         prs=prs if prs is not None else existing.prs,
+         sources=existing.sources,
+-        contributors=contributors if contributors is not None else existing.contributors,
++        contributors=contributors
++        if contributors is not None
++        else existing.contributors,
+         breaking=breaking if breaking is not None else existing.breaking,
+         internal=internal if internal is not None else existing.internal,
+     )
+diff --git a/releaseledger/services/review.py b/releaseledger/services/review.py
+index 4981986..5d996dc 100644
+--- a/releaseledger/services/review.py
++++ b/releaseledger/services/review.py
+@@ -367,7 +367,11 @@ def _problem_next_action(
+             "reason": "Verify that the tag represents the shipped release first.",
+         }
+     if kind == "release_without_tag":
+-        tag = problem_version if problem_version.startswith("v") else f"v{problem_version}"
++        tag = (
++            problem_version
++            if problem_version.startswith("v")
++            else f"v{problem_version}"
++        )
+         return {
+             "code": "create_external_git_tag",
+             "command": f"git tag {tag}",
+@@ -963,11 +967,10 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+     snapshot_drift = git_block.get("snapshot_drift") if git_block else None
+     snapshot_ok = True
+     snapshot_advisories: list[dict[str, object]] = []
+-    if git and git_block is None and (
+-        release.git_base_sha
+-        or release.git_head_sha
+-        or git_base
+-        or git_head
++    if (
++        git
++        and git_block is None
++        and (release.git_base_sha or release.git_head_sha or git_base or git_head)
+     ):
+         snapshot_ok = False
+     if git and (
+@@ -1093,8 +1096,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+         )
+     if snapshot_advisories:
+         recommendations.extend(
+-            str(advisory.get("message", ""))
+-            for advisory in snapshot_advisories
++            str(advisory.get("message", "")) for advisory in snapshot_advisories
+         )
+     if not reconciliation_ok:
+         recommendations.append(
+diff --git a/releaseledger/storage/store.py b/releaseledger/storage/store.py
+index a813bf0..22a26a9 100644
+--- a/releaseledger/storage/store.py
++++ b/releaseledger/storage/store.py
+@@ -152,16 +152,14 @@ def _resolve(workspace_root: Path, ledger_ref: str | None = None) -> ProjectPath
+     return resolve_project_paths(workspace_root, ledger_ref=ledger_ref)
+
+
+-
+-def preflight_index_write(
+-    workspace_root: Path, ledger_ref: str | None = None
+- ) -> None:
++def preflight_index_write(workspace_root: Path, ledger_ref: str | None = None) -> None:
+     """Validate or safely restore the derived index binding before mutation."""
+     paths = _resolve(workspace_root, ledger_ref=ledger_ref)
+     from releaseledger.ledgercore_backend import ensure_releaseledger_indexes_binding
+
+     ensure_releaseledger_indexes_binding(paths.project.layout, preflight=True)
+
++
+ def ensure_release_bundle(paths: ProjectPaths, version: str) -> Path:
+     """Create the release bundle directory and entries subdirectory."""
+     bundle = release_dir(paths, version)
+diff --git a/skills/releaseledger/SKILL.md b/skills/releaseledger/SKILL.md
+index 1ad328b..2f64ddd 100644
+--- a/skills/releaseledger/SKILL.md
++++ b/skills/releaseledger/SKILL.md
+@@ -141,6 +141,7 @@ releaseledger --root PATH --json release show VERSION
+ 4. Use `releaseledger release finalize VERSION --released-at YYYY-MM-DD` to
+    transition an existing planned/draft/candidate release to released.
+ 5. Verify with `releaseledger release show VERSION`.
++
+ ## Correcting canceled or misnumbered releases
+
+ Use this when a recorded release was never actually shipped (no git tag, no
+diff --git a/tests/test_changelog_github.py b/tests/test_changelog_github.py
+index 91ad0d2..673de3e 100644
+--- a/tests/test_changelog_github.py
++++ b/tests/test_changelog_github.py
+@@ -69,7 +69,10 @@ def test_github_attribution_new_contributors_and_compare(tmp_path: Path) -> None
+     assert "Updated current feature by @alice in [#3]" in section
+     assert "### New Contributors" in section
+     assert "- @alice made their first contribution" in section
+-    assert "**Full Changelog**: [v1.0.0...v1.1.0](https://github.com/example/project/compare/v1.0.0...v1.1.0)" in section
++    assert (
++        "**Full Changelog**: [v1.0.0...v1.1.0](https://github.com/example/project/compare/v1.0.0...v1.1.0)"
++        in section
++    )
+
+
+ def test_github_duplicate_mode_is_explicit(tmp_path: Path) -> None:
+diff --git a/tests/test_entry_atomicity.py b/tests/test_entry_atomicity.py
+index 045e904..09c1379 100644
+--- a/tests/test_entry_atomicity.py
++++ b/tests/test_entry_atomicity.py
+@@ -265,20 +265,20 @@ def test_add_many_rejects_duplicate_source_refs_before_write(tmp_path: Path) ->
+     assert len(load_entries(workspace, "0.5.0")) == 1
+
+
+-
+-
+ def test_entry_apply_preserves_contributors_and_prs(tmp_path: Path) -> None:
+     workspace = _init(tmp_path)
+     _create_release(workspace)
+     result = add_many_release_entries(
+         workspace,
+         release_version="0.5.0",
+-        entries=[{
+-            "kind": "changed",
+-            "summary": "Added reviewed attribution",
+-            "prs": ["github:pr-123"],
+-            "contributors": ["@alice"],
+-        }],
++        entries=[
++            {
++                "kind": "changed",
++                "summary": "Added reviewed attribution",
++                "prs": ["github:pr-123"],
++                "contributors": ["@alice"],
++            }
++        ],
+     )
+     assert result["written"] is True
+     entry = load_entries(workspace, "0.5.0")[0]
+@@ -293,14 +293,18 @@ def test_entry_apply_rejects_unknown_item_keys(tmp_path: Path) -> None:
+         add_many_release_entries(
+             workspace,
+             release_version="0.5.0",
+-            entries=[{
+-                "kind": "changed",
+-                "summary": "Typo should fail",
+-                "contributers": ["@alice"],
+-            }],
++            entries=[
++                {
++                    "kind": "changed",
++                    "summary": "Typo should fail",
++                    "contributers": ["@alice"],
++                }
++            ],
+         )
+     assert _entry_files(workspace) == []
+     assert load_release(workspace, "0.5.0").entry_count == 0
++
++
+ # --------------------------------------------------------------------------
+ # Sanity: the stale-revision failure mode is real (no patching)
+ # --------------------------------------------------------------------------
+diff --git a/tests/test_index_binding.py b/tests/test_index_binding.py
+index 162e6af..3f61624 100644
+--- a/tests/test_index_binding.py
++++ b/tests/test_index_binding.py
+@@ -53,7 +53,9 @@ def _remove_index_marker(tmp_path: Path) -> Path:
+     return paths.project.indexes_root
+
+
+-def test_missing_index_marker_with_current_generated_tree_is_rebound(tmp_path: Path) -> None:
++def test_missing_index_marker_with_current_generated_tree_is_rebound(
++    tmp_path: Path,
++) -> None:
+     initialize_project(tmp_path)
+     create_release(tmp_path, version="1.0.0")
+     root = _remove_index_marker(tmp_path)
+@@ -64,7 +66,9 @@ def test_missing_index_marker_with_current_generated_tree_is_rebound(tmp_path: P
+     assert report is not None and report.valid is True
+
+
+-def test_missing_index_marker_with_multiple_ledger_refs_is_rebound(tmp_path: Path) -> None:
++def test_missing_index_marker_with_multiple_ledger_refs_is_rebound(
++    tmp_path: Path,
++) -> None:
+     initialize_project(tmp_path)
+     create_release(tmp_path, version="1.0.0")
+     root = _remove_index_marker(tmp_path)
+@@ -77,7 +81,9 @@ def test_missing_index_marker_with_multiple_ledger_refs_is_rebound(tmp_path: Pat
+     assert (root / ".ledger-project.toml").is_file()
+
+
+-def test_missing_index_marker_with_legacy_flat_generated_files_is_rebound(tmp_path: Path) -> None:
++def test_missing_index_marker_with_legacy_flat_generated_files_is_rebound(
++    tmp_path: Path,
++) -> None:
+     initialize_project(tmp_path)
+     create_release(tmp_path, version="1.0.0")
+     root = _remove_index_marker(tmp_path)
+@@ -85,13 +91,16 @@ def test_missing_index_marker_with_legacy_flat_generated_files_is_rebound(tmp_pa
+     (root / "releases.json").write_bytes((current / "releases.json").read_bytes())
+     (root / "entries.json").write_bytes((current / "entries.json").read_bytes())
+     import shutil
++
+     shutil.rmtree(root / "ledgers")
+     assert classify_releaseledger_index_cache(root).state == "generated-legacy"
+     rebuild_indexes(tmp_path)
+     assert (root / ".ledger-project.toml").is_file()
+
+
+-def test_missing_index_marker_with_foreign_nested_file_is_rejected(tmp_path: Path) -> None:
++def test_missing_index_marker_with_foreign_nested_file_is_rejected(
++    tmp_path: Path,
++) -> None:
+     initialize_project(tmp_path)
+     create_release(tmp_path, version="1.0.0")
+     root = _remove_index_marker(tmp_path)
+diff --git a/tests/test_stale_marker_workflow.py b/tests/test_stale_marker_workflow.py
+index de4a3b2..5357e40 100644
+--- a/tests/test_stale_marker_workflow.py
++++ b/tests/test_stale_marker_workflow.py
+@@ -33,7 +33,9 @@ def _commit(root: Path, message: str, name: str) -> None:
+     _git(root, "commit", "-m", message)
+
+
+-def test_stale_marker_prepare_and_publish_workflow_is_idempotent(tmp_path: Path) -> None:
++def test_stale_marker_prepare_and_publish_workflow_is_idempotent(
++    tmp_path: Path,
++) -> None:
+     _git(tmp_path, "init")
+     _git(tmp_path, "config", "user.email", "test@example.com")
+     _git(tmp_path, "config", "user.name", "Test User")
+@@ -95,12 +97,8 @@ def test_stale_marker_prepare_and_publish_workflow_is_idempotent(tmp_path: Path)
+             "decision": "accepted",
+         }
+     )
+-    audit_path.write_text(
+-        yaml.safe_dump(audit, sort_keys=False), encoding="utf-8"
+-    )
+-    update_commit_audit_sheet(
+-        tmp_path, version="v0.2.0", file=audit_path
+-    )
++    audit_path.write_text(yaml.safe_dump(audit, sort_keys=False), encoding="utf-8")
++    update_commit_audit_sheet(tmp_path, version="v0.2.0", file=audit_path)
+
+     finalize_release(tmp_path, version="v0.2.0", released_at="2026-02-01")
+     build_changelog_file(
+@@ -124,7 +122,16 @@ def test_stale_marker_prepare_and_publish_workflow_is_idempotent(tmp_path: Path)
+         published["checks"],
+     )
+     assert "snapshot" not in published["failed_checks"]
+-    assert len([event for event in load_events(tmp_path) if event.event == "release.created"]) == 2
++    assert (
++        len(
++            [
++                event
++                for event in load_events(tmp_path)
++                if event.event == "release.created"
++            ]
++        )
++        == 2
++    )
+
+     before_revision = load_release(tmp_path, "v0.2.0").versioning.revision
+     build_changelog_file(

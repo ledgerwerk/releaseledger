@@ -1,0 +1,70 @@
+{
+  "candidate_count": 2,
+  "candidates": [
+    {
+      "additions": 890,
+      "deletions": 95,
+      "patch_file": "99d03b1.patch",
+      "patch_sha256": "d616593601e7bb25beb7ee07e3d2260be563cde36e2544c4c637bbfcb90fe710",
+      "paths": [
+        "docs/commands.md",
+        "docs/quickstart.md",
+        "releaseledger/cli.py",
+        "releaseledger/ledgercore_backend.py",
+        "releaseledger/migration.py",
+        "releaseledger/services/changelog_build.py",
+        "releaseledger/services/config.py",
+        "releaseledger/services/entries.py",
+        "releaseledger/services/project_state.py",
+        "releaseledger/services/releases.py",
+        "releaseledger/services/review.py",
+        "releaseledger/storage/paths.py",
+        "releaseledger/storage/store.py",
+        "skills/releaseledger/SKILL.md",
+        "tests/test_changelog_github.py",
+        "tests/test_entry_atomicity.py",
+        "tests/test_git_review.py",
+        "tests/test_index_binding.py",
+        "tests/test_stale_marker_workflow.py"
+      ],
+      "sha": "99d03b10f6853e0103cee5b6349bee7db88b06d9",
+      "short_sha": "99d03b1",
+      "source_ref": "git:99d03b10f6853e0103cee5b6349bee7db88b06d9"
+    },
+    {
+      "additions": 111,
+      "deletions": 81,
+      "patch_file": "9510914.patch",
+      "patch_sha256": "781d3f18194d859b951357564ef5911110b261295b66ba68514cad753887826b",
+      "paths": [
+        ".ledger/releaseledger/data/ledgers/main/events/events.jsonl",
+        ".ledger/releaseledger/data/ledgers/main/releases/v0.4.5/release.md",
+        "docs/changelog.md",
+        "releaseledger/cli.py",
+        "releaseledger/ledgercore_backend.py",
+        "releaseledger/migration.py",
+        "releaseledger/services/changelog_build.py",
+        "releaseledger/services/config.py",
+        "releaseledger/services/entries.py",
+        "releaseledger/services/review.py",
+        "releaseledger/storage/store.py",
+        "skills/releaseledger/SKILL.md",
+        "tests/test_changelog_github.py",
+        "tests/test_entry_atomicity.py",
+        "tests/test_index_binding.py",
+        "tests/test_stale_marker_workflow.py"
+      ],
+      "sha": "95109145aa3a64687ced6253309922eca3b53ecf",
+      "short_sha": "9510914",
+      "source_ref": "git:95109145aa3a64687ced6253309922eca3b53ecf"
+    }
+  ],
+  "git_base_ref": "84bf0b47d02d346940e7496a560b7589b26f5428",
+  "git_base_sha": "84bf0b47d02d346940e7496a560b7589b26f5428",
+  "git_head_ref": "95109145aa3a64687ced6253309922eca3b53ecf",
+  "git_head_sha": "95109145aa3a64687ced6253309922eca3b53ecf",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.4.6",
+  "schema_version": 1
+}
