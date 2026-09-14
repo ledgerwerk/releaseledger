@@ -139,7 +139,6 @@ def _as_object_list(value: object) -> list[object]:
     return value if isinstance(value, list) else []
 
 
-
 def _github_pr_label(value: str) -> str:
     if value.startswith("github:pr-"):
         number = value.removeprefix("github:pr-")
@@ -149,9 +148,7 @@ def _github_pr_label(value: str) -> str:
     return f"[{value}]"
 
 
-def _github_entry_summary(
-    entry: dict[str, object], config: ProjectConfig
- ) -> str:
+def _github_entry_summary(entry: dict[str, object], config: ProjectConfig) -> str:
     summary = str(entry.get("summary", ""))
     if not config.changelog_github_attribution:
         return summary
@@ -169,7 +166,7 @@ def _github_entry_summary(
 
 def _apply_github_attribution(
     section: str, entries: list[dict[str, object]], config: ProjectConfig
- ) -> str:
+) -> str:
     if not config.changelog_github_attribution:
         return section
     lines = section.splitlines()
@@ -188,7 +185,7 @@ def _apply_github_attribution(
 
 def _github_compare_url(
     config: ProjectConfig, previous_version: str, current_version: str
- ) -> str | None:
+) -> str | None:
     if not config.changelog_repository_url:
         return None
     previous_tag = _format_tag(previous_version, config.changelog_tag_prefix)
@@ -206,21 +203,26 @@ def _github_compare_url(
     )
 
 
-def _render_github_additions(
-    context: dict[str, object], config: ProjectConfig
- ) -> str:
+def _render_github_additions(context: dict[str, object], config: ProjectConfig) -> str:
     additions: list[str] = []
     entries = context.get("entries", [])
     if not isinstance(entries, list):
         entries = []
-    if config.changelog_github_whats_changed and config.changelog_github_duplicate_categorized_entries:
+    if (
+        config.changelog_github_whats_changed
+        and config.changelog_github_duplicate_categorized_entries
+    ):
         additions.extend(["### What's Changed", ""])
         for entry in entries:
             if isinstance(entry, dict):
                 additions.append(f"- {_github_entry_summary(entry, config)}")
         additions.append("")
     new_contributors = context.get("github_new_contributors", [])
-    if config.changelog_github_new_contributors and isinstance(new_contributors, list) and new_contributors:
+    if (
+        config.changelog_github_new_contributors
+        and isinstance(new_contributors, list)
+        and new_contributors
+    ):
         additions.extend(["### New Contributors", ""])
         for contributor in new_contributors:
             additions.append(f"- {contributor} made their first contribution")
@@ -234,8 +236,12 @@ def _render_github_additions(
             if url:
                 previous_tag = _format_tag(previous, config.changelog_tag_prefix)
                 current_tag = _format_tag(current, config.changelog_tag_prefix)
-                additions.extend([f"**Full Changelog**: [{previous_tag}...{current_tag}]({url})", ""])
+                additions.extend(
+                    [f"**Full Changelog**: [{previous_tag}...{current_tag}]({url})", ""]
+                )
     return "\n".join(additions).strip()
+
+
 def _grouped_entries(
     entries: list[ReleaseEntryRecord],
     *,
@@ -407,9 +413,7 @@ def build_changelog_render_context(
                 break
     current_contributors: list[str] = []
     for entry_payload in current_entries:
-        for contributor in _as_object_list(
-            entry_payload.get("contributors", [])
-        ):
+        for contributor in _as_object_list(entry_payload.get("contributors", [])):
             value = str(contributor)
             if value not in current_contributors:
                 current_contributors.append(value)

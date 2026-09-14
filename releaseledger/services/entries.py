@@ -110,7 +110,6 @@ def _string_tuple(value: object, field_name: str) -> tuple[str, ...]:
     return tuple(value)
 
 
-
 _ENTRY_BATCH_KEYS = frozenset(
     {
         "kind",
@@ -154,6 +153,7 @@ def _validate_entry_batch_item(data: dict[str, object], index: int) -> None:
         code=CODE_VALIDATION_ERROR,
         exit_code=2,
     )
+
 
 def _optional_string(value: object, field_name: str) -> str | None:
     if value is None:
@@ -559,7 +559,9 @@ def update_release_entry(
         issues=issues if issues is not None else existing.issues,
         prs=prs if prs is not None else existing.prs,
         sources=existing.sources,
-        contributors=contributors if contributors is not None else existing.contributors,
+        contributors=contributors
+        if contributors is not None
+        else existing.contributors,
         breaking=breaking if breaking is not None else existing.breaking,
         internal=internal if internal is not None else existing.internal,
     )

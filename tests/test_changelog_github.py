@@ -69,7 +69,10 @@ def test_github_attribution_new_contributors_and_compare(tmp_path: Path) -> None
     assert "Updated current feature by @alice in [#3]" in section
     assert "### New Contributors" in section
     assert "- @alice made their first contribution" in section
-    assert "**Full Changelog**: [v1.0.0...v1.1.0](https://github.com/example/project/compare/v1.0.0...v1.1.0)" in section
+    assert (
+        "**Full Changelog**: [v1.0.0...v1.1.0](https://github.com/example/project/compare/v1.0.0...v1.1.0)"
+        in section
+    )
 
 
 def test_github_duplicate_mode_is_explicit(tmp_path: Path) -> None:

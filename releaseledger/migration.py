@@ -1122,9 +1122,7 @@ def validate_domain_records(data_root: Path) -> dict[str, object]:
         ledger_reports[ref] = report
         failure_rows = report.get("failures", [])
         if isinstance(failure_rows, list):
-            failures.extend(
-                row for row in failure_rows if isinstance(row, dict)
-            )
+            failures.extend(row for row in failure_rows if isinstance(row, dict))
 
     refs = [r for r, _ in iter_legacy_ledger_roots(data_root)]
 

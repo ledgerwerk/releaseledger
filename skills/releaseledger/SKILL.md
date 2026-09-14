@@ -141,6 +141,7 @@ releaseledger --root PATH --json release show VERSION
 4. Use `releaseledger release finalize VERSION --released-at YYYY-MM-DD` to
    transition an existing planned/draft/candidate release to released.
 5. Verify with `releaseledger release show VERSION`.
+
 ## Correcting canceled or misnumbered releases
 
 Use this when a recorded release was never actually shipped (no git tag, no

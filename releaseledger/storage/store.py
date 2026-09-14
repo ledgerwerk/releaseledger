@@ -152,15 +152,13 @@ def _resolve(workspace_root: Path, ledger_ref: str | None = None) -> ProjectPath
     return resolve_project_paths(workspace_root, ledger_ref=ledger_ref)
 
 
-
-def preflight_index_write(
-    workspace_root: Path, ledger_ref: str | None = None
- ) -> None:
+def preflight_index_write(workspace_root: Path, ledger_ref: str | None = None) -> None:
     """Validate or safely restore the derived index binding before mutation."""
     paths = _resolve(workspace_root, ledger_ref=ledger_ref)
     from releaseledger.ledgercore_backend import ensure_releaseledger_indexes_binding
 
     ensure_releaseledger_indexes_binding(paths.project.layout, preflight=True)
+
 
 def ensure_release_bundle(paths: ProjectPaths, version: str) -> Path:
     """Create the release bundle directory and entries subdirectory."""

@@ -863,15 +863,11 @@ def _cache_relative_path(root: Path, path: Path) -> Path:
 def classify_releaseledger_index_cache(root: Path) -> IndexCacheClassification:
     """Classify cache contents before adopting an unbound index directory."""
     if root.is_symlink():
-        return IndexCacheClassification(
-            "foreign", (_cache_relative_path(root, root),)
-        )
+        return IndexCacheClassification("foreign", (_cache_relative_path(root, root),))
     if not root.exists():
         return IndexCacheClassification("missing")
     if not root.is_dir():
-        return IndexCacheClassification(
-            "foreign", (_cache_relative_path(root, root),)
-        )
+        return IndexCacheClassification("foreign", (_cache_relative_path(root, root),))
     children = sorted(root.iterdir(), key=lambda path: path.name)
     if not children:
         return IndexCacheClassification("empty")
@@ -897,7 +893,11 @@ def classify_releaseledger_index_cache(root: Path) -> IndexCacheClassification:
                     unexpected.append(_cache_relative_path(root, ledger_dir))
                     continue
                 for child in sorted(ledger_dir.iterdir(), key=lambda path: path.name):
-                    if child.is_symlink() or not child.is_file() or child.name not in generated_files:
+                    if (
+                        child.is_symlink()
+                        or not child.is_file()
+                        or child.name not in generated_files
+                    ):
                         unexpected.append(_cache_relative_path(root, child))
         if not unexpected:
             return IndexCacheClassification("generated-current")
@@ -907,7 +907,11 @@ def classify_releaseledger_index_cache(root: Path) -> IndexCacheClassification:
         unexpected.append(_cache_relative_path(root, child))
         if child.is_dir() and not child.is_symlink():
             for nested in child.rglob("*"):
-                if nested.is_symlink() or not nested.is_dir() and nested.name not in generated_files:
+                if (
+                    nested.is_symlink()
+                    or not nested.is_dir()
+                    and nested.name not in generated_files
+                ):
                     unexpected.append(_cache_relative_path(root, nested))
     return IndexCacheClassification("foreign", tuple(unexpected))
 
@@ -916,7 +920,7 @@ def ensure_releaseledger_indexes_binding(
     layout: ReleaseledgerLedgerLayout,
     *,
     preflight: bool = False,
- ) -> Any:
+) -> Any:
     """Ensure the disposable index cache has a valid Ledgercore binding."""
     mount_root = layout.indexes_root
     marker = layout.indexes_binding_path
@@ -961,7 +965,9 @@ def ensure_releaseledger_indexes_binding(
                 "mount": INDEXES_MOUNT,
                 "path": str(mount_root),
                 "classification": classification.state,
-                "unexpected_paths": [str(path) for path in classification.unexpected_paths],
+                "unexpected_paths": [
+                    str(path) for path in classification.unexpected_paths
+                ],
             },
             remediation=["Inspect or explicitly repair the disposable index cache."],
         )
@@ -985,6 +991,7 @@ def ensure_releaseledger_indexes_binding(
                 "preflight": preflight,
             },
         ) from exc
+
 
 def ensure_releaseledger_config_binding(
     prepared_target: PreparedReleaseledgerTarget,

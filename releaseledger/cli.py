@@ -2779,9 +2779,7 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
     scope = str(result.get("scope", "target"))
     history_findings_value = result.get("history_findings", 0)
     history_findings = (
-        history_findings_value
-        if isinstance(history_findings_value, int)
-        else 0
+        history_findings_value if isinstance(history_findings_value, int) else 0
     )
     lines.append(
         f"Scope           {scope}  target_ready={result.get('target_ready', False)} "

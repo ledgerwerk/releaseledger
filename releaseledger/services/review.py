@@ -367,7 +367,11 @@ def _problem_next_action(
             "reason": "Verify that the tag represents the shipped release first.",
         }
     if kind == "release_without_tag":
-        tag = problem_version if problem_version.startswith("v") else f"v{problem_version}"
+        tag = (
+            problem_version
+            if problem_version.startswith("v")
+            else f"v{problem_version}"
+        )
         return {
             "code": "create_external_git_tag",
             "command": f"git tag {tag}",
@@ -963,11 +967,10 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
     snapshot_drift = git_block.get("snapshot_drift") if git_block else None
     snapshot_ok = True
     snapshot_advisories: list[dict[str, object]] = []
-    if git and git_block is None and (
-        release.git_base_sha
-        or release.git_head_sha
-        or git_base
-        or git_head
+    if (
+        git
+        and git_block is None
+        and (release.git_base_sha or release.git_head_sha or git_base or git_head)
     ):
         snapshot_ok = False
     if git and (
@@ -1093,8 +1096,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         )
     if snapshot_advisories:
         recommendations.extend(
-            str(advisory.get("message", ""))
-            for advisory in snapshot_advisories
+            str(advisory.get("message", "")) for advisory in snapshot_advisories
         )
     if not reconciliation_ok:
         recommendations.append(

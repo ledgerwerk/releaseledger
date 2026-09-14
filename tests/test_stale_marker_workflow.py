@@ -33,7 +33,9 @@ def _commit(root: Path, message: str, name: str) -> None:
     _git(root, "commit", "-m", message)
 
 
-def test_stale_marker_prepare_and_publish_workflow_is_idempotent(tmp_path: Path) -> None:
+def test_stale_marker_prepare_and_publish_workflow_is_idempotent(
+    tmp_path: Path,
+) -> None:
     _git(tmp_path, "init")
     _git(tmp_path, "config", "user.email", "test@example.com")
     _git(tmp_path, "config", "user.name", "Test User")
@@ -95,12 +97,8 @@ def test_stale_marker_prepare_and_publish_workflow_is_idempotent(tmp_path: Path)
             "decision": "accepted",
         }
     )
-    audit_path.write_text(
-        yaml.safe_dump(audit, sort_keys=False), encoding="utf-8"
-    )
-    update_commit_audit_sheet(
-        tmp_path, version="v0.2.0", file=audit_path
-    )
+    audit_path.write_text(yaml.safe_dump(audit, sort_keys=False), encoding="utf-8")
+    update_commit_audit_sheet(tmp_path, version="v0.2.0", file=audit_path)
 
     finalize_release(tmp_path, version="v0.2.0", released_at="2026-02-01")
     build_changelog_file(
@@ -124,7 +122,16 @@ def test_stale_marker_prepare_and_publish_workflow_is_idempotent(tmp_path: Path)
         published["checks"],
     )
     assert "snapshot" not in published["failed_checks"]
-    assert len([event for event in load_events(tmp_path) if event.event == "release.created"]) == 2
+    assert (
+        len(
+            [
+                event
+                for event in load_events(tmp_path)
+                if event.event == "release.created"
+            ]
+        )
+        == 2
+    )
 
     before_revision = load_release(tmp_path, "v0.2.0").versioning.revision
     build_changelog_file(

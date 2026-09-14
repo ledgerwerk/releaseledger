@@ -105,12 +105,8 @@ def storage_where(workspace_root: Path) -> dict[str, object]:
                             "Generated cache is safe to rebind before the next write."
                         )
                     elif classification.unexpected_paths:
-                        reason = (
-                            "Foreign cache content: "
-                            + ", ".join(
-                                str(path)
-                                for path in classification.unexpected_paths
-                            )
+                        reason = "Foreign cache content: " + ", ".join(
+                            str(path) for path in classification.unexpected_paths
                         )
                 bindings[mount_name] = {
                     "valid": valid,

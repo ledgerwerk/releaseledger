@@ -265,20 +265,20 @@ def test_add_many_rejects_duplicate_source_refs_before_write(tmp_path: Path) -> 
     assert len(load_entries(workspace, "0.5.0")) == 1
 
 
-
-
 def test_entry_apply_preserves_contributors_and_prs(tmp_path: Path) -> None:
     workspace = _init(tmp_path)
     _create_release(workspace)
     result = add_many_release_entries(
         workspace,
         release_version="0.5.0",
-        entries=[{
-            "kind": "changed",
-            "summary": "Added reviewed attribution",
-            "prs": ["github:pr-123"],
-            "contributors": ["@alice"],
-        }],
+        entries=[
+            {
+                "kind": "changed",
+                "summary": "Added reviewed attribution",
+                "prs": ["github:pr-123"],
+                "contributors": ["@alice"],
+            }
+        ],
     )
     assert result["written"] is True
     entry = load_entries(workspace, "0.5.0")[0]
@@ -293,14 +293,18 @@ def test_entry_apply_rejects_unknown_item_keys(tmp_path: Path) -> None:
         add_many_release_entries(
             workspace,
             release_version="0.5.0",
-            entries=[{
-                "kind": "changed",
-                "summary": "Typo should fail",
-                "contributers": ["@alice"],
-            }],
+            entries=[
+                {
+                    "kind": "changed",
+                    "summary": "Typo should fail",
+                    "contributers": ["@alice"],
+                }
+            ],
         )
     assert _entry_files(workspace) == []
     assert load_release(workspace, "0.5.0").entry_count == 0
+
+
 # --------------------------------------------------------------------------
 # Sanity: the stale-revision failure mode is real (no patching)
 # --------------------------------------------------------------------------

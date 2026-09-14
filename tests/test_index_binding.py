@@ -53,7 +53,9 @@ def _remove_index_marker(tmp_path: Path) -> Path:
     return paths.project.indexes_root
 
 
-def test_missing_index_marker_with_current_generated_tree_is_rebound(tmp_path: Path) -> None:
+def test_missing_index_marker_with_current_generated_tree_is_rebound(
+    tmp_path: Path,
+) -> None:
     initialize_project(tmp_path)
     create_release(tmp_path, version="1.0.0")
     root = _remove_index_marker(tmp_path)
@@ -64,7 +66,9 @@ def test_missing_index_marker_with_current_generated_tree_is_rebound(tmp_path: P
     assert report is not None and report.valid is True
 
 
-def test_missing_index_marker_with_multiple_ledger_refs_is_rebound(tmp_path: Path) -> None:
+def test_missing_index_marker_with_multiple_ledger_refs_is_rebound(
+    tmp_path: Path,
+) -> None:
     initialize_project(tmp_path)
     create_release(tmp_path, version="1.0.0")
     root = _remove_index_marker(tmp_path)
@@ -77,7 +81,9 @@ def test_missing_index_marker_with_multiple_ledger_refs_is_rebound(tmp_path: Pat
     assert (root / ".ledger-project.toml").is_file()
 
 
-def test_missing_index_marker_with_legacy_flat_generated_files_is_rebound(tmp_path: Path) -> None:
+def test_missing_index_marker_with_legacy_flat_generated_files_is_rebound(
+    tmp_path: Path,
+) -> None:
     initialize_project(tmp_path)
     create_release(tmp_path, version="1.0.0")
     root = _remove_index_marker(tmp_path)
@@ -85,13 +91,16 @@ def test_missing_index_marker_with_legacy_flat_generated_files_is_rebound(tmp_pa
     (root / "releases.json").write_bytes((current / "releases.json").read_bytes())
     (root / "entries.json").write_bytes((current / "entries.json").read_bytes())
     import shutil
+
     shutil.rmtree(root / "ledgers")
     assert classify_releaseledger_index_cache(root).state == "generated-legacy"
     rebuild_indexes(tmp_path)
     assert (root / ".ledger-project.toml").is_file()
 
 
-def test_missing_index_marker_with_foreign_nested_file_is_rejected(tmp_path: Path) -> None:
+def test_missing_index_marker_with_foreign_nested_file_is_rejected(
+    tmp_path: Path,
+) -> None:
     initialize_project(tmp_path)
     create_release(tmp_path, version="1.0.0")
     root = _remove_index_marker(tmp_path)
