@@ -207,7 +207,7 @@ releaseledger changelog preview VERSION [--format markdown|json] [--output PATH]
                                 [--include-sources]
                                 [--include-status STATUS]... [--lint]
 
-releaseledger changelog build VERSION [--target-file PATH]
+releaseledger changelog build VERSION [--output PATH]
                             [--release-date YYYY-MM-DD]
                             [--unreleased]
                             [--include-internal]
@@ -218,7 +218,7 @@ releaseledger changelog build VERSION [--target-file PATH]
                             [--include-status STATUS]...
                             [--strict]
                             [--allow-empty]
-releaseledger changelog build [VERSION] [--all] [--target-file PATH]
+releaseledger changelog build [VERSION] [--all] [--output PATH]
                             [--include-release-status STATUS]...
                             [--preserve-unreleased|--no-preserve-unreleased]
                             [--unreleased-version VERSION]

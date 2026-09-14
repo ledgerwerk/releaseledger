@@ -628,7 +628,7 @@ def release_tag_command(
         int | None, typer.Option("--source-count", help="Number of source records.")
     ] = None,
 ) -> None:
-    """Create a release with status 'released'."""
+    """Create a released Releaseledger record; this does not create a Git tag."""
     state = cli_state_from_context(ctx)
 
     def produce() -> CommandResult:
@@ -1082,10 +1082,12 @@ def release_prepare_command(
             f"{outputs_dict.get('evidence_manifest', '')}.\n"
             f"2. Record include/exclude decisions in {outputs_dict.get('audit_decisions_yaml', '')}.\n"
             "3. Edit entries.yaml from reviewed behavior; do not copy commit subjects.\n"
-            f"4. releaseledger entry apply {entries_path} --dry-run\n"
-            f"5. releaseledger entry apply {entries_path}\n"
-            f"6. releaseledger release check {version} --phase finalize --strict\n"
-            "7. releaseledger changelog build ..."
+            f"4. releaseledger entry apply {version} --file {entries_path} --dry-run\n"
+            f"5. releaseledger entry apply {version} --file {entries_path}\n"
+            f"6. releaseledger release check {version} --phase finalize "
+            f"--released-at {released_at or 'YYYY-MM-DD'} --strict\n"
+            f"7. releaseledger changelog build {version} --output CHANGELOG.md\n"
+            "8. Stop here for preparation-only work; publication requires finalize, an external commit/tag, then the published check."
         )
         return result, [], human
 
@@ -1704,6 +1706,10 @@ def entry_add_command(
         list[str] | None,
         typer.Option("--pr", help="Pull request reference (repeatable)."),
     ] = None,
+    contributors: Annotated[
+        list[str] | None,
+        typer.Option("--contributor", help="Contributor handle (repeatable)."),
+    ] = None,
     sources: Annotated[
         list[str] | None,
         typer.Option("--source", help="Provenance source reference (repeatable)."),
@@ -1745,6 +1751,7 @@ def entry_add_command(
             paths=tuple(paths or ()),
             issues=tuple(issues or ()),
             prs=tuple(prs or ()),
+            contributors=tuple(contributors or ()),
             sources=tuple(sources or ()),
             status=status,
             audience=audience,
@@ -1836,6 +1843,7 @@ def entry_update_command(
     paths: Annotated[list[str] | None, typer.Option("--path")] = None,
     issues: Annotated[list[str] | None, typer.Option("--issue")] = None,
     prs: Annotated[list[str] | None, typer.Option("--pr")] = None,
+    contributors: Annotated[list[str] | None, typer.Option("--contributor")] = None,
     breaking: Annotated[bool | None, typer.Option("--breaking/--no-breaking")] = None,
     internal: Annotated[bool | None, typer.Option("--internal/--no-internal")] = None,
     reason: Annotated[str | None, typer.Option("--reason")] = None,
@@ -1860,6 +1868,7 @@ def entry_update_command(
                 paths,
                 issues,
                 prs,
+                contributors,
                 breaking,
                 internal,
             )
@@ -1907,6 +1916,7 @@ def entry_update_command(
             paths=tuple(paths) if paths is not None else None,
             issues=tuple(issues) if issues is not None else None,
             prs=tuple(prs) if prs is not None else None,
+            contributors=tuple(contributors) if contributors is not None else None,
             breaking=breaking,
             internal=internal,
             reason=reason,
@@ -2767,21 +2777,28 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
             audit_complete_ok = bool(complete.get("ok", False))
     lines = [f"RELEASE CHECK {version}", ""]
     scope = str(result.get("scope", "target"))
-    history_findings = int(result.get("history_findings", 0))
+    history_findings_value = result.get("history_findings", 0)
+    history_findings = (
+        history_findings_value
+        if isinstance(history_findings_value, int)
+        else 0
+    )
     lines.append(
         f"Scope           {scope}  target_ready={result.get('target_ready', False)} "
         f"history_ready={result.get('history_ready', False)}"
     )
     if history_findings:
         lines.append(f"History health  WARN  {history_findings} unrelated finding(s)")
-    lines.append(
-        f"Snapshot        {'OK' if git_block else 'WARN'}  "
-        + (
-            str(git_block.get("range", "no stored snapshot"))
-            if isinstance(git_block, dict)
-            else "no stored snapshot"
-        )
-    )
+    snapshot_status = "WARN"
+    snapshot_range = "no stored snapshot"
+    if isinstance(git_block, dict):
+        snapshot_range = str(git_block.get("range", snapshot_range))
+        drift = git_block.get("snapshot_drift")
+        if isinstance(drift, dict) and drift.get("status") == "drifted":
+            snapshot_status = "DRIFT"
+        elif bool(checks_dict.get("snapshot_ok", False)):
+            snapshot_status = "OK"
+    lines.append(f"Snapshot        {snapshot_status}  {snapshot_range}")
     audit_evidence_text = "no audit sheet"
     if isinstance(audit_block, dict):
         audit_evidence_text = (

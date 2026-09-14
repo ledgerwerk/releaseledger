@@ -79,12 +79,43 @@ def storage_where(workspace_root: Path) -> dict[str, object]:
 
         bindings: dict[str, object] = {}
         report = layout.validation_report
+        indexes_repairable = False
         if report is not None:
             for item in report.results:
-                bindings[item.binding.mount if item.binding else "unknown"] = {
-                    "valid": item.valid,
+                mount_name = item.binding.mount if item.binding else "unknown"
+                valid = item.valid
+                reason = item.reason or ""
+                if mount_name == "indexes" and not item.valid:
+                    from releaseledger.ledgercore_backend import (
+                        classify_releaseledger_index_cache,
+                    )
+
+                    classification = classify_releaseledger_index_cache(
+                        layout.indexes_root
+                    )
+                    if classification.state in {
+                        "missing",
+                        "empty",
+                        "generated-current",
+                        "generated-legacy",
+                    }:
+                        indexes_repairable = True
+                        valid = True
+                        reason = (
+                            "Generated cache is safe to rebind before the next write."
+                        )
+                    elif classification.unexpected_paths:
+                        reason = (
+                            "Foreign cache content: "
+                            + ", ".join(
+                                str(path)
+                                for path in classification.unexpected_paths
+                            )
+                        )
+                bindings[mount_name] = {
+                    "valid": valid,
                     "path": str(item.path),
-                    "reason": item.reason or "",
+                    "reason": reason,
                     "storage": item.binding.storage if item.binding else "",
                 }
         return {
@@ -104,7 +135,8 @@ def storage_where(workspace_root: Path) -> dict[str, object]:
             "indexes_root": str(layout.indexes_root),
             "active_ledger_ref": ledger_ref,
             "active_ledger_dir": ledger_dir,
-            "layout_valid": bool(report is None or report.valid),
+            "layout_valid": bool(report is None or report.valid or indexes_repairable),
+            "indexes_repairable": indexes_repairable,
             "bindings": bindings,
             "mounts": {
                 "data": {

@@ -95,9 +95,9 @@ releaseledger audit sync VERSION
 releaseledger commands
 releaseledger help release review
 releaseledger branch status
-releaseledger changelog build --strict --target-file CHANGELOG.md
-releaseledger changelog build VERSION --strict --target-file CHANGELOG.md
-releaseledger changelog build VERSION --strict --target-file CHANGELOG.md --replace-existing
+releaseledger changelog build --strict --output CHANGELOG.md
+releaseledger changelog build VERSION --strict --output CHANGELOG.md
+releaseledger changelog build VERSION --strict --output CHANGELOG.md --replace-existing
 
 releaseledger storage where
 releaseledger storage validate --strict
@@ -132,15 +132,15 @@ releaseledger --root PATH --json release show VERSION
 
 ## Release creation protocol
 
-1. Create a planned or candidate release:
-   `releaseledger release create VERSION --title "Release VERSION"`.
-2. Set `--previous VERSION` when the previous version is known and should appear in generated context.
-3. Set `--released-at YYYY-MM-DD` only when the date is known.
-4. Use `releaseledger release tag VERSION` for an immediately released/tagged release.
-5. Use `releaseledger release finalize VERSION --released-at YYYY-MM-DD` to transition an existing planned/draft/candidate release to released.
-6. Verify with:
-   `releaseledger release show VERSION`.
-
+1. Prepare a planned release and proposed date with:
+   `releaseledger release prepare VERSION --previous PREV_VERSION --released-at YYYY-MM-DD`.
+2. Use `releaseledger release create VERSION --title "Release VERSION"` only when no
+   proposed date is being persisted on a planned record.
+3. Use `releaseledger release tag VERSION` to create a released Releaseledger record;
+   this command does not create a Git tag.
+4. Use `releaseledger release finalize VERSION --released-at YYYY-MM-DD` to
+   transition an existing planned/draft/candidate release to released.
+5. Verify with `releaseledger release show VERSION`.
 ## Correcting canceled or misnumbered releases
 
 Use this when a recorded release was never actually shipped (no git tag, no
@@ -180,8 +180,8 @@ releaseledger release rename OLD NEW --previous PREV \
   --target-file CHANGELOG.md --rename-changelog-section
 releaseledger release prepare NEW --previous PREV --released-at DATE \
   --git-base PREV_TAG --git-head HEAD --refresh
-releaseledger entry apply .ledger/releaseledger/work/NEW/entries.yaml --dry-run --strict --guard-commit-subjects
-releaseledger entry apply .ledger/releaseledger/work/NEW/entries.yaml --strict --guard-commit-subjects --sync-audit
+releaseledger entry apply NEW --file .ledger/releaseledger/work/NEW/entries.yaml --dry-run --strict --guard-commit-subjects
+releaseledger entry apply NEW --file .ledger/releaseledger/work/NEW/entries.yaml --strict --guard-commit-subjects --sync-audit
 releaseledger audit decisions NEW --output .ledger/releaseledger/work/NEW/audit-decisions.yaml
 releaseledger audit apply NEW --file .ledger/releaseledger/work/NEW/audit-decisions.yaml --dry-run
 releaseledger audit apply NEW --file .ledger/releaseledger/work/NEW/audit-decisions.yaml
@@ -189,6 +189,8 @@ releaseledger release check NEW --phase finalize --released-at DATE --strict \
   --target-file CHANGELOG.md
 releaseledger changelog build NEW --output CHANGELOG.md --strict --replace-existing
 releaseledger release finalize NEW --released-at DATE
+git add CHANGELOG.md .ledger/releaseledger && git commit -m "Release NEW"
+git tag NEW  # explicit external action; Releaseledger does not create Git tags
 releaseledger release check NEW --phase published --strict --target-file CHANGELOG.md
 ```
 
@@ -343,7 +345,7 @@ Use this when the user asks to build, generate, or update `CHANGELOG.md`.
    If it reports missing `git:<sha>` coverage, audit failures, lint errors, or
    release-state blockers, stop and resolve them before building.
 1. Generate a strict dry run first:
-   `releaseledger changelog build VERSION --dry-run --strict --target-file CHANGELOG.md`.
+   `releaseledger changelog build VERSION --dry-run --strict --output CHANGELOG.md`.
 2. Inspect the rendered section:
    - heading version is correct
    - release date is exact, omitted, or marked unreleased according to user intent
@@ -351,7 +353,7 @@ Use this when the user asks to build, generate, or update `CHANGELOG.md`.
    - groups appear in deterministic order
    - breaking changes are visible
 3. Apply the build:
-   `releaseledger changelog build VERSION --target-file CHANGELOG.md`.
+   `releaseledger changelog build VERSION --output CHANGELOG.md`.
 4. Read `CHANGELOG.md` back and verify:
    - no duplicate release heading exists
    - new section is below `## Unreleased` when that heading exists
@@ -366,8 +368,8 @@ Use this when the user asks to build, generate, or update `CHANGELOG.md`.
    `releaseledger release finalize VERSION --released-at YYYY-MM-DD`.
 9. To rebuild the **whole** target file from ledger state, use the
    conventional full-build command:
-   - `releaseledger changelog build --dry-run --target-file CHANGELOG.md`
-   - `releaseledger changelog build --target-file CHANGELOG.md`
+   - `releaseledger changelog build --dry-run --output CHANGELOG.md`
+   - `releaseledger changelog build --output CHANGELOG.md`
      `build` with no VERSION (or `build --all`) regenerates every selected
      release section newest-first, preserves the `## [Unreleased]` body by
      default, excludes internal entries and non-released releases by default,
@@ -379,7 +381,7 @@ Use this when the user asks to build, generate, or update `CHANGELOG.md`.
 An explicit release version means single-section intent:
 
 ```bash
-releaseledger changelog build VERSION --strict --target-file CHANGELOG.md
+releaseledger changelog build VERSION --strict --output CHANGELOG.md
 ```
 
 Use a full document rebuild only when the user explicitly asks for all history,
@@ -387,7 +389,7 @@ for example "rebuild the whole changelog" or "regenerate all release
 sections":
 
 ```bash
-releaseledger changelog build --strict --target-file CHANGELOG.md
+releaseledger changelog build --strict --output CHANGELOG.md
 ```
 
 If a git range exists, strict build must pass. If it fails because commits are
@@ -406,7 +408,7 @@ For routine work on one release, keep validation scoped to the target. Do not im
 1. releaseledger release refresh VERSION --head HEAD --decisions-output pending.yaml
 2. inspect and apply the pending audit decisions
 3. releaseledger entry lint VERSION --strict
-4. releaseledger changelog build VERSION --strict --replace-existing
+4. releaseledger changelog build VERSION --strict --output CHANGELOG.md --replace-existing
 5. releaseledger release check VERSION --strict
 ```
 
@@ -572,7 +574,7 @@ releaseledger release check VERSION --strict --target-file CHANGELOG.md
 
 # 7. Finalize only when shipped intent is explicit, then build the requested scope.
 releaseledger release finalize VERSION --released-at YYYY-MM-DD
-releaseledger changelog build VERSION --strict --target-file CHANGELOG.md
+releaseledger changelog build VERSION --strict --output CHANGELOG.md
 ```
 
 No coverage, no build:

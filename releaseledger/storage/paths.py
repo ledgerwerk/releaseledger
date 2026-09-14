@@ -647,7 +647,7 @@ def _check_legacy_data_before_init(workspace_root: Path, force: bool) -> None:
     try:
         import tomllib  # type: ignore[import-not-found]
     except ModuleNotFoundError:
-        import tomli as tomllib  # type: ignore[import-not-found]
+        import tomli as tomllib
 
     try:
         with legacy_config.open("rb") as fh:

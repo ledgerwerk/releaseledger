@@ -57,7 +57,8 @@ def project_status(root: Path, *, check: bool = False) -> dict[str, object]:
     ]
     active.sort()
     layout_valid = bool(storage.get("layout_valid", False))
-    healthy = canonical and layout_valid
+    protocol_matches = bool(protocol_diagnostics(root)["skill_matches_cli"])
+    healthy = canonical and layout_valid and protocol_matches
     if not discovered:
         next_action = {
             "command": "init",
@@ -67,6 +68,14 @@ def project_status(root: Path, *, check: bool = False) -> dict[str, object]:
         next_action = {
             "command": "storage validate --strict",
             "reason": "The canonical project was discovered but its storage layout is invalid.",
+        }
+    elif not protocol_matches:
+        next_action = {
+            "command": "doctor --check",
+            "reason": (
+                "The Releaseledger skill protocol does not match the CLI; "
+                "resolve the protocol blocker before mutation."
+            ),
         }
     elif active:
         next_action = {
@@ -153,17 +162,26 @@ def project_doctor(root: Path, *, check: bool = False) -> dict[str, object]:
         }
     )
     layout_valid = bool(storage.get("layout_valid", False))
+    layout_repairable = bool(storage.get("indexes_repairable", False))
+    layout_ok = layout_valid or layout_repairable
     checks.append(
         {
             "code": "storage_layout",
-            "status": "pass" if layout_valid else "fail",
+            "status": "pass" if layout_ok else "fail",
             "message": (
-                "Storage layout is valid."
-                if layout_valid
-                else "Storage layout is unavailable or invalid."
+                (
+                    "Storage layout is valid; the generated indexes binding "
+                    "will be repaired before the next write."
+                )
+                if layout_repairable and not layout_valid
+                else (
+                    "Storage layout is valid."
+                    if layout_ok
+                    else "Storage layout is unavailable or invalid."
+                )
             ),
             "remediation": []
-            if layout_valid
+            if layout_ok
             else ["Run `releaseledger storage validate --strict`."],
         }
     )
@@ -221,6 +239,7 @@ def next_action(root: Path) -> dict[str, object]:
     state = str(storage.get("migration_state", "uninitialized"))
     discovered = bool(storage.get("discovered", False))
     layout_valid = bool(storage.get("layout_valid", False))
+    protocol_matches = bool(protocol_diagnostics(root)["skill_matches_cli"])
     if state == "legacy":
         command = "migrate plan storage-layout"
         reason = "Legacy storage requires an explicit migration plan."
@@ -228,6 +247,12 @@ def next_action(root: Path) -> dict[str, object]:
         command = "storage validate --strict"
         reason = (
             "The canonical project was discovered but its storage layout is invalid."
+        )
+    elif discovered and not protocol_matches:
+        command = "doctor --check"
+        reason = (
+            "The Releaseledger skill protocol does not match the CLI; "
+            "resolve the protocol blocker before mutation."
         )
     elif not discovered:
         command = "init"

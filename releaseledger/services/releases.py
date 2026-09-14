@@ -120,14 +120,15 @@ def _validate_released_at_for_status(
     """Enforce that ``released_at`` records completed publication only."""
     if explicit and released_at is not None and status != "released":
         raise LaunchError(
-            "--released-at records the actual release date and cannot be set "
-            f"while status is {status!r}.",
+            "--released-at is the actual release date persisted only after publication "
+            "and cannot be set "
+            "YYYY-MM-DD` for a proposed date, or `release finalize VERSION "
+            "--released-at YYYY-MM-DD` when shipped.",
             code=CODE_VALIDATION_ERROR,
             exit_code=2,
             remediation=[
-                "Omit --released-at while preparing the release.",
-                "Pass the proposed date to `release check --phase finalize`.",
-                "Use `release finalize --released-at YYYY-MM-DD` when shipped.",
+                "Use `release prepare VERSION --released-at YYYY-MM-DD` while preparing.",
+                "Use `release finalize VERSION --released-at YYYY-MM-DD` when shipped.",
             ],
         )
 
@@ -719,7 +720,7 @@ def restore_release(
     )
     if resolved_previous is not None:
         resolved_previous = validate_release_version(str(resolved_previous))
-    resolved_git = {
+    resolved_git: dict[str, object] = {
         "git_base_ref": existing.git_base_ref,
         "git_base_sha": existing.git_base_sha,
         "git_head_ref": existing.git_head_ref,
@@ -735,6 +736,7 @@ def restore_release(
                 existing=existing,
                 git_base_ref=base,
                 git_head_ref=from_tag,
+                clear_git_range=False,
             )
         else:
             resolved_git.update(
@@ -760,7 +762,7 @@ def restore_release(
         git_range=cast(str | None, resolved_git["git_range"]),
         git_commit_count=cast(int | None, resolved_git["git_commit_count"]),
     )
-    preview = {
+    preview: dict[str, object] = {
         "kind": "release_restore_preview" if dry_run else "release_restore",
         "release": restored.to_dict(),
         "mode": mode,

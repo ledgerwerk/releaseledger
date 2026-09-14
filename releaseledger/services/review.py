@@ -367,12 +367,24 @@ def _problem_next_action(
             "reason": "Verify that the tag represents the shipped release first.",
         }
     if kind == "release_without_tag":
+        tag = problem_version if problem_version.startswith("v") else f"v{problem_version}"
         return {
-            "code": "inspect_release_tag_state",
-            "command": f"releaseledger release review {problem_version}",
+            "code": "create_external_git_tag",
+            "command": f"git tag {tag}",
             "mutates": False,
-            "reason": "Creating the Git tag is an explicit release decision outside releaseledger.",
-            "requires_confirmation": False,
+            "manual_action_required": True,
+            "suggested_tag": tag,
+            "after_action": {
+                "command": (
+                    f"releaseledger release check {problem_version} "
+                    "--phase published --strict"
+                )
+            },
+            "reason": (
+                "The published phase requires an actual Git tag. Releaseledger "
+                "does not create Git tags implicitly."
+            ),
+            "requires_confirmation": True,
             "scope": scope,
         }
     if kind in {"released_without_changelog", "release_changelog_date_mismatch"}:
@@ -949,9 +961,39 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         else bool(reconciliation_block.get("ok", False))
     )
     snapshot_drift = git_block.get("snapshot_drift") if git_block else None
-    snapshot_ok = not (
-        isinstance(snapshot_drift, dict) and snapshot_drift.get("status") == "drifted"
-    )
+    snapshot_ok = True
+    snapshot_advisories: list[dict[str, object]] = []
+    if git and git_block is None and (
+        release.git_base_sha
+        or release.git_head_sha
+        or git_base
+        or git_head
+    ):
+        snapshot_ok = False
+    if git and (
+        (release.git_base_sha is None or release.git_head_sha is None)
+        and (release.git_base_sha is not None or release.git_head_sha is not None)
+    ):
+        snapshot_ok = False
+    if isinstance(snapshot_drift, dict):
+        drift_status = snapshot_drift.get("status")
+        if drift_status == "drifted":
+            snapshot_advisories.append(
+                {
+                    "code": "snapshot_symbolic_ref_drift",
+                    "message": (
+                        "Stored release snapshot drifted from its symbolic refs; "
+                        "pinned SHAs remain authoritative."
+                    ),
+                }
+            )
+        elif drift_status == "unknown":
+            snapshot_advisories.append(
+                {
+                    "code": "snapshot_symbolic_ref_unresolved",
+                    "message": "A stored symbolic ref could not be resolved.",
+                }
+            )
     target_changelog_ok = not (
         strict
         and target_changelog_modified is True
@@ -1017,6 +1059,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         )
         and audit_evidence_ok
         and audit_complete_ok
+        and snapshot_ok
         and (not strict or not git_block or git_coverage_ok)
     )
     history_ready = chain_history_ok and reconciliation_history_ok
@@ -1047,6 +1090,11 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
     if not chain_ok:
         recommendations.append(
             "Repair the release predecessor chain before finalization."
+        )
+    if snapshot_advisories:
+        recommendations.extend(
+            str(advisory.get("message", ""))
+            for advisory in snapshot_advisories
         )
     if not reconciliation_ok:
         recommendations.append(
@@ -1097,6 +1145,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         "proposed_released_at": proposed_released_at,
         "acknowledge_changelog_change": acknowledge_changelog_change,
         "recommendations": recommendations,
+        "advisories": snapshot_advisories,
         "chain": chain_block,
         "reconciliation": reconciliation_block,
         "failed_checks": failed_checks,

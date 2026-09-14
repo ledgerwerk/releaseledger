@@ -285,6 +285,9 @@ def test_review_git_reports_snapshot_drift_but_uses_stored_shas(
     assert data["ok"] is True
     drift = data["result"]["git"]["snapshot_drift"]
     assert drift["status"] == "drifted"
+    assert "snapshot" not in data["result"]["failed_checks"]
+    advisories = data["result"]["advisories"]
+    assert any(item["code"] == "snapshot_symbolic_ref_drift" for item in advisories)
     assert any(
         check["label"] == "head"
         and check["stored_sha"] == sha_b

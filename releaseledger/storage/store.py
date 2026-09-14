@@ -69,6 +69,7 @@ __all__ = [
     "load_release",
     "next_commit_audit_versioning",
     "next_entry_id",
+    "preflight_index_write",
     "rebuild_indexes",
     "rebuild_indexes_for_paths",
     "release_audit_dir",
@@ -151,6 +152,16 @@ def _resolve(workspace_root: Path, ledger_ref: str | None = None) -> ProjectPath
     return resolve_project_paths(workspace_root, ledger_ref=ledger_ref)
 
 
+
+def preflight_index_write(
+    workspace_root: Path, ledger_ref: str | None = None
+ ) -> None:
+    """Validate or safely restore the derived index binding before mutation."""
+    paths = _resolve(workspace_root, ledger_ref=ledger_ref)
+    from releaseledger.ledgercore_backend import ensure_releaseledger_indexes_binding
+
+    ensure_releaseledger_indexes_binding(paths.project.layout, preflight=True)
+
 def ensure_release_bundle(paths: ProjectPaths, version: str) -> Path:
     """Create the release bundle directory and entries subdirectory."""
     bundle = release_dir(paths, version)
@@ -168,6 +179,7 @@ def save_release(
 ) -> ReleaseRecord:
     """Persist a release record as ``release.md`` (note becomes the body)."""
     paths = _resolve(workspace_root, ledger_ref=ledger_ref)
+    preflight_index_write(workspace_root, ledger_ref=ledger_ref)
     version = validate_release_version(release.version)
     target = release_markdown_path(paths, version)
     if target.is_file() and not overwrite:
@@ -274,6 +286,7 @@ def save_entry(
 ) -> ReleaseEntryRecord:
     """Persist an entry record as ``entry-NNNN.md`` inside its release bundle."""
     paths = _resolve(workspace_root, ledger_ref=ledger_ref)
+    preflight_index_write(workspace_root, ledger_ref=ledger_ref)
     validate_release_version(entry.release_version)
     bundle = release_dir(paths, entry.release_version)
     if not bundle.is_dir():
@@ -750,6 +763,7 @@ def save_commit_audit_sheet(
     exactly one when content changed (or stay equal when unchanged).
     """
     paths = _resolve(workspace_root)
+    preflight_index_write(workspace_root)
     version = validate_release_version(sheet.release_version)
     if version != sheet.release_version:
         raise LaunchError(

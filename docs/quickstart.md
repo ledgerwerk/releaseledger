@@ -112,7 +112,7 @@ releaseledger release check 1.2.0 --strict --target-file CHANGELOG.md
 releaseledger release check 1.2.0 --phase finalize \
   --released-at 2026-06-14 --strict --target-file CHANGELOG.md
 releaseledger release finalize 1.2.0 --released-at 2026-06-14
-releaseledger changelog build 1.2.0 --strict --target-file CHANGELOG.md
+releaseledger changelog build 1.2.0 --strict --output CHANGELOG.md
 ```
 
 ## Correct a recorded version safely
@@ -152,7 +152,7 @@ explicit version intent. Rebuild the whole file only when you really mean all
 history:
 
 ```bash
-releaseledger changelog build --strict --target-file CHANGELOG.md
+releaseledger changelog build --strict --output CHANGELOG.md
 ```
 
 ## Optional: taskledger provenance
@@ -237,7 +237,7 @@ releaseledger release restore 0.1.0 \
   --git-base :root \
   --reason "The tagged release was actually shipped."
 releaseledger release chain repair --apply
-releaseledger changelog build --all --strict --no-preserve-unreleased --target-file CHANGELOG.md
+releaseledger changelog build --all --strict --no-preserve-unreleased --output CHANGELOG.md
 releaseledger release reconcile --strict
 releaseledger release chain check --strict
 ```

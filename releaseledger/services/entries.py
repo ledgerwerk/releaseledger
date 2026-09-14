@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from difflib import get_close_matches
 from pathlib import Path
 
 import ledgercore
 
+from releaseledger.domain.audit import CommitAuditRow
 from releaseledger.domain.entry import (
     ReleaseEntryRecord,
     normalize_entry_kind,
@@ -44,6 +46,7 @@ from releaseledger.storage.store import (
     load_release,
     next_commit_audit_versioning,
     next_entry_id,
+    preflight_index_write,
     rebuild_indexes,
     release_dir,
     save_commit_audit_sheet,
@@ -107,6 +110,51 @@ def _string_tuple(value: object, field_name: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+
+_ENTRY_BATCH_KEYS = frozenset(
+    {
+        "kind",
+        "summary",
+        "body",
+        "status",
+        "audience",
+        "scopes",
+        "source_refs",
+        "paths",
+        "issues",
+        "prs",
+        "sources",
+        "contributors",
+        "breaking",
+        "internal",
+    }
+)
+
+
+def _normalize_contributors(value: object) -> tuple[str, ...]:
+    values = _string_tuple(value, "contributors")
+    normalized: list[str] = []
+    for raw_value in values:
+        contributor = raw_value.strip()
+        if contributor and contributor not in normalized:
+            normalized.append(contributor)
+    return tuple(normalized)
+
+
+def _validate_entry_batch_item(data: dict[str, object], index: int) -> None:
+    unknown = sorted(set(data) - _ENTRY_BATCH_KEYS)
+    if not unknown:
+        return
+    field = unknown[0]
+    hint = get_close_matches(field, _ENTRY_BATCH_KEYS, n=1, cutoff=0.6)
+    suffix = f"; did you mean {hint[0]}?" if hint else ""
+    allowed = ", ".join(sorted(_ENTRY_BATCH_KEYS))
+    raise LaunchError(
+        f"items[{index}].{field}: unknown field{suffix}; allowed fields: {allowed}.",
+        code=CODE_VALIDATION_ERROR,
+        exit_code=2,
+    )
+
 def _optional_string(value: object, field_name: str) -> str | None:
     if value is None:
         return None
@@ -146,6 +194,7 @@ def _candidate(
     prs: object = (),
     sources: object = (),
     breaking: object = False,
+    contributors: object = (),
     internal: object = False,
 ) -> ReleaseEntryRecord:
     if not isinstance(kind, str):
@@ -174,6 +223,7 @@ def _candidate(
         issues=_string_tuple(issues, "issues"),
         prs=_string_tuple(prs, "prs"),
         sources=_string_tuple(sources, "sources"),
+        contributors=_normalize_contributors(contributors),
         breaking=_boolean(breaking, "breaking"),
         internal=_boolean(internal, "internal"),
         order=order,
@@ -314,6 +364,7 @@ def add_release_entry(
     issues: tuple[str, ...] = (),
     prs: tuple[str, ...] = (),
     sources: tuple[str, ...] = (),
+    contributors: tuple[str, ...] = (),
     breaking: bool = False,
     internal: bool = False,
     dry_run: bool = False,
@@ -336,6 +387,7 @@ def add_release_entry(
         issues=issues,
         prs=prs,
         sources=sources,
+        contributors=contributors,
         breaking=breaking,
         internal=internal,
     )
@@ -443,6 +495,7 @@ def update_release_entry(
     paths: tuple[str, ...] | None = None,
     issues: tuple[str, ...] | None = None,
     prs: tuple[str, ...] | None = None,
+    contributors: tuple[str, ...] | None = None,
     breaking: bool | None = None,
     internal: bool | None = None,
     reason: str | None = None,
@@ -506,6 +559,7 @@ def update_release_entry(
         issues=issues if issues is not None else existing.issues,
         prs=prs if prs is not None else existing.prs,
         sources=existing.sources,
+        contributors=contributors if contributors is not None else existing.contributors,
         breaking=breaking if breaking is not None else existing.breaking,
         internal=internal if internal is not None else existing.internal,
     )
@@ -522,6 +576,7 @@ def update_release_entry(
             "paths",
             "issues",
             "prs",
+            "contributors",
             "breaking",
             "internal",
         )
@@ -561,6 +616,7 @@ def update_release_entry(
         paths=candidate.paths,
         issues=candidate.issues,
         prs=candidate.prs,
+        contributors=candidate.contributors,
         breaking=candidate.breaking,
         internal=candidate.internal,
         versioning=bump_versioning(existing.versioning),
@@ -710,6 +766,7 @@ def import_release_entry_file(
             "paths": data.get("paths", []),
             "issues": data.get("issues", []),
             "prs": data.get("prs", []),
+            "contributors": data.get("contributors", []),
             "breaking": data.get("breaking", False),
             "internal": data.get("internal", False),
         }
@@ -755,6 +812,7 @@ def import_release_entry_file(
         issues=data.get("issues", []),
         prs=data.get("prs", []),
         sources=data.get("sources", []),
+        contributors=data.get("contributors", []),
         breaking=data.get("breaking", False),
         internal=data.get("internal", False),
     )
@@ -871,6 +929,7 @@ def add_many_release_entries(
     issues: list[dict[str, object]] = []
     ids = [entry.entry_id for entry in existing]
     for index, data in enumerate(entries):
+        _validate_entry_batch_item(data, index)
         entry_id = ledgercore.next_prefixed_id("entry", ids)
         ids.append(entry_id)
         try:
@@ -889,6 +948,7 @@ def add_many_release_entries(
                 issues=data.get("issues", []),
                 prs=data.get("prs", []),
                 sources=data.get("sources", []),
+                contributors=data.get("contributors", []),
                 breaking=data.get("breaking", False),
                 internal=data.get("internal", False),
             )
@@ -907,6 +967,7 @@ def add_many_release_entries(
                         "issues",
                         "prs",
                         "breaking",
+                        "contributors",
                         "internal",
                     )
                     if name.replace("_", " ") in exc.message.lower()
@@ -1136,6 +1197,7 @@ def delete_release_entry(
     }
     if dry_run:
         return result
+    preflight_index_write(workspace_root)
     delete_entry(workspace_root, release.version, entry.entry_id)
     save_release(workspace_root, updated_release, overwrite=True)
     if detached_sheet is not None and detached_sheet is not audit_sheet:
@@ -1222,7 +1284,7 @@ def move_release_entry(
         )
     source_audit = load_commit_audit_sheet(workspace_root, source_release.version)
     target_audit = load_commit_audit_sheet(workspace_root, target_release.version)
-    targeted_rows = ()
+    targeted_rows: tuple[CommitAuditRow, ...] = ()
     if source_audit is not None:
         targeted_rows = tuple(
             row
@@ -1324,6 +1386,7 @@ def move_release_entry(
     }
     if dry_run:
         return result
+    preflight_index_write(workspace_root)
     paths = resolve_project_paths(workspace_root)
     source_entry_path = (
         release_dir(paths, source_release.version) / "entries" / f"{entry.entry_id}.md"

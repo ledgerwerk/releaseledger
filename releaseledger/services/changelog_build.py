@@ -135,6 +135,107 @@ def _entry_payload(entry: ReleaseEntryRecord) -> dict[str, object]:
     }
 
 
+def _as_object_list(value: object) -> list[object]:
+    return value if isinstance(value, list) else []
+
+
+
+def _github_pr_label(value: str) -> str:
+    if value.startswith("github:pr-"):
+        number = value.removeprefix("github:pr-")
+        return f"[#{number}]"
+    if value.startswith("#") and value[1:].isdigit():
+        return f"[#{value[1:]}]"
+    return f"[{value}]"
+
+
+def _github_entry_summary(
+    entry: dict[str, object], config: ProjectConfig
+ ) -> str:
+    summary = str(entry.get("summary", ""))
+    if not config.changelog_github_attribution:
+        return summary
+    contributors = [
+        str(value) for value in _as_object_list(entry.get("contributors", []))
+    ]
+    prs = [str(value) for value in _as_object_list(entry.get("prs", []))]
+    details: list[str] = []
+    if contributors:
+        details.append("by " + ", ".join(contributors))
+    if prs:
+        details.append("in " + ", ".join(_github_pr_label(value) for value in prs))
+    return summary + (" " + " ".join(details) if details else "")
+
+
+def _apply_github_attribution(
+    section: str, entries: list[dict[str, object]], config: ProjectConfig
+ ) -> str:
+    if not config.changelog_github_attribution:
+        return section
+    lines = section.splitlines()
+    for entry in entries:
+        summary = str(entry.get("summary", ""))
+        rendered = _github_entry_summary(entry, config)
+        if rendered == summary:
+            continue
+        for index, line in enumerate(lines):
+            prefix = "- **BREAKING:** " if line.startswith("- **BREAKING:** ") else "- "
+            if line.startswith(prefix + summary):
+                lines[index] = prefix + rendered + line[len(prefix + summary) :]
+                break
+    return "\n".join(lines)
+
+
+def _github_compare_url(
+    config: ProjectConfig, previous_version: str, current_version: str
+ ) -> str | None:
+    if not config.changelog_repository_url:
+        return None
+    previous_tag = _format_tag(previous_version, config.changelog_tag_prefix)
+    current_tag = _format_tag(current_version, config.changelog_tag_prefix)
+    if config.changelog_compare_url_template:
+        return config.changelog_compare_url_template.format(
+            previous=previous_version,
+            current=current_version,
+            previous_tag=previous_tag,
+            current_tag=current_tag,
+        )
+    return (
+        f"{config.changelog_repository_url.rstrip('/')}/compare/"
+        f"{previous_tag}...{current_tag}"
+    )
+
+
+def _render_github_additions(
+    context: dict[str, object], config: ProjectConfig
+ ) -> str:
+    additions: list[str] = []
+    entries = context.get("entries", [])
+    if not isinstance(entries, list):
+        entries = []
+    if config.changelog_github_whats_changed and config.changelog_github_duplicate_categorized_entries:
+        additions.extend(["### What's Changed", ""])
+        for entry in entries:
+            if isinstance(entry, dict):
+                additions.append(f"- {_github_entry_summary(entry, config)}")
+        additions.append("")
+    new_contributors = context.get("github_new_contributors", [])
+    if config.changelog_github_new_contributors and isinstance(new_contributors, list) and new_contributors:
+        additions.extend(["### New Contributors", ""])
+        for contributor in new_contributors:
+            additions.append(f"- {contributor} made their first contribution")
+        additions.append("")
+    release = context.get("release", {})
+    if config.changelog_github_full_compare and isinstance(release, dict):
+        previous = release.get("previous_version")
+        current = release.get("version")
+        if isinstance(previous, str) and isinstance(current, str):
+            url = _github_compare_url(config, previous, current)
+            if url:
+                previous_tag = _format_tag(previous, config.changelog_tag_prefix)
+                current_tag = _format_tag(current, config.changelog_tag_prefix)
+                additions.extend([f"**Full Changelog**: [{previous_tag}...{current_tag}]({url})", ""])
+    return "\n".join(additions).strip()
 def _grouped_entries(
     entries: list[ReleaseEntryRecord],
     *,
@@ -271,20 +372,52 @@ def build_changelog_render_context(
         "entry_count": len(entries),
         "boundary_ref": release.boundary_ref,
         "source_refs": list(release.source_refs),
-        "tag": f"v{release.version}",
+        "tag": _format_tag(release.version, config.changelog_tag_prefix),
     }
 
+    release_records: list[ReleaseRecord] = []
     releases_list: list[dict[str, object]] = []
+    history_complete = True
     try:
-        for record in list_releases(workspace_root):
-            releases_list.append(
-                {
-                    "version": record.version,
-                    "date": record.released_at,
-                }
-            )
+        release_records = list_releases(workspace_root)
+        releases_list = [
+            {"version": record.version, "date": record.released_at}
+            for record in release_records
+        ]
     except Exception:  # pragma: no cover - defensive: list is best-effort
+        history_complete = False
         releases_list = []
+
+    current_entries = [_entry_payload(entry) for entry in entries]
+    for entry_payload in current_entries:
+        entry_payload["github_summary"] = _github_entry_summary(entry_payload, config)
+    prior_records = release_records
+    for index, record in enumerate(release_records):
+        if record.version == release.version:
+            prior_records = release_records[:index]
+            break
+    prior_contributors: set[str] = set()
+    if history_complete:
+        for record in prior_records:
+            try:
+                for entry in load_entries(workspace_root, record.version):
+                    prior_contributors.update(entry.contributors)
+            except Exception:  # pragma: no cover - incomplete history is advisory
+                history_complete = False
+                break
+    current_contributors: list[str] = []
+    for entry_payload in current_entries:
+        for contributor in _as_object_list(
+            entry_payload.get("contributors", [])
+        ):
+            value = str(contributor)
+            if value not in current_contributors:
+                current_contributors.append(value)
+    new_contributors = (
+        [value for value in current_contributors if value not in prior_contributors]
+        if history_complete
+        else []
+    )
 
     status_counts = {
         status: sum(entry.status == status for entry in all_entries)
@@ -296,9 +429,10 @@ def build_changelog_render_context(
     return {
         "project": {"name": project_name},
         "release": release_payload,
-        "entries": [_entry_payload(e) for e in entries],
+        "entries": current_entries,
         "groups": _groups_payload(grouped, config=config),
         "releases": releases_list,
+        "github_new_contributors": new_contributors,
         "included_statuses": list(statuses),
         "status_counts": status_counts,
         "warnings": warnings,
@@ -457,6 +591,15 @@ def render_changelog_section(
         "postprocessors", config.changelog_postprocessors
     )
     section = _apply_postprocessors(section, postprocessors)
+    rendered_entries = context.get("entries", [])
+    if isinstance(rendered_entries, list):
+        rendered_entries = [
+            entry for entry in rendered_entries if isinstance(entry, dict)
+        ]
+        section = _apply_github_attribution(section, rendered_entries, config)
+    additions = _render_github_additions(context, config)
+    if additions:
+        section = section.rstrip("\n") + "\n\n" + additions
     # Normalize newlines and ensure exactly one final newline.
     section = ledgercore.normalize_newlines(section)
     section = section.strip("\n") + "\n"

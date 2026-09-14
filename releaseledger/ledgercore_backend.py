@@ -87,10 +87,12 @@ __all__ = [
     "INDEXES_MOUNT",
     "MIGRATION_STRATEGY_REBUILD",
     "TOOL_NAME",
+    "IndexCacheClassification",
     "PreparedReleaseledgerTarget",
     "ReleaseledgerLedgerLayout",
     "UserNamespace",
     "build_releaseledger_legacy_migration_plan",
+    "classify_releaseledger_index_cache",
     "clear_releaseledger_data_override",
     "ensure_releaseledger_config_binding",
     "ensure_releaseledger_indexes_binding",
@@ -137,6 +139,21 @@ class UserNamespace:
 
     user_data: Path
     user_cache: Path
+
+
+@dataclass(frozen=True, slots=True)
+class IndexCacheClassification:
+    """Classify unbound contents of the disposable Releaseledger index cache."""
+
+    state: Literal[
+        "missing",
+        "empty",
+        "bound",
+        "generated-current",
+        "generated-legacy",
+        "foreign",
+    ]
+    unexpected_paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -836,9 +853,70 @@ def initialize_releaseledger_locations(
     return written
 
 
+def _cache_relative_path(root: Path, path: Path) -> Path:
+    try:
+        return path.relative_to(root)
+    except ValueError:
+        return path
+
+
+def classify_releaseledger_index_cache(root: Path) -> IndexCacheClassification:
+    """Classify cache contents before adopting an unbound index directory."""
+    if root.is_symlink():
+        return IndexCacheClassification(
+            "foreign", (_cache_relative_path(root, root),)
+        )
+    if not root.exists():
+        return IndexCacheClassification("missing")
+    if not root.is_dir():
+        return IndexCacheClassification(
+            "foreign", (_cache_relative_path(root, root),)
+        )
+    children = sorted(root.iterdir(), key=lambda path: path.name)
+    if not children:
+        return IndexCacheClassification("empty")
+
+    generated_files = {"releases.json", "entries.json"}
+    unexpected: list[Path] = []
+
+    if all(child.name in generated_files for child in children):
+        for child in children:
+            if child.is_symlink() or not child.is_file():
+                unexpected.append(_cache_relative_path(root, child))
+        if not unexpected:
+            return IndexCacheClassification("generated-legacy")
+        return IndexCacheClassification("foreign", tuple(unexpected))
+
+    ledgers = root / "ledgers"
+    if len(children) == 1 and children[0].name == "ledgers" and ledgers.is_dir():
+        if ledgers.is_symlink():
+            unexpected.append(_cache_relative_path(root, ledgers))
+        else:
+            for ledger_dir in sorted(ledgers.iterdir(), key=lambda path: path.name):
+                if ledger_dir.is_symlink() or not ledger_dir.is_dir():
+                    unexpected.append(_cache_relative_path(root, ledger_dir))
+                    continue
+                for child in sorted(ledger_dir.iterdir(), key=lambda path: path.name):
+                    if child.is_symlink() or not child.is_file() or child.name not in generated_files:
+                        unexpected.append(_cache_relative_path(root, child))
+        if not unexpected:
+            return IndexCacheClassification("generated-current")
+        return IndexCacheClassification("foreign", tuple(unexpected))
+
+    for child in children:
+        unexpected.append(_cache_relative_path(root, child))
+        if child.is_dir() and not child.is_symlink():
+            for nested in child.rglob("*"):
+                if nested.is_symlink() or not nested.is_dir() and nested.name not in generated_files:
+                    unexpected.append(_cache_relative_path(root, nested))
+    return IndexCacheClassification("foreign", tuple(unexpected))
+
+
 def ensure_releaseledger_indexes_binding(
     layout: ReleaseledgerLedgerLayout,
-) -> Any:
+    *,
+    preflight: bool = False,
+ ) -> Any:
     """Ensure the disposable index cache has a valid Ledgercore binding."""
     mount_root = layout.indexes_root
     marker = layout.indexes_binding_path
@@ -849,6 +927,14 @@ def ensure_releaseledger_indexes_binding(
         mount=INDEXES_MOUNT,
         storage="cache",
     )
+    if marker.is_symlink():
+        raise LaunchError(
+            "Cannot use a symlink as the indexes binding marker.",
+            code=CODE_CONFIG_ERROR,
+            exit_code=2,
+            data={"mount": INDEXES_MOUNT, "path": str(marker)},
+            remediation=["Inspect or explicitly repair the disposable index cache."],
+        )
     if marker.is_file():
         validation = _validate_optional_binding(
             mount_root=mount_root, expected=expected, allow_missing=False
@@ -862,23 +948,21 @@ def ensure_releaseledger_indexes_binding(
                 remediation=["Repair the indexes binding before rebuilding."],
             )
         return validation
-    generated_names = {"releases.json", "entries.json"}
-    unexpected = (
-        [
-            child.name
-            for child in mount_root.iterdir()
-            if child.name not in generated_names
-        ]
-        if mount_root.is_dir()
-        else []
-    )
-    if unexpected:
+
+    classification = classify_releaseledger_index_cache(mount_root)
+    if classification.state == "foreign":
+        unexpected = ", ".join(str(path) for path in classification.unexpected_paths)
         raise LaunchError(
             "Cannot initialize the indexes binding because the cache contains "
-            f"unexpected files: {', '.join(sorted(unexpected))}.",
+            f"unexpected files: {unexpected}.",
             code=CODE_CONFIG_ERROR,
             exit_code=2,
-            data={"mount": INDEXES_MOUNT, "path": str(mount_root)},
+            data={
+                "mount": INDEXES_MOUNT,
+                "path": str(mount_root),
+                "classification": classification.state,
+                "unexpected_paths": [str(path) for path in classification.unexpected_paths],
+            },
             remediation=["Inspect or explicitly repair the disposable index cache."],
         )
     mount = SimpleNamespace(
@@ -894,9 +978,13 @@ def ensure_releaseledger_indexes_binding(
         raise _map_ledgercore_error(
             exc,
             code=CODE_CONFIG_ERROR,
-            extra_data={"mount": INDEXES_MOUNT, "path": str(mount_root)},
+            extra_data={
+                "mount": INDEXES_MOUNT,
+                "path": str(mount_root),
+                "classification": classification.state,
+                "preflight": preflight,
+            },
         ) from exc
-
 
 def ensure_releaseledger_config_binding(
     prepared_target: PreparedReleaseledgerTarget,

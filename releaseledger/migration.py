@@ -1020,7 +1020,7 @@ def discover_legacy_project(start: Path) -> tuple[Path, dict[str, object]]:
     try:
         import tomllib  # type: ignore[import-not-found]
     except ModuleNotFoundError:
-        import tomli as tomllib  # type: ignore[import-not-found]
+        import tomli as tomllib
 
     search = Path(start).resolve()
     if search.is_file():
@@ -1120,7 +1120,11 @@ def validate_domain_records(data_root: Path) -> dict[str, object]:
     for ref, ledger_dir in iter_legacy_ledger_roots(data_root):
         report = _validate_ledger_domain(ledger_dir, ref)
         ledger_reports[ref] = report
-        failures.extend(report.get("failures", []))  # type: ignore[attr-defined]
+        failure_rows = report.get("failures", [])
+        if isinstance(failure_rows, list):
+            failures.extend(
+                row for row in failure_rows if isinstance(row, dict)
+            )
 
     refs = [r for r, _ in iter_legacy_ledger_roots(data_root)]
 
