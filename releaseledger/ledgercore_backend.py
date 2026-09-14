@@ -955,7 +955,9 @@ def ensure_releaseledger_indexes_binding(
 
     classification = classify_releaseledger_index_cache(mount_root)
     if classification.state == "foreign":
-        unexpected = ", ".join(path.as_posix() for path in classification.unexpected_paths)
+        unexpected = ", ".join(
+            path.as_posix() for path in classification.unexpected_paths
+        )
         raise LaunchError(
             "Cannot initialize the indexes binding because the cache contains "
             f"unexpected files: {unexpected}.",
