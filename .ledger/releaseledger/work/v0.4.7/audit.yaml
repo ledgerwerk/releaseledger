@@ -1,0 +1,40 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 1
+release_version: v0.4.7
+git_base_ref: v0.4.6
+git_base_sha: 4be159ed3397b19193d4914c9ea5f6bc86773256
+git_head_ref: HEAD
+git_head_sha: fb370746f625697018e8e4a1006826997579b29b
+git_range: 4be159ed3397b19193d4914c9ea5f6bc86773256..fb370746f625697018e8e4a1006826997579b29b
+commit_count: 1
+rows:
+  - sha: fb370746f625697018e8e4a1006826997579b29b
+    source_ref: git:fb370746f625697018e8e4a1006826997579b29b
+    short_sha: fb37074
+    changed_paths:
+      - releaseledger/cli.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/git_sources.py
+      - releaseledger/services/releases.py
+      - releaseledger/services/review.py
+      - skills/releaseledger/SKILL.md
+      - tests/test_changelog_github.py
+      - tests/test_git_review.py
+      - tests/test_git_sources.py
+      - tests/test_release_corrections.py
+      - tests/test_release_reconcile.py
+      - tests/test_stale_marker_workflow.py
+    stats:
+      files_changed: 0
+      insertions: 818
+      deletions: 97
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "feat: better changelog builder"

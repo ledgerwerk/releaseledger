@@ -1,0 +1,36 @@
+{
+  "candidate_count": 1,
+  "candidates": [
+    {
+      "additions": 818,
+      "deletions": 97,
+      "patch_file": "fb37074.patch",
+      "patch_sha256": "257717006dfc5a1ef8d34bfd02c6d54aae8f2de9038f29e499b9ce25a0b62808",
+      "paths": [
+        "releaseledger/cli.py",
+        "releaseledger/services/changelog_build.py",
+        "releaseledger/services/git_sources.py",
+        "releaseledger/services/releases.py",
+        "releaseledger/services/review.py",
+        "skills/releaseledger/SKILL.md",
+        "tests/test_changelog_github.py",
+        "tests/test_git_review.py",
+        "tests/test_git_sources.py",
+        "tests/test_release_corrections.py",
+        "tests/test_release_reconcile.py",
+        "tests/test_stale_marker_workflow.py"
+      ],
+      "sha": "fb370746f625697018e8e4a1006826997579b29b",
+      "short_sha": "fb37074",
+      "source_ref": "git:fb370746f625697018e8e4a1006826997579b29b"
+    }
+  ],
+  "git_base_ref": "4be159ed3397b19193d4914c9ea5f6bc86773256",
+  "git_base_sha": "4be159ed3397b19193d4914c9ea5f6bc86773256",
+  "git_head_ref": "fb370746f625697018e8e4a1006826997579b29b",
+  "git_head_sha": "fb370746f625697018e8e4a1006826997579b29b",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.4.7",
+  "schema_version": 1
+}

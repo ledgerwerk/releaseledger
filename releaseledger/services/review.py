@@ -571,8 +571,7 @@ def _scope_health_block(
         if not isinstance(item, dict):
             continue
         related = any(
-            value
-            and release_identity_key(value) in affected
+            value and release_identity_key(value) in affected
             for value in (
                 str(item.get("version", "")),
                 str(item.get("previous_version", "")),

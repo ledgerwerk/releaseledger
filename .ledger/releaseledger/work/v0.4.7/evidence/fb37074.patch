@@ -1,0 +1,1468 @@
+ releaseledger/cli.py                      |  25 ++-
+ releaseledger/services/changelog_build.py | 151 ++++++++++++++--
+ releaseledger/services/git_sources.py     |  88 ++++++++++
+ releaseledger/services/releases.py        | 281 +++++++++++++++++++++++-------
+ releaseledger/services/review.py          |  56 ++++--
+ skills/releaseledger/SKILL.md             |  16 +-
+ tests/test_changelog_github.py            |   4 +-
+ tests/test_git_review.py                  |  44 +++++
+ tests/test_git_sources.py                 |  91 ++++++++++
+ tests/test_release_corrections.py         |  61 ++++++-
+ tests/test_release_reconcile.py           |  73 +++++++-
+ tests/test_stale_marker_workflow.py       |  25 ++-
+ 12 files changed, 818 insertions(+), 97 deletions(-)
+
+diff --git a/releaseledger/cli.py b/releaseledger/cli.py
+index d99a13b..eeb9159 100644
+--- a/releaseledger/cli.py
++++ b/releaseledger/cli.py
+@@ -880,7 +880,10 @@ def release_finalize_command(
+     ] = None,
+     changelog_file: Annotated[
+         str | None,
+-        typer.Option("--changelog-file", help="Target changelog file."),
++        typer.Option(
++            "--changelog-file",
++            help="Persist the changelog path on release metadata; does not rebuild the file.",
++        ),
+     ] = None,
+ ) -> None:
+     """Transition a planned/draft/candidate release to 'released'."""
+@@ -1327,6 +1330,13 @@ def release_check_command(
+             help="Validation scope: target (default) or full history.",
+         ),
+     ] = "target",
++    acknowledge_changelog_change: Annotated[
++        bool,
++        typer.Option(
++            "--acknowledge-changelog-change",
++            help="Acknowledge that the target changelog changed in the Git range.",
++        ),
++    ] = False,
+ ) -> None:
+     """Run the consolidated read-only release gate."""
+     state = cli_state_from_context(ctx)
+@@ -1351,6 +1361,7 @@ def release_check_command(
+             history_scope=history_scope,
+             phase=phase,
+             proposed_released_at=released_at,
++            acknowledge_changelog_change=acknowledge_changelog_change,
+         )
+     except ReleaseledgerError as exc:
+         emit_error(command="release check", error=exc, json_output=state.json_output)
+@@ -2841,6 +2852,18 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
+             else changelog_reason
+         )
+     )
++    changelog_owner_ok = bool(checks_dict.get("target_changelog_ok", True))
++    owner_detail = "no unacknowledged target change"
++    if not changelog_owner_ok:
++        owner_detail = "target changelog changed inside reviewed Git range"
++    elif (
++        isinstance(git_block, dict)
++        and git_block.get("target_changelog_modified_in_range") is True
++    ):
++        owner_detail = "target change reviewed and acknowledged"
++    lines.append(
++        f"Changelog owner {'OK' if changelog_owner_ok else 'FAIL'}  {owner_detail}"
++    )
+     lines.append(
+         f"Audit complete  {'OK' if audit_complete_ok else 'FAIL'}  "
+         + (
+diff --git a/releaseledger/services/changelog_build.py b/releaseledger/services/changelog_build.py
+index 05789b6..e9528ed 100644
+--- a/releaseledger/services/changelog_build.py
++++ b/releaseledger/services/changelog_build.py
+@@ -46,7 +46,9 @@ from releaseledger.errors import (
+ )
+ from releaseledger.services.entry_lint import lint_release_entries
+ from releaseledger.services.git_sources import (
++    collect_contributor_history,
+     collect_git_candidates,
++    contributor_identity_key,
+     resolve_release_snapshot,
+ )
+ from releaseledger.storage.config import (
+@@ -332,6 +334,53 @@ def _resolve_release_date(value: str | None) -> str | None:
+     return value
+
+
++def _predecessor_chain(
++    release: ReleaseRecord, records: list[ReleaseRecord],
++) -> tuple[list[ReleaseRecord], bool, list[str]]:
++    """Return predecessor records resolved by exact or semantic identity."""
++    by_version = {record.version: record for record in records}
++    chain: list[ReleaseRecord] = []
++    warnings: list[str] = []
++    seen: set[str] = {release_identity_key(release.version)}
++    current = release
++    complete = True
++    while current.previous_version:
++        selector = current.previous_version
++        predecessor = by_version.get(selector)
++        if predecessor is None:
++            matches = [
++                record
++                for record in records
++                if release_identity_key(record.version)
++                == release_identity_key(selector)
++            ]
++            if len(matches) == 1:
++                predecessor = matches[0]
++            elif len(matches) > 1:
++                warnings.append(
++                    f"Predecessor {selector!r} has ambiguous release identity."
++                )
++                complete = False
++                break
++            else:
++                warnings.append(
++                    f"Predecessor {selector!r} is missing from release history."
++                )
++                complete = False
++                break
++        identity = release_identity_key(predecessor.version)
++        if identity in seen:
++            warnings.append(
++                f"Release predecessor chain cycles at {predecessor.version}."
++            )
++            complete = False
++            break
++        seen.add(identity)
++        chain.append(predecessor)
++        current = predecessor
++    return chain, complete, warnings
++
++
+ def build_changelog_render_context(
+     workspace_root: Path,
+     *,
+@@ -383,7 +432,7 @@ def build_changelog_render_context(
+
+     release_records: list[ReleaseRecord] = []
+     releases_list: list[dict[str, object]] = []
+-    history_complete = True
++    history_listing_complete = True
+     try:
+         release_records = list_releases(workspace_root)
+         releases_list = [
+@@ -391,38 +440,102 @@ def build_changelog_render_context(
+             for record in release_records
+         ]
+     except Exception:  # pragma: no cover - defensive: list is best-effort
+-        history_complete = False
++        history_listing_complete = False
+         releases_list = []
+
+     current_entries = [_entry_payload(entry) for entry in entries]
+     for entry_payload in current_entries:
+         entry_payload["github_summary"] = _github_entry_summary(entry_payload, config)
+-    prior_records = release_records
+-    for index, record in enumerate(release_records):
+-        if record.version == release.version:
+-            prior_records = release_records[:index]
++
++    prior_records, chain_complete, history_warnings = _predecessor_chain(
++        release, release_records
++    )
++    prior_contributors: dict[str, str] = {}
++    for record in prior_records:
++        try:
++            for entry in load_entries(workspace_root, record.version):
++                for contributor in entry.contributors:
++                    prior_contributors.setdefault(
++                        contributor_identity_key(contributor), contributor
++                    )
++        except Exception:  # pragma: no cover - incomplete history is advisory
++            chain_complete = False
++            history_warnings.append(
++                f"Could not load contributor metadata for {record.version}."
++            )
+             break
+-    prior_contributors: set[str] = set()
+-    if history_complete:
+-        for record in prior_records:
+-            try:
+-                for entry in load_entries(workspace_root, record.version):
+-                    prior_contributors.update(entry.contributors)
+-            except Exception:  # pragma: no cover - incomplete history is advisory
+-                history_complete = False
+-                break
++
+     current_contributors: list[str] = []
++    current_identity_keys: set[str] = set()
+     for entry_payload in current_entries:
+         for contributor in _as_object_list(entry_payload.get("contributors", [])):
+             value = str(contributor)
+-            if value not in current_contributors:
++            identity = contributor_identity_key(value)
++            if identity not in current_identity_keys:
++                current_identity_keys.add(identity)
+                 current_contributors.append(value)
++
++    contributor_history = None
++    git_boundary = release.git_base_sha or release.git_base_ref
++    if git_boundary is not None:
++        try:
++            contributor_history = collect_contributor_history(
++                workspace_root, through_ref=git_boundary
++            )
++        except LaunchError as exc:
++            history_warnings.append(
++                f"Could not verify Git contributor history: {exc.message}"
++            )
++    else:
++        history_warnings.append(
++            "New Contributors omitted because the release has no Git base boundary."
++        )
++
++    verified_history_handles: dict[str, str] = dict(prior_contributors)
++    history_basis = "missing_git_boundary"
++    history_through_sha: str | None = None
++    if contributor_history is not None:
++        history_basis = contributor_history.basis
++        history_through_sha = contributor_history.through_sha
++        for contributor in contributor_history.handles:
++            verified_history_handles.setdefault(
++                contributor_identity_key(contributor), contributor
++            )
++        history_warnings.extend(contributor_history.warnings)
++
++    history_verified = bool(
++        history_listing_complete
++        and chain_complete
++        and contributor_history is not None
++        and contributor_history.complete
++    )
+     new_contributors = (
+-        [value for value in current_contributors if value not in prior_contributors]
+-        if history_complete
++        [
++            value
++            for value in current_contributors
++            if contributor_identity_key(value) not in verified_history_handles
++        ]
++        if history_verified
+         else []
+     )
+
++    if not history_verified:
++        history_warnings.append(
++            "New Contributors omitted because prior contributor history could not be verified."
++        )
++    github_contributor_history = {
++        "verified": history_verified,
++        "basis": (
++            history_basis
++            if chain_complete
++            else "predecessor_chain_unverified"
++        ),
++        "through_sha": history_through_sha,
++        "prior_count": len(verified_history_handles),
++        "current": current_contributors,
++        "new": new_contributors,
++    }
++
+     status_counts = {
+         status: sum(entry.status == status for entry in all_entries)
+         for status in ("accepted", "draft", "rejected")
+@@ -430,6 +543,7 @@ def build_changelog_render_context(
+     warnings: list[str] = []
+     if "draft" in statuses and status_counts["draft"]:
+         warnings.append("Draft entries are included; output is draft-quality.")
++    warnings.extend(history_warnings)
+     return {
+         "project": {"name": project_name},
+         "release": release_payload,
+@@ -437,6 +551,7 @@ def build_changelog_render_context(
+         "groups": _groups_payload(grouped, config=config),
+         "releases": releases_list,
+         "github_new_contributors": new_contributors,
++        "github_contributor_history": github_contributor_history,
+         "included_statuses": list(statuses),
+         "status_counts": status_counts,
+         "warnings": warnings,
+diff --git a/releaseledger/services/git_sources.py b/releaseledger/services/git_sources.py
+index 777c8e8..8fdea75 100644
+--- a/releaseledger/services/git_sources.py
++++ b/releaseledger/services/git_sources.py
+@@ -46,9 +46,11 @@ __all__ = [
+     "GIT_DEFAULT_MAX_COMMITS",
+     "GIT_DEFAULT_MAX_DIFF_CHARS",
+     "MERGE_POLICIES",
++    "GitContributorHistory",
+     "GitSourceCandidate",
+     "build_git_range_summary",
+     "collect_git_candidates",
++    "contributor_identity_key",
+     "export_git_evidence",
+     "generate_git_scaffold_batch",
+     "is_git_worktree",
+@@ -310,6 +312,23 @@ class _CommitMeta:
+     body: str
+
+
++def contributor_identity_key(value: str) -> str:
++    """Return the case-insensitive identity key for a contributor handle."""
++    return value.removeprefix("@").casefold()
++
++
++
++@dataclass(frozen=True, slots=True)
++class GitContributorHistory:
++    """Contributor identities found in Git ancestry through a boundary."""
++
++    handles: tuple[str, ...]
++    complete: bool
++    through_sha: str | None
++    basis: str
++    warnings: tuple[str, ...] = ()
++
++
+ @dataclass(frozen=True)
+ class GitSourceCandidate:
+     """One reachable commit in a release range, as release-note evidence."""
+@@ -476,6 +495,75 @@ def resolve_git_ref(workspace_root: Path, ref: str) -> str:
+     return sha
+
+
++def _collect_history_handles(
++    workspace_root: Path, *, through_sha: str
++) -> tuple[str, ...]:
++    """Collect contributor handles from all commits reachable from ``through_sha``."""
++    fmt = "%H%x00%an%x00%ae%x00%s%x1e"
++    result = _run_git(
++        workspace_root,
++        ["log", "--format=" + fmt, "--no-decorate", through_sha],
++    )
++    _require_git_available(result, what=f"git log {through_sha}")
++    displays: dict[str, str] = {}
++    for record in result.stdout.split("\x1e"):
++        fields = record.rstrip("\n").split("\x00")
++        if len(fields) < 4:
++            continue
++        _, author_name, author_email, subject = fields[:4]
++        for handle in _extract_contributor_handles(
++            author_name, author_email, subject
++        ):
++            displays.setdefault(contributor_identity_key(handle), handle)
++    return tuple(displays.values())
++
++
++def collect_contributor_history(
++    workspace_root: Path, *, through_ref: str
++) -> GitContributorHistory:
++    """Collect verified contributor history through a Git release boundary.
++
++    The scan is local-only and includes every commit reachable from the resolved
++    boundary, including merge commits. A shallow repository is reported as
++    incomplete because its ancestry cannot prove that no earlier contributor
++    exists. The available handles are retained for diagnostics but must not be
++    used for first-contribution claims when ``complete`` is false.
++    """
++    _check_git_installed()
++    if is_root_base_ref(through_ref):
++        return GitContributorHistory(
++            handles=(),
++            complete=True,
++            through_sha=EMPTY_TREE_SHA,
++            basis="git_ancestry",
++        )
++    through_sha = resolve_git_ref(workspace_root, through_ref)
++    shallow_result = _run_git(
++        workspace_root, ["rev-parse", "--is-shallow-repository"]
++    )
++    _require_git_available(
++        shallow_result, what="git rev-parse --is-shallow-repository"
++    )
++    handles = _collect_history_handles(workspace_root, through_sha=through_sha)
++    if shallow_result.stdout.strip().lower() == "true":
++        return GitContributorHistory(
++            handles=handles,
++            complete=False,
++            through_sha=through_sha,
++            basis="shallow_git_history",
++            warnings=(
++                "Git contributor history is incomplete because the repository is shallow.",
++            ),
++        )
++    return GitContributorHistory(
++        handles=handles,
++        complete=True,
++        through_sha=through_sha,
++        basis="git_ancestry",
++    )
++
++
++
+ def _verify_ancestry(
+     workspace_root: Path, *, base_sha: str, head_sha: str, allow_diverged: bool
+ ) -> None:
+diff --git a/releaseledger/services/releases.py b/releaseledger/services/releases.py
+index 881ea2b..8045f42 100644
+--- a/releaseledger/services/releases.py
++++ b/releaseledger/services/releases.py
+@@ -162,6 +162,29 @@ def resolve_release_selector(workspace_root: Path, selector: str) -> str:
+     return matches[0]
+
+
++def _canonicalize_previous_selector(
++    workspace_root: Path, selector: str
++) -> str:
++    """Validate and canonicalize a known predecessor release identity."""
++    selector = validate_release_version(selector)
++    records = list_releases(workspace_root)
++    identity = release_identity_key(selector)
++    matches = [
++        record.version
++        for record in records
++        if release_identity_key(record.version) == identity
++    ]
++    if len(matches) > 1:
++        raise LaunchError(
++            f"Predecessor selector {selector!r} is ambiguous: "
++            f"{', '.join(sorted(matches))}",
++            code=CODE_CONFLICT,
++            exit_code=2,
++            data={"selector": selector, "matches": sorted(matches)},
++        )
++    return matches[0] if matches else selector
++
++
+ def _today() -> str:
+     return datetime.datetime.now(tz=datetime.timezone.utc).date().isoformat()
+
+@@ -481,6 +504,10 @@ def create_release(
+             candidate_version=version,
+             candidate_released_at=released_at,
+         )
++    else:
++        previous_version = _canonicalize_previous_selector(
++            workspace_root, previous_version
++        )
+     boundary_ref, source_refs, source_count = _validate_source_metadata(
+         boundary_ref=boundary_ref,
+         source_refs=source_refs,
+@@ -532,6 +559,10 @@ def tag_release(
+             candidate_version=version,
+             candidate_released_at=released_at,
+         )
++    else:
++        previous_version = _canonicalize_previous_selector(
++            workspace_root, previous_version
++        )
+     boundary_ref, source_refs, source_count = _validate_source_metadata(
+         boundary_ref=boundary_ref,
+         source_refs=source_refs,
+@@ -615,7 +646,9 @@ def finalize_release(
+         data={"released_at": released_at},
+     )
+     rebuild_indexes(workspace_root)
+-    return _release_payload(workspace_root, updated, event.event_id)
++    result = _release_payload(workspace_root, updated, event.event_id)
++    result["invalidated_changelog_sections"] = [updated.version]
++    return result
+
+
+ def _git_tag_details(workspace_root: Path, tag: str) -> tuple[str, str]:
+@@ -719,7 +752,12 @@ def restore_release(
+         clear=clear_previous,
+     )
+     if resolved_previous is not None:
+-        resolved_previous = validate_release_version(str(resolved_previous))
++        if previous_version is not UNSET:
++            resolved_previous = _canonicalize_previous_selector(
++                workspace_root, str(resolved_previous)
++            )
++        else:
++            resolved_previous = validate_release_version(str(resolved_previous))
+     resolved_git: dict[str, object] = {
+         "git_base_ref": existing.git_base_ref,
+         "git_base_sha": existing.git_base_sha,
+@@ -925,7 +963,12 @@ def update_release(
+         clear=clear_previous,
+     )
+     if resolved_previous is not None:
+-        resolved_previous = validate_release_version(str(resolved_previous))
++        if previous_version is not UNSET:
++            resolved_previous = _canonicalize_previous_selector(
++                workspace_root, str(resolved_previous)
++            )
++        else:
++            resolved_previous = validate_release_version(str(resolved_previous))
+     resolved_changelog_file = _resolve_optional_field(
+         "changelog-file",
+         changelog_file,
+@@ -1042,7 +1085,14 @@ def update_release(
+         },
+     )
+     rebuild_indexes(workspace_root)
+-    return _release_payload(workspace_root, updated, event.event_id)
++    result = _release_payload(workspace_root, updated, event.event_id)
++    if any(
++        key in {"title", "status", "released_at", "previous_version", "changelog_file"}
++        and getattr(existing, key) != getattr(updated, key)
++        for key in values
++    ):
++        result["invalidated_changelog_sections"] = [updated.version]
++    return result
+
+
+ def set_release_status(
+@@ -1545,7 +1595,12 @@ def cancel_release(
+     successors = [
+         record
+         for record in list_releases(workspace_root)
+-        if record.previous_version == version and record.version != version
++        if (
++            record.previous_version is not None
++            and release_identity_key(record.previous_version)
++            == release_identity_key(version)
++            and record.version != version
++        )
+     ]
+     if successors and not rewrite_successors:
+         raise LaunchError(
+@@ -1566,20 +1621,33 @@ def cancel_release(
+                 (
+                     r
+                     for r in list_releases(workspace_root)
+-                    if r.version == successor_target
++                    if (
++                        r.version == successor_target
++                        or (
++                            successor_target is not None
++                            and release_identity_key(r.version)
++                            == release_identity_key(str(successor_target))
++                        )
++                    )
+                 ),
+                 None,
+             )
+             if target_record is None or target_record.status == "canceled":
+                 successor_target = None
+-        if successor_target == version:
++        if (
++            successor_target is not None
++            and release_identity_key(str(successor_target))
++            == release_identity_key(version)
++        ):
+             raise LaunchError(
+                 "Successor previous_version cannot point to the canceled release.",
+                 code=CODE_CONFLICT,
+                 exit_code=2,
+             )
+         if successor_target is not None:
+-            successor_target = validate_release_version(str(successor_target))
++            successor_target = _canonicalize_previous_selector(
++                workspace_root, str(successor_target)
++            )
+             target_record = load_release(workspace_root, successor_target)
+             if target_record.status == "canceled":
+                 raise LaunchError(
+@@ -1684,7 +1752,7 @@ def cancel_release(
+     return payload
+
+
+-def rename_release(
++def rename_release(  # noqa: C901 - coordinates bundle, entry, and successor rewrites
+     workspace_root: Path,
+     *,
+     old_version: str,
+@@ -1785,13 +1853,22 @@ def rename_release(
+         previous_version if previous_version is not UNSET else existing.previous_version
+     )
+     if resolved_previous is not None:
+-        resolved_previous = validate_release_version(str(resolved_previous))
++        if previous_version is not UNSET:
++            resolved_previous = _canonicalize_previous_selector(
++                workspace_root, str(resolved_previous)
++            )
++        else:
++            resolved_previous = validate_release_version(str(resolved_previous))
+     resolved_title = title if title is not None else existing.title
+     # Successor check: any release pointing at the old version as a predecessor.
+     successors = [
+         r
+         for r in list_releases(workspace_root)
+-        if r.previous_version == old_version and r.version != old_version
++        if (
++            r.previous_version is not None
++            and release_identity_key(r.previous_version) == release_identity_key(old_version)
++            and r.version != old_version
++        )
+     ]
+     if successors and not rewrite_successors:
+         raise LaunchError(
+@@ -1893,6 +1970,7 @@ def rename_release(
+     )
+     rebuild_indexes(workspace_root)
+     payload = _release_payload(workspace_root, new_record, event.event_id)
++    payload["invalidated_changelog_sections"] = [old_version, new_version]
+     if rename_changelog_section:
+         assert staged_changelog is not None
+         ledgercore.ensure_dir(changelog_target.parent)
+@@ -2027,7 +2105,12 @@ def _check_release_record_problems(
+                         "version": record.version,
+                     }
+                 )
+-            if any(r.previous_version == record.version for r in records):
++            if any(
++                r.previous_version is not None
++                and release_identity_key(r.previous_version)
++                == release_identity_key(record.version)
++                for r in records
++            ):
+                 problems.append(
+                     {
+                         "kind": "canceled_with_successor_reference",
+@@ -2038,12 +2121,17 @@ def _check_release_record_problems(
+         if owner is not record:
+             continue
+         if record.status in {"planned", "draft", "candidate"} and tags:
++            tag_date = next(
++                (tag_dates.get(tag) for tag in tags if tag_dates.get(tag)),
++                None,
++            )
+             problems.append(
+                 {
+                     "kind": "planned_with_tag",
+                     "version": record.version,
+                     "status": record.status,
+                     "tags": tags,
++                    "tag_date": tag_date,
+                 }
+             )
+         if record.status == "released":
+@@ -2065,30 +2153,45 @@ def _check_release_record_problems(
+         if has_heading and record.released_at:
+             heading = headings[identity][0]
+             heading_date = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", heading)
+-            for tag in tags:
+-                tag_date = tag_dates.get(tag)
+-                if tag_date and heading_date and tag_date != heading_date.group(1):
+-                    problems.append(
+-                        {
+-                            "kind": "tag_changelog_date_mismatch",
+-                            "version": record.version,
+-                            "tag": tag,
+-                            "tag_date": tag_date,
+-                            "changelog_date": heading_date.group(1),
+-                        }
+-                    )
+-            if heading_date and heading_date.group(1) != record.released_at:
++            if heading_date is None:
+                 problems.append(
+                     {
+-                        "kind": "release_changelog_date_mismatch",
++                        "kind": (
++                            "release_changelog_unreleased"
++                            if "unreleased" in heading.lower()
++                            else "release_changelog_missing_date"
++                        ),
+                         "version": record.version,
+                         "release_date": record.released_at,
+-                        "changelog_date": heading_date.group(1),
++                        "heading": heading,
+                     }
+                 )
++            else:
++                for tag in tags:
++                    tag_date = tag_dates.get(tag)
++                    if tag_date and tag_date != heading_date.group(1):
++                        problems.append(
++                            {
++                                "kind": "tag_changelog_date_mismatch",
++                                "version": record.version,
++                                "tag": tag,
++                                "tag_date": tag_date,
++                                "changelog_date": heading_date.group(1),
++                            }
++                        )
++                if heading_date.group(1) != record.released_at:
++                    problems.append(
++                        {
++                            "kind": "release_changelog_date_mismatch",
++                            "version": record.version,
++                            "release_date": record.released_at,
++                            "changelog_date": heading_date.group(1),
++                        }
++                    )
+     return problems
+
+
++
+ def reconcile_releases(
+     workspace_root: Path,
+     *,
+@@ -2402,7 +2505,7 @@ def check_release_chain(
+         prev = record.previous_version
+         if prev is None:
+             continue
+-        if prev == record.version:
++        if release_identity_key(prev) == release_identity_key(record.version):
+             problems.append(
+                 {
+                     "kind": "self_previous",
+@@ -2410,25 +2513,52 @@ def check_release_chain(
+                     "previous_version": prev,
+                     "record_status": record.status,
+                     "predecessor_status": record.status,
+-                    "comparison_basis": "none",
++                    "comparison_basis": "release_identity",
+                     "detail": "Release points to itself as its previous_version.",
+                 }
+             )
+             continue
+-        predecessor = by_version.get(prev)
++        predecessor = next(
++            (candidate for candidate in releases if candidate.version == prev),
++            None,
++        )
+         if predecessor is None:
+-            problems.append(
+-                {
+-                    "kind": "missing_previous",
+-                    "version": record.version,
+-                    "previous_version": prev,
+-                    "record_status": record.status,
+-                    "predecessor_status": None,
+-                    "comparison_basis": "none",
+-                    "detail": f"previous_version {prev!r} has no matching release.",
+-                }
+-            )
+-            continue
++            matches = [
++                candidate
++                for candidate in releases
++                if release_identity_key(candidate.version)
++                == release_identity_key(prev)
++            ]
++            if len(matches) > 1:
++                problems.append(
++                    {
++                        "kind": "ambiguous_previous_identity",
++                        "version": record.version,
++                        "previous_version": prev,
++                        "record_status": record.status,
++                        "predecessor_status": None,
++                        "comparison_basis": "release_identity",
++                        "matches": sorted(candidate.version for candidate in matches),
++                        "detail": (
++                            f"previous_version {prev!r} matches multiple release identities."
++                        ),
++                    }
++                )
++                continue
++            if not matches:
++                problems.append(
++                    {
++                        "kind": "missing_previous",
++                        "version": record.version,
++                        "previous_version": prev,
++                        "record_status": record.status,
++                        "predecessor_status": None,
++                        "comparison_basis": "none",
++                        "detail": f"previous_version {prev!r} has no matching release.",
++                    }
++                )
++                continue
++            predecessor = matches[0]
+         if predecessor.status == "canceled" and not allow_canceled_predecessors:
+             problems.append(
+                 {
+@@ -2482,25 +2612,54 @@ def check_release_chain(
+         )
+         if root.previous_version is not None:
+             predecessor = by_version.get(root.previous_version)
+-            problems.append(
+-                {
+-                    "kind": (
+-                        "root_has_previous"
+-                        if predecessor is not None
+-                        else "truncated_history_previous"
+-                    ),
+-                    "version": root.version,
+-                    "previous_version": root.previous_version,
+-                    "record_status": root.status,
+-                    "predecessor_status": predecessor.status if predecessor else None,
+-                    "comparison_basis": "semantic_version",
+-                    "detail": (
+-                        "Earliest semantic release should have no predecessor."
+-                        if predecessor is not None
+-                        else "Oldest recorded release references history outside the ledger."
+-                    ),
+-                }
+-            )
++            root_matches: list[ReleaseRecord] = []
++            if predecessor is None:
++                root_matches = [
++                    candidate
++                    for candidate in releases
++                    if release_identity_key(candidate.version)
++                    == release_identity_key(root.previous_version)
++                ]
++                if len(root_matches) == 1:
++                    predecessor = root_matches[0]
++            if len(root_matches) > 1:
++                problems.append(
++                    {
++                        "kind": "ambiguous_previous_identity",
++                        "version": root.version,
++                        "previous_version": root.previous_version,
++                        "record_status": root.status,
++                        "predecessor_status": None,
++                        "comparison_basis": "release_identity",
++                        "matches": sorted(
++                            candidate.version for candidate in root_matches
++                        ),
++                        "detail": (
++                            f"previous_version {root.previous_version!r} matches "
++                            "multiple release identities."
++                        ),
++                    }
++                )
++            else:
++                problems.append(
++                    {
++                        "kind": (
++                            "root_has_previous"
++                            if predecessor is not None
++                            else "truncated_history_previous"
++                        ),
++                        "version": root.version,
++                        "previous_version": root.previous_version,
++                        "record_status": root.status,
++                        "predecessor_status": predecessor.status if predecessor else None,
++                        "comparison_basis": "semantic_version",
++                        "detail": (
++                            "Earliest semantic release should have no predecessor."
++                            if predecessor is not None
++                            else "Oldest recorded release references history outside the ledger."
++                        ),
++                    }
++                )
+     problems.sort(key=lambda item: (str(item["kind"]), str(item["version"])))
+     return {
+         "kind": "release_chain_check",
+diff --git a/releaseledger/services/review.py b/releaseledger/services/review.py
+index 5d996dc..4ddb81e 100644
+--- a/releaseledger/services/review.py
++++ b/releaseledger/services/review.py
+@@ -16,7 +16,7 @@ from __future__ import annotations
+ from pathlib import Path
+
+ from releaseledger.domain.entry import ReleaseEntryRecord, normalize_entry_status
+-from releaseledger.domain.release import ReleaseRecord
++from releaseledger.domain.release import ReleaseRecord, release_identity_key
+ from releaseledger.domain.source_ref import is_coverable_boundary_ref
+ from releaseledger.errors import LaunchError
+ from releaseledger.services.changelog_build import (
+@@ -391,7 +391,12 @@ def _problem_next_action(
+             "requires_confirmation": True,
+             "scope": scope,
+         }
+-    if kind in {"released_without_changelog", "release_changelog_date_mismatch"}:
++    if kind in {
++        "released_without_changelog",
++        "release_changelog_date_mismatch",
++        "release_changelog_unreleased",
++        "release_changelog_missing_date",
++    }:
+         return {
+             "code": "rebuild_release_changelog",
+             "command": (
+@@ -428,6 +433,7 @@ def _build_next_actions(
+     audit: dict[str, object] | None,
+     changelog: dict[str, object],
+     checks: dict[str, object],
++    proposed_released_at: str | None = None,
+ ) -> list[dict[str, object]]:
+     """Build stable, machine-actionable release-check next actions."""
+     target_display = str(target_file or "CHANGELOG.md")
+@@ -459,6 +465,28 @@ def _build_next_actions(
+         }
+         if action not in actions:
+             actions.append(action)
++    if not bool(checks.get("target_changelog_ok", True)):
++        phase = str(checks.get("phase", "current"))
++        command = (
++            f"releaseledger release check {version} --phase {phase} "
++            f"--strict --target-file {target_display}"
++        )
++        if proposed_released_at:
++            command += f" --released-at {proposed_released_at}"
++        command += " --acknowledge-changelog-change"
++        action = {
++            "code": "acknowledge_changelog_change",
++            "command": command,
++            "mutates": False,
++            "requires_confirmation": True,
++            "scope": "target",
++            "reason": (
++                "Review the target changelog diff in the release range before "
++                "acknowledging ownership."
++            ),
++        }
++        if action not in actions:
++            actions.append(action)
+     if audit is not None and not bool(audit.get("ok", False)):
+         action = {
+             "code": "complete_commit_audit",
+@@ -502,6 +530,7 @@ def _failed_checks(
+         for identifier, key in (
+             ("changelog", "changelog_ok"),
+             ("release_state", "release_state_ok"),
++            ("changelog_ownership", "target_changelog_ok"),
+             ("chain", "chain_ok"),
+             ("reconciliation", "reconciliation_ok"),
+         ):
+@@ -528,21 +557,27 @@ def _scope_health_block(
+     history_scope: str,
+ ) -> dict[str, object]:
+     """Classify repository findings without making unrelated history fatal."""
+-    affected = {version}
++    affected = {release_identity_key(version)}
+     if release.previous_version:
+-        affected.add(release.previous_version)
++        affected.add(release_identity_key(release.previous_version))
+     for record in records:
+-        if str(record.get("previous_version", "")) == version:
+-            affected.add(str(record.get("version", "")))
++        record_version = str(record.get("version", ""))
++        previous_version = str(record.get("previous_version", ""))
++        if previous_version and release_identity_key(previous_version) in affected:
++            affected.add(release_identity_key(record_version))
+     raw = block.get("problems", [])
+     problems: list[dict[str, object]] = []
+     for item in raw if isinstance(raw, list) else []:
+         if not isinstance(item, dict):
+             continue
+-        related = (
+-            str(item.get("version", "")) in affected
+-            or str(item.get("previous_version", "")) in affected
+-            or str(item.get("expected_previous", "")) in affected
++        related = any(
++            value
++            and release_identity_key(value) in affected
++            for value in (
++                str(item.get("version", "")),
++                str(item.get("previous_version", "")),
++                str(item.get("expected_previous", "")),
++            )
+         )
+         annotated = dict(item)
+         annotated["scope"] = "target" if related else "history"
+@@ -1117,6 +1152,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+         audit=audit_block,
+         changelog=changelog_block,
+         checks=checks,
++        proposed_released_at=proposed_released_at,
+     )
+
+     result: dict[str, object] = {
+diff --git a/skills/releaseledger/SKILL.md b/skills/releaseledger/SKILL.md
+index 2f64ddd..b942e87 100644
+--- a/skills/releaseledger/SKILL.md
++++ b/skills/releaseledger/SKILL.md
+@@ -28,6 +28,7 @@ Releaseledger is separate from taskledger. Do not treat `.releaseledger/` as tas
+ - Do not invent a release date. Use the date explicitly provided by the user, the persisted `released_at` value, or an unreleased heading.
+ - Do not include internal entries unless the user explicitly asks for internal release notes or passes an include-internal option.
+ - Do not silently overwrite an existing release section in `CHANGELOG.md`. Use the supported replace/update option only when explicitly requested.
++- For a managed changelog section, omit `--replace-existing` when the section is absent; use it only when the user explicitly asked to regenerate an existing section. If intent is unclear, do not replace the section.
+ - Do not duplicate an existing release heading.
+ - Do not remove existing historical changelog sections.
+ - Do not change release status just to build a changelog.
+@@ -62,7 +63,7 @@ releaseledger release refresh VERSION --head HEAD [--base REF] [--decisions-outp
+ releaseledger release tag VERSION
+ releaseledger release finalize VERSION
+ releaseledger release restore VERSION --reason TEXT [--from-tag TAG] [--dry-run]
+-releaseledger release check VERSION [--phase current|finalize|published] [--strict] [--target-file PATH]
++releaseledger release check VERSION [--phase current|finalize|published] [--strict] [--target-file PATH] [--acknowledge-changelog-change]
+ releaseledger entry add VERSION --kind KIND --summary TEXT
+ releaseledger release review VERSION [--git] [--strict] [--acknowledge-changelog-change]
+ releaseledger entry apply VERSION --file FILE --dry-run [--strict] [--guard-commit-subjects]
+@@ -142,6 +143,8 @@ releaseledger --root PATH --json release show VERSION
+    transition an existing planned/draft/candidate release to released.
+ 5. Verify with `releaseledger release show VERSION`.
+
++
++`release finalize --changelog-file PATH` records the target path in release metadata. It does not rebuild or rewrite `CHANGELOG.md`; run the changelog build command explicitly when file content should change.
+ ## Correcting canceled or misnumbered releases
+
+ Use this when a recorded release was never actually shipped (no git tag, no
+@@ -352,6 +355,10 @@ Use this when the user asks to build, generate, or update `CHANGELOG.md`.
+    - release date is exact, omitted, or marked unreleased according to user intent
+    - internal entries are absent unless requested
+    - groups appear in deterministic order
++
++   - A released section must use the exact persisted release date. Reconciliation reports `Unreleased`, missing-date, and date-mismatch headings as blockers.
++   - A release metadata update invalidates the affected changelog sections. Inspect the reported `invalidated_changelog_sections` values and rebuild them explicitly.
++   - Rebuild a stale predecessor section as well as the target when predecessor metadata or identity changed.
+    - breaking changes are visible
+ 3. Apply the build:
+    `releaseledger changelog build VERSION --output CHANGELOG.md`.
+@@ -413,6 +420,8 @@ For routine work on one release, keep validation scoped to the target. Do not im
+ 5. releaseledger release check VERSION --strict
+ ```
+
++The routine single-release rebuild command uses `--replace-existing` only when the request explicitly calls for regenerating an existing section. If the target section is absent, omit the flag. If the request is ambiguous, use a dry run without replacement and ask for confirmation before overwriting.
++
+ Use `release refresh` as the orchestration layer. It updates the stored snapshot, preserves reviewed audit rows, reports new and stale rows, and optionally writes a pending-only worksheet.
+
+ ## Complete historical reconstruction protocol
+@@ -449,6 +458,8 @@ Explicit prohibitions:
+ For repositories with a GitHub `repository_url`, generated release sections include
+ GitHub-style attribution when metadata exists:
+
++Contributor attribution is local-history first. Releaseledger normalizes author identities and scans verified Git ancestry before labeling anyone a first-time contributor. Shallow or unverifiable history suppresses first-contribution claims and reports a diagnostic instead of guessing.
++
+ ```markdown
+ ### Changed
+
+@@ -522,6 +533,8 @@ Rules:
+    release date in Keep a Changelog mode, a dated `planned` release, or other
+    build blockers. Review alone never writes the changelog.
+ 6. `git:<sha>` source refs are first-class coverage identities (not just evidence). A commit in the release range should have an accepted entry covering its `git:<sha>` in `source_refs`.
++7. Changelog reconciliation diagnostics are actionable blockers: rebuild `Unreleased`, undated, or date-mismatched released sections before finalizing.
++8. `--acknowledge-changelog-change` is required when the release review detects a managed changelog change. Acknowledgement does not write the file.
+
+ ## Git-first workflow
+
+@@ -627,6 +640,7 @@ release.changelog_file
+ entries
+ groups
+ releases
++github_contributor_history
+ ```
+
+ Use templates only for rendering. Do not let templates mutate releaseledger state or read files.
+diff --git a/tests/test_changelog_github.py b/tests/test_changelog_github.py
+index 673de3e..25679f8 100644
+--- a/tests/test_changelog_github.py
++++ b/tests/test_changelog_github.py
+@@ -67,8 +67,8 @@ def test_github_attribution_new_contributors_and_compare(tmp_path: Path) -> None
+     result = render_changelog_section(tmp_path, version="1.1.0")
+     section = str(result["section"])
+     assert "Updated current feature by @alice in [#3]" in section
+-    assert "### New Contributors" in section
+-    assert "- @alice made their first contribution" in section
++    assert "### New Contributors" not in section
++    assert "first contribution" not in section
+     assert (
+         "**Full Changelog**: [v1.0.0...v1.1.0](https://github.com/example/project/compare/v1.0.0...v1.1.0)"
+         in section
+diff --git a/tests/test_git_review.py b/tests/test_git_review.py
+index 4efb79c..9e3ca72 100644
+--- a/tests/test_git_review.py
++++ b/tests/test_git_review.py
+@@ -722,3 +722,47 @@ def test_review_strict_requires_changelog_change_acknowledgement(
+     )
+     assert acknowledged.exit_code == 0, acknowledged.output
+     assert json.loads(acknowledged.output)["result"]["ok"] is True
++    runner.invoke(
++        app,
++        ["--cwd", str(repo), "audit", "init", "0.2.0"],
++    )
++    check_result = runner.invoke(
++        app,
++        [
++            "--cwd",
++            str(repo),
++            "--json",
++            "release",
++            "check",
++            "0.2.0",
++            "--strict",
++        ],
++    )
++    assert check_result.exit_code != 0
++    check_payload = json.loads(check_result.output)
++    assert check_payload["result"]["checks"]["target_changelog_ok"] is False
++    assert "changelog_ownership" in check_payload["result"]["failed_checks"]
++    assert any(
++        action["code"] == "acknowledge_changelog_change"
++        for action in check_payload["result"]["next_actions"]
++    )
++    human_check = runner.invoke(
++        app,
++        ["--cwd", str(repo), "release", "check", "0.2.0", "--strict"],
++    )
++    assert "Changelog owner FAIL" in human_check.output
++    check_acknowledged = runner.invoke(
++        app,
++        [
++            "--cwd",
++            str(repo),
++            "--json",
++            "release",
++            "check",
++            "0.2.0",
++            "--strict",
++            "--acknowledge-changelog-change",
++        ],
++    )
++    acknowledged_payload = json.loads(check_acknowledged.output)
++    assert acknowledged_payload["result"]["checks"]["target_changelog_ok"] is True
+diff --git a/tests/test_git_sources.py b/tests/test_git_sources.py
+index 8a1c46c..274441c 100644
+--- a/tests/test_git_sources.py
++++ b/tests/test_git_sources.py
+@@ -16,7 +16,9 @@ from releaseledger.domain.release import ReleaseRecord
+ from releaseledger.errors import LaunchError
+ from releaseledger.services.git_sources import (
+     build_git_range_summary,
++    collect_contributor_history,
+     collect_git_candidates,
++    contributor_identity_key,
+     is_git_worktree,
+     is_root_base_ref,
+     net_diff_paths,
+@@ -65,6 +67,35 @@ def _commit(repo: Path, message: str, *, content_name: str | None = None) -> str
+     return _git(repo, "rev-parse", "HEAD").strip()
+
+
++
++def _commit_as(
++    repo: Path,
++    message: str,
++    *,
++    author_name: str,
++    author_email: str,
++    content_name: str,
++ ) -> str:
++    (repo / content_name).write_text(f"content for {content_name}\n")
++    _git(repo, "add", content_name)
++    env = {
++        **os.environ,
++        "GIT_AUTHOR_NAME": author_name,
++        "GIT_AUTHOR_EMAIL": author_email,
++        "GIT_COMMITTER_NAME": author_name,
++        "GIT_COMMITTER_EMAIL": author_email,
++        "GIT_CONFIG_NOSYSTEM": "1",
++        "HOME": str(repo),
++    }
++    subprocess.run(
++        ["git", "-C", str(repo), "commit", "-m", message],
++        check=True,
++        text=True,
++        capture_output=True,
++        env=env,
++    )
++    return _git(repo, "rev-parse", "HEAD").strip()
++
+ def _init_repo(tmp_path: Path) -> Path:
+     repo = tmp_path / "repo"
+     repo.mkdir()
+@@ -113,6 +144,66 @@ def test_resolve_git_ref_rejects_unresolvable(tmp_path: Path) -> None:
+     with pytest.raises(LaunchError):
+         resolve_git_ref(repo, "no-such-ref-xyz")
+
++def test_contributor_identity_key_is_case_insensitive() -> None:
++    assert contributor_identity_key("@Holgern") == "holgern"
++    assert contributor_identity_key("holgern") == "holgern"
++
++
++def test_collect_contributor_history_scans_reachable_ancestry(tmp_path: Path) -> None:
++    repo = _init_repo(tmp_path)
++    _commit_as(
++        repo,
++        "root",
++        author_name="Root",
++        author_email="root@users.noreply.github.com",
++        content_name="README.md",
++    )
++    _git(repo, "tag", "v0.1.0")
++    _commit_as(
++        repo,
++        "old work",
++        author_name="Holgern",
++        author_email="12345+holgern@users.noreply.github.com",
++        content_name="old.txt",
++    )
++    history = collect_contributor_history(repo, through_ref="v0.1.0")
++    assert history.complete is True
++    assert history.basis == "git_ancestry"
++    assert history.through_sha == resolve_git_ref(repo, "v0.1.0")
++    assert history.handles == ("@root",)
++
++
++def test_collect_contributor_history_marks_shallow_history_incomplete(
++    tmp_path: Path,
++ ) -> None:
++    source = _init_repo(tmp_path)
++    _commit_as(
++        source,
++        "root",
++        author_name="Root",
++        author_email="root@users.noreply.github.com",
++        content_name="README.md",
++    )
++    _commit_as(
++        source,
++        "new work",
++        author_name="New",
++        author_email="new@users.noreply.github.com",
++        content_name="new.txt",
++    )
++    shallow = tmp_path / "shallow"
++    subprocess.run(
++        ["git", "clone", "--depth", "1", f"file://{source}", str(shallow)],
++        check=True,
++        text=True,
++        capture_output=True,
++    )
++    history = collect_contributor_history(shallow, through_ref="HEAD")
++    assert history.complete is False
++    assert history.basis == "shallow_git_history"
++    assert history.through_sha is not None
++    assert history.handles == ("@new",)
++    assert history.warnings
+
+ def test_resolve_git_ref_rejects_non_worktree(tmp_path: Path) -> None:
+     with pytest.raises(LaunchError):
+diff --git a/tests/test_release_corrections.py b/tests/test_release_corrections.py
+index 4d68ce8..11c8878 100644
+--- a/tests/test_release_corrections.py
++++ b/tests/test_release_corrections.py
+@@ -10,6 +10,7 @@ rename v0.4.3 -> v0.5.0.
+ from __future__ import annotations
+
+ import json
++from dataclasses import replace
+ from pathlib import Path
+
+ import pytest
+@@ -17,6 +18,7 @@ from typer.testing import CliRunner
+
+ from releaseledger.cli import app
+ from releaseledger.domain.states import RELEASE_STATUSES
++from releaseledger.domain.versioning import bump_versioning
+ from releaseledger.errors import LaunchError
+ from releaseledger.services.changelog_build import (
+     find_release_section,
+@@ -31,8 +33,9 @@ from releaseledger.services.releases import (
+     rename_release,
+     repair_release_chain,
+     tag_release,
++    update_release,
+ )
+-from releaseledger.storage.store import list_releases, load_release
++from releaseledger.storage.store import list_releases, load_release, save_release
+
+ runner = CliRunner()
+
+@@ -477,6 +480,62 @@ class TestChainCheckAndRepair:
+         assert result["ok"] is False
+         kinds = [p["kind"] for p in result["problems"]]
+         assert "missing_previous" in kinds
++    def test_release_create_canonicalizes_v_prefixed_predecessor(
++        self, tmp_path: Path
++    ) -> None:
++        _init(tmp_path)
++        create_release(tmp_path, version="0.4.3")
++        create_release(
++            tmp_path, version="v0.4.4", previous_version="v0.4.3"
++        )
++        assert load_release(tmp_path, "v0.4.4").previous_version == "0.4.3"
++
++
++    def test_release_update_canonicalizes_v_prefixed_predecessor(
++        self, tmp_path: Path
++    ) -> None:
++        _init(tmp_path)
++        create_release(tmp_path, version="0.4.3")
++        create_release(tmp_path, version="v0.4.4")
++        update_release(
++            tmp_path, version="v0.4.4", previous_version="v0.4.3"
++        )
++        assert load_release(tmp_path, "v0.4.4").previous_version == "0.4.3"
++
++
++    def test_chain_check_resolves_mixed_prefix_previous_identity(
++        self, tmp_path: Path
++    ) -> None:
++        _init(tmp_path)
++        create_release(tmp_path, version="0.4.3")
++        create_release(tmp_path, version="v0.4.4", previous_version="0.4.3")
++        current = load_release(tmp_path, "v0.4.4")
++        save_release(
++            tmp_path,
++            replace(
++                current,
++                previous_version="v0.4.3",
++                versioning=bump_versioning(current.versioning),
++            ),
++            overwrite=True,
++        )
++        result = check_release_chain(tmp_path)
++        assert not any(
++            problem["kind"] == "missing_previous"
++            for problem in result["problems"]
++        )
++
++
++    def test_predecessor_identity_ambiguity_fails_on_write(
++        self, tmp_path: Path
++    ) -> None:
++        _init(tmp_path)
++        create_release(tmp_path, version="0.4.3")
++        create_release(tmp_path, version="v0.4.3")
++        with pytest.raises(LaunchError, match="ambiguous") :
++            create_release(
++                tmp_path, version="0.4.4", previous_version="v0.4.3"
++            )
+
+     def test_release_chain_check_reports_future_previous(self, tmp_path: Path) -> None:
+         _init(tmp_path)
+diff --git a/tests/test_release_reconcile.py b/tests/test_release_reconcile.py
+index 1333102..c4c2d74 100644
+--- a/tests/test_release_reconcile.py
++++ b/tests/test_release_reconcile.py
+@@ -41,6 +41,75 @@ def test_reconcile_reports_tag_and_changelog_mismatches(
+     assert "changelog_without_release" in kinds
+     assert result["ok"] is False
+
++def test_reconcile_released_record_with_unreleased_heading_fails(
++    tmp_path: Path, monkeypatch
++ ) -> None:
++    ensure_canonical_project(tmp_path)
++    create_release(
++        tmp_path, version="0.4.3", status="released", released_at="2026-09-14"
++    )
++    (tmp_path / "CHANGELOG.md").write_text("## [0.4.3] - Unreleased\n")
++    monkeypatch.setattr(releases_service.subprocess, "run", _tag_run(""))
++    result = reconcile_releases(tmp_path)
++    problem = next(
++        item for item in result["problems"]
++        if item["kind"] == "release_changelog_unreleased"
++    )
++    assert problem["release_date"] == "2026-09-14"
++    assert problem["heading"] == "## [0.4.3] - Unreleased"
++
++
++def test_reconcile_released_record_with_missing_heading_date_fails(
++    tmp_path: Path, monkeypatch
++ ) -> None:
++    ensure_canonical_project(tmp_path)
++    create_release(
++        tmp_path, version="0.4.3", status="released", released_at="2026-09-14"
++    )
++    (tmp_path / "CHANGELOG.md").write_text("## [0.4.3]\n")
++    monkeypatch.setattr(releases_service.subprocess, "run", _tag_run(""))
++    result = reconcile_releases(tmp_path)
++    assert any(
++        item["kind"] == "release_changelog_missing_date"
++        for item in result["problems"]
++    )
++
++
++def test_reconcile_released_record_with_matching_date_has_no_date_problem(
++    tmp_path: Path, monkeypatch
++ ) -> None:
++    ensure_canonical_project(tmp_path)
++    create_release(
++        tmp_path, version="0.4.3", status="released", released_at="2026-09-14"
++    )
++    (tmp_path / "CHANGELOG.md").write_text("## [0.4.3] - 2026-09-14\n")
++    monkeypatch.setattr(releases_service.subprocess, "run", _tag_run(""))
++    result = reconcile_releases(tmp_path)
++    assert not any(
++        item["kind"] in {
++            "release_changelog_unreleased",
++            "release_changelog_missing_date",
++            "release_changelog_date_mismatch",
++        }
++        for item in result["problems"]
++    )
++
++
++def test_reconcile_planned_with_tag_includes_tag_date(
++    tmp_path: Path, monkeypatch
++ ) -> None:
++    ensure_canonical_project(tmp_path)
++    create_release(tmp_path, version="0.4.3", status="planned")
++    monkeypatch.setattr(
++        releases_service.subprocess,
++        "run",
++        _tag_run("v0.4.3\n", date="2026-09-14"),
++    )
++    result = reconcile_releases(tmp_path)
++    problem = next(
++        item for item in result["problems"] if item["kind"] == "planned_with_tag"
++    )
++    assert problem["tag_date"] == "2026-09-14"
+
+ def test_parse_changelog_headings_canonical(tmp_path: Path) -> None:
+     """Canonical ## [VERSION] - DATE headings are parsed correctly."""
+@@ -220,10 +289,12 @@ def test_import_tags_idempotent(tmp_path: Path, monkeypatch) -> None:
+     assert result2["skipped_count"] == 2
+
+
+-def _tag_run(tags: str):
++def _tag_run(tags: str, *, date: str | None = None):
+     def fake_run(args, **kwargs):
+         if args[-2:] == ["tag", "--list"]:
+             return SimpleNamespace(returncode=0, stdout=tags, stderr="")
++        if "log" in args and date is not None:
++            return SimpleNamespace(returncode=0, stdout=date + "\n", stderr="")
+         return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+     return fake_run
+diff --git a/tests/test_stale_marker_workflow.py b/tests/test_stale_marker_workflow.py
+index 5357e40..53fb658 100644
+--- a/tests/test_stale_marker_workflow.py
++++ b/tests/test_stale_marker_workflow.py
+@@ -11,7 +11,11 @@ from releaseledger.services.audit import update_commit_audit_sheet
+ from releaseledger.services.changelog_build import build_changelog_file
+ from releaseledger.services.entries import add_many_release_entries
+ from releaseledger.services.events import load_events
+-from releaseledger.services.releases import finalize_release, prepare_release
++from releaseledger.services.releases import (
++    finalize_release,
++    prepare_release,
++    reconcile_releases,
++)
+ from releaseledger.services.review import build_release_review
+ from releaseledger.storage.paths import initialize_project, resolve_project_paths
+ from releaseledger.storage.store import load_entries, load_release
+@@ -58,7 +62,7 @@ def test_stale_marker_prepare_and_publish_workflow_is_idempotent(
+     prepared = prepare_release(
+         tmp_path,
+         version="v0.2.0",
+-        previous_version="v0.1.0",
++        previous_version="0.1.0",
+         released_at="2026-02-01",
+         git_base_ref="v0.1.0",
+         git_head_ref="HEAD",
+@@ -66,6 +70,7 @@ def test_stale_marker_prepare_and_publish_workflow_is_idempotent(
+     )
+     assert paths.project.indexes_binding_path.is_file()
+     assert prepared["proposed_released_at"] == "2026-02-01"
++    assert load_release(tmp_path, "v0.2.0").previous_version == "v0.1.0"
+
+     scaffold_path = Path(str(prepared["outputs"]["entries_yaml"]))
+     scaffold = yaml.safe_load(scaffold_path.read_text(encoding="utf-8"))
+@@ -107,6 +112,22 @@ def test_stale_marker_prepare_and_publish_workflow_is_idempotent(
+         target_file=tmp_path / "CHANGELOG.md",
+         replace_existing=False,
+     )
++    stale_changelog = (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8")
++    (tmp_path / "CHANGELOG.md").write_text(
++        stale_changelog.replace("2026-02-01", "Unreleased", 1),
++        encoding="utf-8",
++    )
++    stale = reconcile_releases(tmp_path)
++    assert any(
++        problem["kind"] == "release_changelog_unreleased"
++        for problem in stale["problems"]
++    )
++    build_changelog_file(
++        tmp_path,
++        version="v0.2.0",
++        target_file=tmp_path / "CHANGELOG.md",
++        replace_existing=True,
++    )
+     _git(tmp_path, "tag", "v0.2.0")
+     published = build_release_review(
+         tmp_path,

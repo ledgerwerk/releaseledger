@@ -1,0 +1,23 @@
+rows:
+  - sha: fb370746f625697018e8e4a1006826997579b29b
+    inspected: true
+    inspected_paths:
+      - releaseledger/cli.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/git_sources.py
+      - releaseledger/services/releases.py
+      - releaseledger/services/review.py
+      - skills/releaseledger/SKILL.md
+      - tests/test_changelog_github.py
+      - tests/test_git_review.py
+      - tests/test_git_sources.py
+      - tests/test_release_corrections.py
+      - tests/test_release_reconcile.py
+      - tests/test_stale_marker_workflow.py
+    observed_behavior: Added verified Git ancestry contributor tracking, changelog ownership validation, and canonical release identity handling with corresponding regression coverage
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: Reviewed the production changes and regression tests for the v0.4.6 to v0.4.7 range
+    stale: false

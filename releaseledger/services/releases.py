@@ -162,9 +162,7 @@ def resolve_release_selector(workspace_root: Path, selector: str) -> str:
     return matches[0]
 
 
-def _canonicalize_previous_selector(
-    workspace_root: Path, selector: str
-) -> str:
+def _canonicalize_previous_selector(workspace_root: Path, selector: str) -> str:
     """Validate and canonicalize a known predecessor release identity."""
     selector = validate_release_version(selector)
     records = list_releases(workspace_root)
@@ -1634,11 +1632,9 @@ def cancel_release(
             )
             if target_record is None or target_record.status == "canceled":
                 successor_target = None
-        if (
-            successor_target is not None
-            and release_identity_key(str(successor_target))
-            == release_identity_key(version)
-        ):
+        if successor_target is not None and release_identity_key(
+            str(successor_target)
+        ) == release_identity_key(version):
             raise LaunchError(
                 "Successor previous_version cannot point to the canceled release.",
                 code=CODE_CONFLICT,
@@ -1866,7 +1862,8 @@ def rename_release(  # noqa: C901 - coordinates bundle, entry, and successor rew
         for r in list_releases(workspace_root)
         if (
             r.previous_version is not None
-            and release_identity_key(r.previous_version) == release_identity_key(old_version)
+            and release_identity_key(r.previous_version)
+            == release_identity_key(old_version)
             and r.version != old_version
         )
     ]
@@ -2189,7 +2186,6 @@ def _check_release_record_problems(
                         }
                     )
     return problems
-
 
 
 def reconcile_releases(
@@ -2526,8 +2522,7 @@ def check_release_chain(
             matches = [
                 candidate
                 for candidate in releases
-                if release_identity_key(candidate.version)
-                == release_identity_key(prev)
+                if release_identity_key(candidate.version) == release_identity_key(prev)
             ]
             if len(matches) > 1:
                 problems.append(
@@ -2651,7 +2646,9 @@ def check_release_chain(
                         "version": root.version,
                         "previous_version": root.previous_version,
                         "record_status": root.status,
-                        "predecessor_status": predecessor.status if predecessor else None,
+                        "predecessor_status": predecessor.status
+                        if predecessor
+                        else None,
                         "comparison_basis": "semantic_version",
                         "detail": (
                             "Earliest semantic release should have no predecessor."

@@ -1,0 +1,44 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.4.7
+git_base_ref: 4be159ed3397b19193d4914c9ea5f6bc86773256
+git_base_sha: 4be159ed3397b19193d4914c9ea5f6bc86773256
+git_head_ref: fb370746f625697018e8e4a1006826997579b29b
+git_head_sha: fb370746f625697018e8e4a1006826997579b29b
+include_merges: nontrivial
+entries:
+  - kind: added
+    summary: Added verified Git ancestry checks for GitHub new-contributor attribution
+    status: accepted
+    source_refs:
+      - git:fb370746f625697018e8e4a1006826997579b29b
+    sources:
+      - git:fb370746f625697018e8e4a1006826997579b29b
+    contributors:
+      - "@holgern"
+    paths:
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/git_sources.py
+      - tests/test_changelog_github.py
+      - tests/test_git_sources.py
+  - kind: changed
+    summary: Changed release validation to detect unacknowledged changelog edits within the reviewed Git range
+    status: accepted
+    sources:
+      - git:fb370746f625697018e8e4a1006826997579b29b
+    paths:
+      - releaseledger/cli.py
+      - releaseledger/services/review.py
+      - tests/test_git_review.py
+  - kind: changed
+    summary: Changed release predecessor matching and changelog date checks to use canonical release identities
+    status: accepted
+    sources:
+      - git:fb370746f625697018e8e4a1006826997579b29b
+    paths:
+      - releaseledger/services/releases.py
+      - tests/test_release_corrections.py
+      - tests/test_release_reconcile.py
+      - tests/test_stale_marker_workflow.py

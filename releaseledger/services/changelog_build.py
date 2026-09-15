@@ -335,7 +335,8 @@ def _resolve_release_date(value: str | None) -> str | None:
 
 
 def _predecessor_chain(
-    release: ReleaseRecord, records: list[ReleaseRecord],
+    release: ReleaseRecord,
+    records: list[ReleaseRecord],
 ) -> tuple[list[ReleaseRecord], bool, list[str]]:
     """Return predecessor records resolved by exact or semantic identity."""
     by_version = {record.version: record for record in records}
@@ -525,11 +526,7 @@ def build_changelog_render_context(
         )
     github_contributor_history = {
         "verified": history_verified,
-        "basis": (
-            history_basis
-            if chain_complete
-            else "predecessor_chain_unverified"
-        ),
+        "basis": (history_basis if chain_complete else "predecessor_chain_unverified"),
         "through_sha": history_through_sha,
         "prior_count": len(verified_history_handles),
         "current": current_contributors,

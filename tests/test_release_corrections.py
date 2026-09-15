@@ -480,16 +480,14 @@ class TestChainCheckAndRepair:
         assert result["ok"] is False
         kinds = [p["kind"] for p in result["problems"]]
         assert "missing_previous" in kinds
+
     def test_release_create_canonicalizes_v_prefixed_predecessor(
         self, tmp_path: Path
     ) -> None:
         _init(tmp_path)
         create_release(tmp_path, version="0.4.3")
-        create_release(
-            tmp_path, version="v0.4.4", previous_version="v0.4.3"
-        )
+        create_release(tmp_path, version="v0.4.4", previous_version="v0.4.3")
         assert load_release(tmp_path, "v0.4.4").previous_version == "0.4.3"
-
 
     def test_release_update_canonicalizes_v_prefixed_predecessor(
         self, tmp_path: Path
@@ -497,11 +495,8 @@ class TestChainCheckAndRepair:
         _init(tmp_path)
         create_release(tmp_path, version="0.4.3")
         create_release(tmp_path, version="v0.4.4")
-        update_release(
-            tmp_path, version="v0.4.4", previous_version="v0.4.3"
-        )
+        update_release(tmp_path, version="v0.4.4", previous_version="v0.4.3")
         assert load_release(tmp_path, "v0.4.4").previous_version == "0.4.3"
-
 
     def test_chain_check_resolves_mixed_prefix_previous_identity(
         self, tmp_path: Path
@@ -521,10 +516,8 @@ class TestChainCheckAndRepair:
         )
         result = check_release_chain(tmp_path)
         assert not any(
-            problem["kind"] == "missing_previous"
-            for problem in result["problems"]
+            problem["kind"] == "missing_previous" for problem in result["problems"]
         )
-
 
     def test_predecessor_identity_ambiguity_fails_on_write(
         self, tmp_path: Path
@@ -532,10 +525,8 @@ class TestChainCheckAndRepair:
         _init(tmp_path)
         create_release(tmp_path, version="0.4.3")
         create_release(tmp_path, version="v0.4.3")
-        with pytest.raises(LaunchError, match="ambiguous") :
-            create_release(
-                tmp_path, version="0.4.4", previous_version="v0.4.3"
-            )
+        with pytest.raises(LaunchError, match="ambiguous"):
+            create_release(tmp_path, version="0.4.4", previous_version="v0.4.3")
 
     def test_release_chain_check_reports_future_previous(self, tmp_path: Path) -> None:
         _init(tmp_path)

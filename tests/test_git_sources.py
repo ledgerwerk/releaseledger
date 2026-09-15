@@ -67,7 +67,6 @@ def _commit(repo: Path, message: str, *, content_name: str | None = None) -> str
     return _git(repo, "rev-parse", "HEAD").strip()
 
 
-
 def _commit_as(
     repo: Path,
     message: str,
@@ -75,7 +74,7 @@ def _commit_as(
     author_name: str,
     author_email: str,
     content_name: str,
- ) -> str:
+) -> str:
     (repo / content_name).write_text(f"content for {content_name}\n")
     _git(repo, "add", content_name)
     env = {
@@ -95,6 +94,7 @@ def _commit_as(
         env=env,
     )
     return _git(repo, "rev-parse", "HEAD").strip()
+
 
 def _init_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
@@ -144,6 +144,7 @@ def test_resolve_git_ref_rejects_unresolvable(tmp_path: Path) -> None:
     with pytest.raises(LaunchError):
         resolve_git_ref(repo, "no-such-ref-xyz")
 
+
 def test_contributor_identity_key_is_case_insensitive() -> None:
     assert contributor_identity_key("@Holgern") == "holgern"
     assert contributor_identity_key("holgern") == "holgern"
@@ -175,7 +176,7 @@ def test_collect_contributor_history_scans_reachable_ancestry(tmp_path: Path) ->
 
 def test_collect_contributor_history_marks_shallow_history_incomplete(
     tmp_path: Path,
- ) -> None:
+) -> None:
     source = _init_repo(tmp_path)
     _commit_as(
         source,
@@ -204,6 +205,7 @@ def test_collect_contributor_history_marks_shallow_history_incomplete(
     assert history.through_sha is not None
     assert history.handles == ("@new",)
     assert history.warnings
+
 
 def test_resolve_git_ref_rejects_non_worktree(tmp_path: Path) -> None:
     with pytest.raises(LaunchError):

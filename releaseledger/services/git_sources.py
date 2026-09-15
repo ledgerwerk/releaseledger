@@ -317,7 +317,6 @@ def contributor_identity_key(value: str) -> str:
     return value.removeprefix("@").casefold()
 
 
-
 @dataclass(frozen=True, slots=True)
 class GitContributorHistory:
     """Contributor identities found in Git ancestry through a boundary."""
@@ -511,9 +510,7 @@ def _collect_history_handles(
         if len(fields) < 4:
             continue
         _, author_name, author_email, subject = fields[:4]
-        for handle in _extract_contributor_handles(
-            author_name, author_email, subject
-        ):
+        for handle in _extract_contributor_handles(author_name, author_email, subject):
             displays.setdefault(contributor_identity_key(handle), handle)
     return tuple(displays.values())
 
@@ -538,12 +535,8 @@ def collect_contributor_history(
             basis="git_ancestry",
         )
     through_sha = resolve_git_ref(workspace_root, through_ref)
-    shallow_result = _run_git(
-        workspace_root, ["rev-parse", "--is-shallow-repository"]
-    )
-    _require_git_available(
-        shallow_result, what="git rev-parse --is-shallow-repository"
-    )
+    shallow_result = _run_git(workspace_root, ["rev-parse", "--is-shallow-repository"])
+    _require_git_available(shallow_result, what="git rev-parse --is-shallow-repository")
     handles = _collect_history_handles(workspace_root, through_sha=through_sha)
     if shallow_result.stdout.strip().lower() == "true":
         return GitContributorHistory(
@@ -561,7 +554,6 @@ def collect_contributor_history(
         through_sha=through_sha,
         basis="git_ancestry",
     )
-
 
 
 def _verify_ancestry(

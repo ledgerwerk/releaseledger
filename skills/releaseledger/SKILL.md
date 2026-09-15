@@ -143,8 +143,8 @@ releaseledger --root PATH --json release show VERSION
    transition an existing planned/draft/candidate release to released.
 5. Verify with `releaseledger release show VERSION`.
 
-
 `release finalize --changelog-file PATH` records the target path in release metadata. It does not rebuild or rewrite `CHANGELOG.md`; run the changelog build command explicitly when file content should change.
+
 ## Correcting canceled or misnumbered releases
 
 Use this when a recorded release was never actually shipped (no git tag, no
@@ -351,6 +351,7 @@ Use this when the user asks to build, generate, or update `CHANGELOG.md`.
 1. Generate a strict dry run first:
    `releaseledger changelog build VERSION --dry-run --strict --output CHANGELOG.md`.
 2. Inspect the rendered section:
+
    - heading version is correct
    - release date is exact, omitted, or marked unreleased according to user intent
    - internal entries are absent unless requested
@@ -360,6 +361,7 @@ Use this when the user asks to build, generate, or update `CHANGELOG.md`.
    - A release metadata update invalidates the affected changelog sections. Inspect the reported `invalidated_changelog_sections` values and rebuild them explicitly.
    - Rebuild a stale predecessor section as well as the target when predecessor metadata or identity changed.
    - breaking changes are visible
+
 3. Apply the build:
    `releaseledger changelog build VERSION --output CHANGELOG.md`.
 4. Read `CHANGELOG.md` back and verify:
