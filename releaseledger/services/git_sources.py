@@ -46,9 +46,11 @@ __all__ = [
     "GIT_DEFAULT_MAX_COMMITS",
     "GIT_DEFAULT_MAX_DIFF_CHARS",
     "MERGE_POLICIES",
+    "GitContributorHistory",
     "GitSourceCandidate",
     "build_git_range_summary",
     "collect_git_candidates",
+    "contributor_identity_key",
     "export_git_evidence",
     "generate_git_scaffold_batch",
     "is_git_worktree",
@@ -310,6 +312,23 @@ class _CommitMeta:
     body: str
 
 
+def contributor_identity_key(value: str) -> str:
+    """Return the case-insensitive identity key for a contributor handle."""
+    return value.removeprefix("@").casefold()
+
+
+
+@dataclass(frozen=True, slots=True)
+class GitContributorHistory:
+    """Contributor identities found in Git ancestry through a boundary."""
+
+    handles: tuple[str, ...]
+    complete: bool
+    through_sha: str | None
+    basis: str
+    warnings: tuple[str, ...] = ()
+
+
 @dataclass(frozen=True)
 class GitSourceCandidate:
     """One reachable commit in a release range, as release-note evidence."""
@@ -474,6 +493,75 @@ def resolve_git_ref(workspace_root: Path, ref: str) -> str:
             exit_code=2,
         )
     return sha
+
+
+def _collect_history_handles(
+    workspace_root: Path, *, through_sha: str
+) -> tuple[str, ...]:
+    """Collect contributor handles from all commits reachable from ``through_sha``."""
+    fmt = "%H%x00%an%x00%ae%x00%s%x1e"
+    result = _run_git(
+        workspace_root,
+        ["log", "--format=" + fmt, "--no-decorate", through_sha],
+    )
+    _require_git_available(result, what=f"git log {through_sha}")
+    displays: dict[str, str] = {}
+    for record in result.stdout.split("\x1e"):
+        fields = record.rstrip("\n").split("\x00")
+        if len(fields) < 4:
+            continue
+        _, author_name, author_email, subject = fields[:4]
+        for handle in _extract_contributor_handles(
+            author_name, author_email, subject
+        ):
+            displays.setdefault(contributor_identity_key(handle), handle)
+    return tuple(displays.values())
+
+
+def collect_contributor_history(
+    workspace_root: Path, *, through_ref: str
+) -> GitContributorHistory:
+    """Collect verified contributor history through a Git release boundary.
+
+    The scan is local-only and includes every commit reachable from the resolved
+    boundary, including merge commits. A shallow repository is reported as
+    incomplete because its ancestry cannot prove that no earlier contributor
+    exists. The available handles are retained for diagnostics but must not be
+    used for first-contribution claims when ``complete`` is false.
+    """
+    _check_git_installed()
+    if is_root_base_ref(through_ref):
+        return GitContributorHistory(
+            handles=(),
+            complete=True,
+            through_sha=EMPTY_TREE_SHA,
+            basis="git_ancestry",
+        )
+    through_sha = resolve_git_ref(workspace_root, through_ref)
+    shallow_result = _run_git(
+        workspace_root, ["rev-parse", "--is-shallow-repository"]
+    )
+    _require_git_available(
+        shallow_result, what="git rev-parse --is-shallow-repository"
+    )
+    handles = _collect_history_handles(workspace_root, through_sha=through_sha)
+    if shallow_result.stdout.strip().lower() == "true":
+        return GitContributorHistory(
+            handles=handles,
+            complete=False,
+            through_sha=through_sha,
+            basis="shallow_git_history",
+            warnings=(
+                "Git contributor history is incomplete because the repository is shallow.",
+            ),
+        )
+    return GitContributorHistory(
+        handles=handles,
+        complete=True,
+        through_sha=through_sha,
+        basis="git_ancestry",
+    )
+
 
 
 def _verify_ancestry(

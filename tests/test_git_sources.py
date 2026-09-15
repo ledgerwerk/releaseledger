@@ -16,7 +16,9 @@ from releaseledger.domain.release import ReleaseRecord
 from releaseledger.errors import LaunchError
 from releaseledger.services.git_sources import (
     build_git_range_summary,
+    collect_contributor_history,
     collect_git_candidates,
+    contributor_identity_key,
     is_git_worktree,
     is_root_base_ref,
     net_diff_paths,
@@ -64,6 +66,35 @@ def _commit(repo: Path, message: str, *, content_name: str | None = None) -> str
     _git(repo, "commit", "-m", message)
     return _git(repo, "rev-parse", "HEAD").strip()
 
+
+
+def _commit_as(
+    repo: Path,
+    message: str,
+    *,
+    author_name: str,
+    author_email: str,
+    content_name: str,
+ ) -> str:
+    (repo / content_name).write_text(f"content for {content_name}\n")
+    _git(repo, "add", content_name)
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": author_name,
+        "GIT_AUTHOR_EMAIL": author_email,
+        "GIT_COMMITTER_NAME": author_name,
+        "GIT_COMMITTER_EMAIL": author_email,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "HOME": str(repo),
+    }
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", message],
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+    return _git(repo, "rev-parse", "HEAD").strip()
 
 def _init_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
@@ -113,6 +144,66 @@ def test_resolve_git_ref_rejects_unresolvable(tmp_path: Path) -> None:
     with pytest.raises(LaunchError):
         resolve_git_ref(repo, "no-such-ref-xyz")
 
+def test_contributor_identity_key_is_case_insensitive() -> None:
+    assert contributor_identity_key("@Holgern") == "holgern"
+    assert contributor_identity_key("holgern") == "holgern"
+
+
+def test_collect_contributor_history_scans_reachable_ancestry(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _commit_as(
+        repo,
+        "root",
+        author_name="Root",
+        author_email="root@users.noreply.github.com",
+        content_name="README.md",
+    )
+    _git(repo, "tag", "v0.1.0")
+    _commit_as(
+        repo,
+        "old work",
+        author_name="Holgern",
+        author_email="12345+holgern@users.noreply.github.com",
+        content_name="old.txt",
+    )
+    history = collect_contributor_history(repo, through_ref="v0.1.0")
+    assert history.complete is True
+    assert history.basis == "git_ancestry"
+    assert history.through_sha == resolve_git_ref(repo, "v0.1.0")
+    assert history.handles == ("@root",)
+
+
+def test_collect_contributor_history_marks_shallow_history_incomplete(
+    tmp_path: Path,
+ ) -> None:
+    source = _init_repo(tmp_path)
+    _commit_as(
+        source,
+        "root",
+        author_name="Root",
+        author_email="root@users.noreply.github.com",
+        content_name="README.md",
+    )
+    _commit_as(
+        source,
+        "new work",
+        author_name="New",
+        author_email="new@users.noreply.github.com",
+        content_name="new.txt",
+    )
+    shallow = tmp_path / "shallow"
+    subprocess.run(
+        ["git", "clone", "--depth", "1", f"file://{source}", str(shallow)],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    history = collect_contributor_history(shallow, through_ref="HEAD")
+    assert history.complete is False
+    assert history.basis == "shallow_git_history"
+    assert history.through_sha is not None
+    assert history.handles == ("@new",)
+    assert history.warnings
 
 def test_resolve_git_ref_rejects_non_worktree(tmp_path: Path) -> None:
     with pytest.raises(LaunchError):

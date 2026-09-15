@@ -162,6 +162,29 @@ def resolve_release_selector(workspace_root: Path, selector: str) -> str:
     return matches[0]
 
 
+def _canonicalize_previous_selector(
+    workspace_root: Path, selector: str
+) -> str:
+    """Validate and canonicalize a known predecessor release identity."""
+    selector = validate_release_version(selector)
+    records = list_releases(workspace_root)
+    identity = release_identity_key(selector)
+    matches = [
+        record.version
+        for record in records
+        if release_identity_key(record.version) == identity
+    ]
+    if len(matches) > 1:
+        raise LaunchError(
+            f"Predecessor selector {selector!r} is ambiguous: "
+            f"{', '.join(sorted(matches))}",
+            code=CODE_CONFLICT,
+            exit_code=2,
+            data={"selector": selector, "matches": sorted(matches)},
+        )
+    return matches[0] if matches else selector
+
+
 def _today() -> str:
     return datetime.datetime.now(tz=datetime.timezone.utc).date().isoformat()
 
@@ -481,6 +504,10 @@ def create_release(
             candidate_version=version,
             candidate_released_at=released_at,
         )
+    else:
+        previous_version = _canonicalize_previous_selector(
+            workspace_root, previous_version
+        )
     boundary_ref, source_refs, source_count = _validate_source_metadata(
         boundary_ref=boundary_ref,
         source_refs=source_refs,
@@ -531,6 +558,10 @@ def tag_release(
             workspace_root,
             candidate_version=version,
             candidate_released_at=released_at,
+        )
+    else:
+        previous_version = _canonicalize_previous_selector(
+            workspace_root, previous_version
         )
     boundary_ref, source_refs, source_count = _validate_source_metadata(
         boundary_ref=boundary_ref,
@@ -615,7 +646,9 @@ def finalize_release(
         data={"released_at": released_at},
     )
     rebuild_indexes(workspace_root)
-    return _release_payload(workspace_root, updated, event.event_id)
+    result = _release_payload(workspace_root, updated, event.event_id)
+    result["invalidated_changelog_sections"] = [updated.version]
+    return result
 
 
 def _git_tag_details(workspace_root: Path, tag: str) -> tuple[str, str]:
@@ -719,7 +752,12 @@ def restore_release(
         clear=clear_previous,
     )
     if resolved_previous is not None:
-        resolved_previous = validate_release_version(str(resolved_previous))
+        if previous_version is not UNSET:
+            resolved_previous = _canonicalize_previous_selector(
+                workspace_root, str(resolved_previous)
+            )
+        else:
+            resolved_previous = validate_release_version(str(resolved_previous))
     resolved_git: dict[str, object] = {
         "git_base_ref": existing.git_base_ref,
         "git_base_sha": existing.git_base_sha,
@@ -925,7 +963,12 @@ def update_release(
         clear=clear_previous,
     )
     if resolved_previous is not None:
-        resolved_previous = validate_release_version(str(resolved_previous))
+        if previous_version is not UNSET:
+            resolved_previous = _canonicalize_previous_selector(
+                workspace_root, str(resolved_previous)
+            )
+        else:
+            resolved_previous = validate_release_version(str(resolved_previous))
     resolved_changelog_file = _resolve_optional_field(
         "changelog-file",
         changelog_file,
@@ -1042,7 +1085,14 @@ def update_release(
         },
     )
     rebuild_indexes(workspace_root)
-    return _release_payload(workspace_root, updated, event.event_id)
+    result = _release_payload(workspace_root, updated, event.event_id)
+    if any(
+        key in {"title", "status", "released_at", "previous_version", "changelog_file"}
+        and getattr(existing, key) != getattr(updated, key)
+        for key in values
+    ):
+        result["invalidated_changelog_sections"] = [updated.version]
+    return result
 
 
 def set_release_status(
@@ -1545,7 +1595,12 @@ def cancel_release(
     successors = [
         record
         for record in list_releases(workspace_root)
-        if record.previous_version == version and record.version != version
+        if (
+            record.previous_version is not None
+            and release_identity_key(record.previous_version)
+            == release_identity_key(version)
+            and record.version != version
+        )
     ]
     if successors and not rewrite_successors:
         raise LaunchError(
@@ -1566,20 +1621,33 @@ def cancel_release(
                 (
                     r
                     for r in list_releases(workspace_root)
-                    if r.version == successor_target
+                    if (
+                        r.version == successor_target
+                        or (
+                            successor_target is not None
+                            and release_identity_key(r.version)
+                            == release_identity_key(str(successor_target))
+                        )
+                    )
                 ),
                 None,
             )
             if target_record is None or target_record.status == "canceled":
                 successor_target = None
-        if successor_target == version:
+        if (
+            successor_target is not None
+            and release_identity_key(str(successor_target))
+            == release_identity_key(version)
+        ):
             raise LaunchError(
                 "Successor previous_version cannot point to the canceled release.",
                 code=CODE_CONFLICT,
                 exit_code=2,
             )
         if successor_target is not None:
-            successor_target = validate_release_version(str(successor_target))
+            successor_target = _canonicalize_previous_selector(
+                workspace_root, str(successor_target)
+            )
             target_record = load_release(workspace_root, successor_target)
             if target_record.status == "canceled":
                 raise LaunchError(
@@ -1684,7 +1752,7 @@ def cancel_release(
     return payload
 
 
-def rename_release(
+def rename_release(  # noqa: C901 - coordinates bundle, entry, and successor rewrites
     workspace_root: Path,
     *,
     old_version: str,
@@ -1785,13 +1853,22 @@ def rename_release(
         previous_version if previous_version is not UNSET else existing.previous_version
     )
     if resolved_previous is not None:
-        resolved_previous = validate_release_version(str(resolved_previous))
+        if previous_version is not UNSET:
+            resolved_previous = _canonicalize_previous_selector(
+                workspace_root, str(resolved_previous)
+            )
+        else:
+            resolved_previous = validate_release_version(str(resolved_previous))
     resolved_title = title if title is not None else existing.title
     # Successor check: any release pointing at the old version as a predecessor.
     successors = [
         r
         for r in list_releases(workspace_root)
-        if r.previous_version == old_version and r.version != old_version
+        if (
+            r.previous_version is not None
+            and release_identity_key(r.previous_version) == release_identity_key(old_version)
+            and r.version != old_version
+        )
     ]
     if successors and not rewrite_successors:
         raise LaunchError(
@@ -1893,6 +1970,7 @@ def rename_release(
     )
     rebuild_indexes(workspace_root)
     payload = _release_payload(workspace_root, new_record, event.event_id)
+    payload["invalidated_changelog_sections"] = [old_version, new_version]
     if rename_changelog_section:
         assert staged_changelog is not None
         ledgercore.ensure_dir(changelog_target.parent)
@@ -2027,7 +2105,12 @@ def _check_release_record_problems(
                         "version": record.version,
                     }
                 )
-            if any(r.previous_version == record.version for r in records):
+            if any(
+                r.previous_version is not None
+                and release_identity_key(r.previous_version)
+                == release_identity_key(record.version)
+                for r in records
+            ):
                 problems.append(
                     {
                         "kind": "canceled_with_successor_reference",
@@ -2038,12 +2121,17 @@ def _check_release_record_problems(
         if owner is not record:
             continue
         if record.status in {"planned", "draft", "candidate"} and tags:
+            tag_date = next(
+                (tag_dates.get(tag) for tag in tags if tag_dates.get(tag)),
+                None,
+            )
             problems.append(
                 {
                     "kind": "planned_with_tag",
                     "version": record.version,
                     "status": record.status,
                     "tags": tags,
+                    "tag_date": tag_date,
                 }
             )
         if record.status == "released":
@@ -2065,28 +2153,43 @@ def _check_release_record_problems(
         if has_heading and record.released_at:
             heading = headings[identity][0]
             heading_date = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", heading)
-            for tag in tags:
-                tag_date = tag_dates.get(tag)
-                if tag_date and heading_date and tag_date != heading_date.group(1):
+            if heading_date is None:
+                problems.append(
+                    {
+                        "kind": (
+                            "release_changelog_unreleased"
+                            if "unreleased" in heading.lower()
+                            else "release_changelog_missing_date"
+                        ),
+                        "version": record.version,
+                        "release_date": record.released_at,
+                        "heading": heading,
+                    }
+                )
+            else:
+                for tag in tags:
+                    tag_date = tag_dates.get(tag)
+                    if tag_date and tag_date != heading_date.group(1):
+                        problems.append(
+                            {
+                                "kind": "tag_changelog_date_mismatch",
+                                "version": record.version,
+                                "tag": tag,
+                                "tag_date": tag_date,
+                                "changelog_date": heading_date.group(1),
+                            }
+                        )
+                if heading_date.group(1) != record.released_at:
                     problems.append(
                         {
-                            "kind": "tag_changelog_date_mismatch",
+                            "kind": "release_changelog_date_mismatch",
                             "version": record.version,
-                            "tag": tag,
-                            "tag_date": tag_date,
+                            "release_date": record.released_at,
                             "changelog_date": heading_date.group(1),
                         }
                     )
-            if heading_date and heading_date.group(1) != record.released_at:
-                problems.append(
-                    {
-                        "kind": "release_changelog_date_mismatch",
-                        "version": record.version,
-                        "release_date": record.released_at,
-                        "changelog_date": heading_date.group(1),
-                    }
-                )
     return problems
+
 
 
 def reconcile_releases(
@@ -2402,7 +2505,7 @@ def check_release_chain(
         prev = record.previous_version
         if prev is None:
             continue
-        if prev == record.version:
+        if release_identity_key(prev) == release_identity_key(record.version):
             problems.append(
                 {
                     "kind": "self_previous",
@@ -2410,25 +2513,52 @@ def check_release_chain(
                     "previous_version": prev,
                     "record_status": record.status,
                     "predecessor_status": record.status,
-                    "comparison_basis": "none",
+                    "comparison_basis": "release_identity",
                     "detail": "Release points to itself as its previous_version.",
                 }
             )
             continue
-        predecessor = by_version.get(prev)
+        predecessor = next(
+            (candidate for candidate in releases if candidate.version == prev),
+            None,
+        )
         if predecessor is None:
-            problems.append(
-                {
-                    "kind": "missing_previous",
-                    "version": record.version,
-                    "previous_version": prev,
-                    "record_status": record.status,
-                    "predecessor_status": None,
-                    "comparison_basis": "none",
-                    "detail": f"previous_version {prev!r} has no matching release.",
-                }
-            )
-            continue
+            matches = [
+                candidate
+                for candidate in releases
+                if release_identity_key(candidate.version)
+                == release_identity_key(prev)
+            ]
+            if len(matches) > 1:
+                problems.append(
+                    {
+                        "kind": "ambiguous_previous_identity",
+                        "version": record.version,
+                        "previous_version": prev,
+                        "record_status": record.status,
+                        "predecessor_status": None,
+                        "comparison_basis": "release_identity",
+                        "matches": sorted(candidate.version for candidate in matches),
+                        "detail": (
+                            f"previous_version {prev!r} matches multiple release identities."
+                        ),
+                    }
+                )
+                continue
+            if not matches:
+                problems.append(
+                    {
+                        "kind": "missing_previous",
+                        "version": record.version,
+                        "previous_version": prev,
+                        "record_status": record.status,
+                        "predecessor_status": None,
+                        "comparison_basis": "none",
+                        "detail": f"previous_version {prev!r} has no matching release.",
+                    }
+                )
+                continue
+            predecessor = matches[0]
         if predecessor.status == "canceled" and not allow_canceled_predecessors:
             problems.append(
                 {
@@ -2482,25 +2612,54 @@ def check_release_chain(
         )
         if root.previous_version is not None:
             predecessor = by_version.get(root.previous_version)
-            problems.append(
-                {
-                    "kind": (
-                        "root_has_previous"
-                        if predecessor is not None
-                        else "truncated_history_previous"
-                    ),
-                    "version": root.version,
-                    "previous_version": root.previous_version,
-                    "record_status": root.status,
-                    "predecessor_status": predecessor.status if predecessor else None,
-                    "comparison_basis": "semantic_version",
-                    "detail": (
-                        "Earliest semantic release should have no predecessor."
-                        if predecessor is not None
-                        else "Oldest recorded release references history outside the ledger."
-                    ),
-                }
-            )
+            root_matches: list[ReleaseRecord] = []
+            if predecessor is None:
+                root_matches = [
+                    candidate
+                    for candidate in releases
+                    if release_identity_key(candidate.version)
+                    == release_identity_key(root.previous_version)
+                ]
+                if len(root_matches) == 1:
+                    predecessor = root_matches[0]
+            if len(root_matches) > 1:
+                problems.append(
+                    {
+                        "kind": "ambiguous_previous_identity",
+                        "version": root.version,
+                        "previous_version": root.previous_version,
+                        "record_status": root.status,
+                        "predecessor_status": None,
+                        "comparison_basis": "release_identity",
+                        "matches": sorted(
+                            candidate.version for candidate in root_matches
+                        ),
+                        "detail": (
+                            f"previous_version {root.previous_version!r} matches "
+                            "multiple release identities."
+                        ),
+                    }
+                )
+            else:
+                problems.append(
+                    {
+                        "kind": (
+                            "root_has_previous"
+                            if predecessor is not None
+                            else "truncated_history_previous"
+                        ),
+                        "version": root.version,
+                        "previous_version": root.previous_version,
+                        "record_status": root.status,
+                        "predecessor_status": predecessor.status if predecessor else None,
+                        "comparison_basis": "semantic_version",
+                        "detail": (
+                            "Earliest semantic release should have no predecessor."
+                            if predecessor is not None
+                            else "Oldest recorded release references history outside the ledger."
+                        ),
+                    }
+                )
     problems.sort(key=lambda item: (str(item["kind"]), str(item["version"])))
     return {
         "kind": "release_chain_check",

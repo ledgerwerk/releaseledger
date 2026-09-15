@@ -10,6 +10,7 @@ rename v0.4.3 -> v0.5.0.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from typer.testing import CliRunner
 
 from releaseledger.cli import app
 from releaseledger.domain.states import RELEASE_STATUSES
+from releaseledger.domain.versioning import bump_versioning
 from releaseledger.errors import LaunchError
 from releaseledger.services.changelog_build import (
     find_release_section,
@@ -31,8 +33,9 @@ from releaseledger.services.releases import (
     rename_release,
     repair_release_chain,
     tag_release,
+    update_release,
 )
-from releaseledger.storage.store import list_releases, load_release
+from releaseledger.storage.store import list_releases, load_release, save_release
 
 runner = CliRunner()
 
@@ -477,6 +480,62 @@ class TestChainCheckAndRepair:
         assert result["ok"] is False
         kinds = [p["kind"] for p in result["problems"]]
         assert "missing_previous" in kinds
+    def test_release_create_canonicalizes_v_prefixed_predecessor(
+        self, tmp_path: Path
+    ) -> None:
+        _init(tmp_path)
+        create_release(tmp_path, version="0.4.3")
+        create_release(
+            tmp_path, version="v0.4.4", previous_version="v0.4.3"
+        )
+        assert load_release(tmp_path, "v0.4.4").previous_version == "0.4.3"
+
+
+    def test_release_update_canonicalizes_v_prefixed_predecessor(
+        self, tmp_path: Path
+    ) -> None:
+        _init(tmp_path)
+        create_release(tmp_path, version="0.4.3")
+        create_release(tmp_path, version="v0.4.4")
+        update_release(
+            tmp_path, version="v0.4.4", previous_version="v0.4.3"
+        )
+        assert load_release(tmp_path, "v0.4.4").previous_version == "0.4.3"
+
+
+    def test_chain_check_resolves_mixed_prefix_previous_identity(
+        self, tmp_path: Path
+    ) -> None:
+        _init(tmp_path)
+        create_release(tmp_path, version="0.4.3")
+        create_release(tmp_path, version="v0.4.4", previous_version="0.4.3")
+        current = load_release(tmp_path, "v0.4.4")
+        save_release(
+            tmp_path,
+            replace(
+                current,
+                previous_version="v0.4.3",
+                versioning=bump_versioning(current.versioning),
+            ),
+            overwrite=True,
+        )
+        result = check_release_chain(tmp_path)
+        assert not any(
+            problem["kind"] == "missing_previous"
+            for problem in result["problems"]
+        )
+
+
+    def test_predecessor_identity_ambiguity_fails_on_write(
+        self, tmp_path: Path
+    ) -> None:
+        _init(tmp_path)
+        create_release(tmp_path, version="0.4.3")
+        create_release(tmp_path, version="v0.4.3")
+        with pytest.raises(LaunchError, match="ambiguous") :
+            create_release(
+                tmp_path, version="0.4.4", previous_version="v0.4.3"
+            )
 
     def test_release_chain_check_reports_future_previous(self, tmp_path: Path) -> None:
         _init(tmp_path)

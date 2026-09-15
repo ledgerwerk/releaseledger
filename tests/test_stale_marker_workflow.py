@@ -11,7 +11,11 @@ from releaseledger.services.audit import update_commit_audit_sheet
 from releaseledger.services.changelog_build import build_changelog_file
 from releaseledger.services.entries import add_many_release_entries
 from releaseledger.services.events import load_events
-from releaseledger.services.releases import finalize_release, prepare_release
+from releaseledger.services.releases import (
+    finalize_release,
+    prepare_release,
+    reconcile_releases,
+)
 from releaseledger.services.review import build_release_review
 from releaseledger.storage.paths import initialize_project, resolve_project_paths
 from releaseledger.storage.store import load_entries, load_release
@@ -58,7 +62,7 @@ def test_stale_marker_prepare_and_publish_workflow_is_idempotent(
     prepared = prepare_release(
         tmp_path,
         version="v0.2.0",
-        previous_version="v0.1.0",
+        previous_version="0.1.0",
         released_at="2026-02-01",
         git_base_ref="v0.1.0",
         git_head_ref="HEAD",
@@ -66,6 +70,7 @@ def test_stale_marker_prepare_and_publish_workflow_is_idempotent(
     )
     assert paths.project.indexes_binding_path.is_file()
     assert prepared["proposed_released_at"] == "2026-02-01"
+    assert load_release(tmp_path, "v0.2.0").previous_version == "v0.1.0"
 
     scaffold_path = Path(str(prepared["outputs"]["entries_yaml"]))
     scaffold = yaml.safe_load(scaffold_path.read_text(encoding="utf-8"))
@@ -106,6 +111,22 @@ def test_stale_marker_prepare_and_publish_workflow_is_idempotent(
         version="v0.2.0",
         target_file=tmp_path / "CHANGELOG.md",
         replace_existing=False,
+    )
+    stale_changelog = (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8")
+    (tmp_path / "CHANGELOG.md").write_text(
+        stale_changelog.replace("2026-02-01", "Unreleased", 1),
+        encoding="utf-8",
+    )
+    stale = reconcile_releases(tmp_path)
+    assert any(
+        problem["kind"] == "release_changelog_unreleased"
+        for problem in stale["problems"]
+    )
+    build_changelog_file(
+        tmp_path,
+        version="v0.2.0",
+        target_file=tmp_path / "CHANGELOG.md",
+        replace_existing=True,
     )
     _git(tmp_path, "tag", "v0.2.0")
     published = build_release_review(

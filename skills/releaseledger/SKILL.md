@@ -28,6 +28,7 @@ Releaseledger is separate from taskledger. Do not treat `.releaseledger/` as tas
 - Do not invent a release date. Use the date explicitly provided by the user, the persisted `released_at` value, or an unreleased heading.
 - Do not include internal entries unless the user explicitly asks for internal release notes or passes an include-internal option.
 - Do not silently overwrite an existing release section in `CHANGELOG.md`. Use the supported replace/update option only when explicitly requested.
+- For a managed changelog section, omit `--replace-existing` when the section is absent; use it only when the user explicitly asked to regenerate an existing section. If intent is unclear, do not replace the section.
 - Do not duplicate an existing release heading.
 - Do not remove existing historical changelog sections.
 - Do not change release status just to build a changelog.
@@ -62,7 +63,7 @@ releaseledger release refresh VERSION --head HEAD [--base REF] [--decisions-outp
 releaseledger release tag VERSION
 releaseledger release finalize VERSION
 releaseledger release restore VERSION --reason TEXT [--from-tag TAG] [--dry-run]
-releaseledger release check VERSION [--phase current|finalize|published] [--strict] [--target-file PATH]
+releaseledger release check VERSION [--phase current|finalize|published] [--strict] [--target-file PATH] [--acknowledge-changelog-change]
 releaseledger entry add VERSION --kind KIND --summary TEXT
 releaseledger release review VERSION [--git] [--strict] [--acknowledge-changelog-change]
 releaseledger entry apply VERSION --file FILE --dry-run [--strict] [--guard-commit-subjects]
@@ -142,6 +143,8 @@ releaseledger --root PATH --json release show VERSION
    transition an existing planned/draft/candidate release to released.
 5. Verify with `releaseledger release show VERSION`.
 
+
+`release finalize --changelog-file PATH` records the target path in release metadata. It does not rebuild or rewrite `CHANGELOG.md`; run the changelog build command explicitly when file content should change.
 ## Correcting canceled or misnumbered releases
 
 Use this when a recorded release was never actually shipped (no git tag, no
@@ -352,6 +355,10 @@ Use this when the user asks to build, generate, or update `CHANGELOG.md`.
    - release date is exact, omitted, or marked unreleased according to user intent
    - internal entries are absent unless requested
    - groups appear in deterministic order
+
+   - A released section must use the exact persisted release date. Reconciliation reports `Unreleased`, missing-date, and date-mismatch headings as blockers.
+   - A release metadata update invalidates the affected changelog sections. Inspect the reported `invalidated_changelog_sections` values and rebuild them explicitly.
+   - Rebuild a stale predecessor section as well as the target when predecessor metadata or identity changed.
    - breaking changes are visible
 3. Apply the build:
    `releaseledger changelog build VERSION --output CHANGELOG.md`.
@@ -413,6 +420,8 @@ For routine work on one release, keep validation scoped to the target. Do not im
 5. releaseledger release check VERSION --strict
 ```
 
+The routine single-release rebuild command uses `--replace-existing` only when the request explicitly calls for regenerating an existing section. If the target section is absent, omit the flag. If the request is ambiguous, use a dry run without replacement and ask for confirmation before overwriting.
+
 Use `release refresh` as the orchestration layer. It updates the stored snapshot, preserves reviewed audit rows, reports new and stale rows, and optionally writes a pending-only worksheet.
 
 ## Complete historical reconstruction protocol
@@ -448,6 +457,8 @@ Explicit prohibitions:
 
 For repositories with a GitHub `repository_url`, generated release sections include
 GitHub-style attribution when metadata exists:
+
+Contributor attribution is local-history first. Releaseledger normalizes author identities and scans verified Git ancestry before labeling anyone a first-time contributor. Shallow or unverifiable history suppresses first-contribution claims and reports a diagnostic instead of guessing.
 
 ```markdown
 ### Changed
@@ -522,6 +533,8 @@ Rules:
    release date in Keep a Changelog mode, a dated `planned` release, or other
    build blockers. Review alone never writes the changelog.
 6. `git:<sha>` source refs are first-class coverage identities (not just evidence). A commit in the release range should have an accepted entry covering its `git:<sha>` in `source_refs`.
+7. Changelog reconciliation diagnostics are actionable blockers: rebuild `Unreleased`, undated, or date-mismatched released sections before finalizing.
+8. `--acknowledge-changelog-change` is required when the release review detects a managed changelog change. Acknowledgement does not write the file.
 
 ## Git-first workflow
 
@@ -627,6 +640,7 @@ release.changelog_file
 entries
 groups
 releases
+github_contributor_history
 ```
 
 Use templates only for rendering. Do not let templates mutate releaseledger state or read files.

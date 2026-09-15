@@ -46,7 +46,9 @@ from releaseledger.errors import (
 )
 from releaseledger.services.entry_lint import lint_release_entries
 from releaseledger.services.git_sources import (
+    collect_contributor_history,
     collect_git_candidates,
+    contributor_identity_key,
     resolve_release_snapshot,
 )
 from releaseledger.storage.config import (
@@ -332,6 +334,53 @@ def _resolve_release_date(value: str | None) -> str | None:
     return value
 
 
+def _predecessor_chain(
+    release: ReleaseRecord, records: list[ReleaseRecord],
+) -> tuple[list[ReleaseRecord], bool, list[str]]:
+    """Return predecessor records resolved by exact or semantic identity."""
+    by_version = {record.version: record for record in records}
+    chain: list[ReleaseRecord] = []
+    warnings: list[str] = []
+    seen: set[str] = {release_identity_key(release.version)}
+    current = release
+    complete = True
+    while current.previous_version:
+        selector = current.previous_version
+        predecessor = by_version.get(selector)
+        if predecessor is None:
+            matches = [
+                record
+                for record in records
+                if release_identity_key(record.version)
+                == release_identity_key(selector)
+            ]
+            if len(matches) == 1:
+                predecessor = matches[0]
+            elif len(matches) > 1:
+                warnings.append(
+                    f"Predecessor {selector!r} has ambiguous release identity."
+                )
+                complete = False
+                break
+            else:
+                warnings.append(
+                    f"Predecessor {selector!r} is missing from release history."
+                )
+                complete = False
+                break
+        identity = release_identity_key(predecessor.version)
+        if identity in seen:
+            warnings.append(
+                f"Release predecessor chain cycles at {predecessor.version}."
+            )
+            complete = False
+            break
+        seen.add(identity)
+        chain.append(predecessor)
+        current = predecessor
+    return chain, complete, warnings
+
+
 def build_changelog_render_context(
     workspace_root: Path,
     *,
@@ -383,7 +432,7 @@ def build_changelog_render_context(
 
     release_records: list[ReleaseRecord] = []
     releases_list: list[dict[str, object]] = []
-    history_complete = True
+    history_listing_complete = True
     try:
         release_records = list_releases(workspace_root)
         releases_list = [
@@ -391,37 +440,101 @@ def build_changelog_render_context(
             for record in release_records
         ]
     except Exception:  # pragma: no cover - defensive: list is best-effort
-        history_complete = False
+        history_listing_complete = False
         releases_list = []
 
     current_entries = [_entry_payload(entry) for entry in entries]
     for entry_payload in current_entries:
         entry_payload["github_summary"] = _github_entry_summary(entry_payload, config)
-    prior_records = release_records
-    for index, record in enumerate(release_records):
-        if record.version == release.version:
-            prior_records = release_records[:index]
+
+    prior_records, chain_complete, history_warnings = _predecessor_chain(
+        release, release_records
+    )
+    prior_contributors: dict[str, str] = {}
+    for record in prior_records:
+        try:
+            for entry in load_entries(workspace_root, record.version):
+                for contributor in entry.contributors:
+                    prior_contributors.setdefault(
+                        contributor_identity_key(contributor), contributor
+                    )
+        except Exception:  # pragma: no cover - incomplete history is advisory
+            chain_complete = False
+            history_warnings.append(
+                f"Could not load contributor metadata for {record.version}."
+            )
             break
-    prior_contributors: set[str] = set()
-    if history_complete:
-        for record in prior_records:
-            try:
-                for entry in load_entries(workspace_root, record.version):
-                    prior_contributors.update(entry.contributors)
-            except Exception:  # pragma: no cover - incomplete history is advisory
-                history_complete = False
-                break
+
     current_contributors: list[str] = []
+    current_identity_keys: set[str] = set()
     for entry_payload in current_entries:
         for contributor in _as_object_list(entry_payload.get("contributors", [])):
             value = str(contributor)
-            if value not in current_contributors:
+            identity = contributor_identity_key(value)
+            if identity not in current_identity_keys:
+                current_identity_keys.add(identity)
                 current_contributors.append(value)
+
+    contributor_history = None
+    git_boundary = release.git_base_sha or release.git_base_ref
+    if git_boundary is not None:
+        try:
+            contributor_history = collect_contributor_history(
+                workspace_root, through_ref=git_boundary
+            )
+        except LaunchError as exc:
+            history_warnings.append(
+                f"Could not verify Git contributor history: {exc.message}"
+            )
+    else:
+        history_warnings.append(
+            "New Contributors omitted because the release has no Git base boundary."
+        )
+
+    verified_history_handles: dict[str, str] = dict(prior_contributors)
+    history_basis = "missing_git_boundary"
+    history_through_sha: str | None = None
+    if contributor_history is not None:
+        history_basis = contributor_history.basis
+        history_through_sha = contributor_history.through_sha
+        for contributor in contributor_history.handles:
+            verified_history_handles.setdefault(
+                contributor_identity_key(contributor), contributor
+            )
+        history_warnings.extend(contributor_history.warnings)
+
+    history_verified = bool(
+        history_listing_complete
+        and chain_complete
+        and contributor_history is not None
+        and contributor_history.complete
+    )
     new_contributors = (
-        [value for value in current_contributors if value not in prior_contributors]
-        if history_complete
+        [
+            value
+            for value in current_contributors
+            if contributor_identity_key(value) not in verified_history_handles
+        ]
+        if history_verified
         else []
     )
+
+    if not history_verified:
+        history_warnings.append(
+            "New Contributors omitted because prior contributor history could not be verified."
+        )
+    github_contributor_history = {
+        "verified": history_verified,
+        "basis": (
+            history_basis
+            if chain_complete
+            else "predecessor_chain_unverified"
+        ),
+        "through_sha": history_through_sha,
+        "prior_count": len(verified_history_handles),
+        "current": current_contributors,
+        "new": new_contributors,
+    }
 
     status_counts = {
         status: sum(entry.status == status for entry in all_entries)
@@ -430,6 +543,7 @@ def build_changelog_render_context(
     warnings: list[str] = []
     if "draft" in statuses and status_counts["draft"]:
         warnings.append("Draft entries are included; output is draft-quality.")
+    warnings.extend(history_warnings)
     return {
         "project": {"name": project_name},
         "release": release_payload,
@@ -437,6 +551,7 @@ def build_changelog_render_context(
         "groups": _groups_payload(grouped, config=config),
         "releases": releases_list,
         "github_new_contributors": new_contributors,
+        "github_contributor_history": github_contributor_history,
         "included_statuses": list(statuses),
         "status_counts": status_counts,
         "warnings": warnings,

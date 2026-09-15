@@ -41,6 +41,75 @@ def test_reconcile_reports_tag_and_changelog_mismatches(
     assert "changelog_without_release" in kinds
     assert result["ok"] is False
 
+def test_reconcile_released_record_with_unreleased_heading_fails(
+    tmp_path: Path, monkeypatch
+ ) -> None:
+    ensure_canonical_project(tmp_path)
+    create_release(
+        tmp_path, version="0.4.3", status="released", released_at="2026-09-14"
+    )
+    (tmp_path / "CHANGELOG.md").write_text("## [0.4.3] - Unreleased\n")
+    monkeypatch.setattr(releases_service.subprocess, "run", _tag_run(""))
+    result = reconcile_releases(tmp_path)
+    problem = next(
+        item for item in result["problems"]
+        if item["kind"] == "release_changelog_unreleased"
+    )
+    assert problem["release_date"] == "2026-09-14"
+    assert problem["heading"] == "## [0.4.3] - Unreleased"
+
+
+def test_reconcile_released_record_with_missing_heading_date_fails(
+    tmp_path: Path, monkeypatch
+ ) -> None:
+    ensure_canonical_project(tmp_path)
+    create_release(
+        tmp_path, version="0.4.3", status="released", released_at="2026-09-14"
+    )
+    (tmp_path / "CHANGELOG.md").write_text("## [0.4.3]\n")
+    monkeypatch.setattr(releases_service.subprocess, "run", _tag_run(""))
+    result = reconcile_releases(tmp_path)
+    assert any(
+        item["kind"] == "release_changelog_missing_date"
+        for item in result["problems"]
+    )
+
+
+def test_reconcile_released_record_with_matching_date_has_no_date_problem(
+    tmp_path: Path, monkeypatch
+ ) -> None:
+    ensure_canonical_project(tmp_path)
+    create_release(
+        tmp_path, version="0.4.3", status="released", released_at="2026-09-14"
+    )
+    (tmp_path / "CHANGELOG.md").write_text("## [0.4.3] - 2026-09-14\n")
+    monkeypatch.setattr(releases_service.subprocess, "run", _tag_run(""))
+    result = reconcile_releases(tmp_path)
+    assert not any(
+        item["kind"] in {
+            "release_changelog_unreleased",
+            "release_changelog_missing_date",
+            "release_changelog_date_mismatch",
+        }
+        for item in result["problems"]
+    )
+
+
+def test_reconcile_planned_with_tag_includes_tag_date(
+    tmp_path: Path, monkeypatch
+ ) -> None:
+    ensure_canonical_project(tmp_path)
+    create_release(tmp_path, version="0.4.3", status="planned")
+    monkeypatch.setattr(
+        releases_service.subprocess,
+        "run",
+        _tag_run("v0.4.3\n", date="2026-09-14"),
+    )
+    result = reconcile_releases(tmp_path)
+    problem = next(
+        item for item in result["problems"] if item["kind"] == "planned_with_tag"
+    )
+    assert problem["tag_date"] == "2026-09-14"
 
 def test_parse_changelog_headings_canonical(tmp_path: Path) -> None:
     """Canonical ## [VERSION] - DATE headings are parsed correctly."""
@@ -220,10 +289,12 @@ def test_import_tags_idempotent(tmp_path: Path, monkeypatch) -> None:
     assert result2["skipped_count"] == 2
 
 
-def _tag_run(tags: str):
+def _tag_run(tags: str, *, date: str | None = None):
     def fake_run(args, **kwargs):
         if args[-2:] == ["tag", "--list"]:
             return SimpleNamespace(returncode=0, stdout=tags, stderr="")
+        if "log" in args and date is not None:
+            return SimpleNamespace(returncode=0, stdout=date + "\n", stderr="")
         return SimpleNamespace(returncode=1, stdout="", stderr="")
 
     return fake_run

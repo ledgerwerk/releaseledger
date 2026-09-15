@@ -16,7 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from releaseledger.domain.entry import ReleaseEntryRecord, normalize_entry_status
-from releaseledger.domain.release import ReleaseRecord
+from releaseledger.domain.release import ReleaseRecord, release_identity_key
 from releaseledger.domain.source_ref import is_coverable_boundary_ref
 from releaseledger.errors import LaunchError
 from releaseledger.services.changelog_build import (
@@ -391,7 +391,12 @@ def _problem_next_action(
             "requires_confirmation": True,
             "scope": scope,
         }
-    if kind in {"released_without_changelog", "release_changelog_date_mismatch"}:
+    if kind in {
+        "released_without_changelog",
+        "release_changelog_date_mismatch",
+        "release_changelog_unreleased",
+        "release_changelog_missing_date",
+    }:
         return {
             "code": "rebuild_release_changelog",
             "command": (
@@ -428,6 +433,7 @@ def _build_next_actions(
     audit: dict[str, object] | None,
     changelog: dict[str, object],
     checks: dict[str, object],
+    proposed_released_at: str | None = None,
 ) -> list[dict[str, object]]:
     """Build stable, machine-actionable release-check next actions."""
     target_display = str(target_file or "CHANGELOG.md")
@@ -456,6 +462,28 @@ def _build_next_actions(
             "mutates": False,
             "requires_confirmation": False,
             "scope": "target",
+        }
+        if action not in actions:
+            actions.append(action)
+    if not bool(checks.get("target_changelog_ok", True)):
+        phase = str(checks.get("phase", "current"))
+        command = (
+            f"releaseledger release check {version} --phase {phase} "
+            f"--strict --target-file {target_display}"
+        )
+        if proposed_released_at:
+            command += f" --released-at {proposed_released_at}"
+        command += " --acknowledge-changelog-change"
+        action = {
+            "code": "acknowledge_changelog_change",
+            "command": command,
+            "mutates": False,
+            "requires_confirmation": True,
+            "scope": "target",
+            "reason": (
+                "Review the target changelog diff in the release range before "
+                "acknowledging ownership."
+            ),
         }
         if action not in actions:
             actions.append(action)
@@ -502,6 +530,7 @@ def _failed_checks(
         for identifier, key in (
             ("changelog", "changelog_ok"),
             ("release_state", "release_state_ok"),
+            ("changelog_ownership", "target_changelog_ok"),
             ("chain", "chain_ok"),
             ("reconciliation", "reconciliation_ok"),
         ):
@@ -528,21 +557,27 @@ def _scope_health_block(
     history_scope: str,
 ) -> dict[str, object]:
     """Classify repository findings without making unrelated history fatal."""
-    affected = {version}
+    affected = {release_identity_key(version)}
     if release.previous_version:
-        affected.add(release.previous_version)
+        affected.add(release_identity_key(release.previous_version))
     for record in records:
-        if str(record.get("previous_version", "")) == version:
-            affected.add(str(record.get("version", "")))
+        record_version = str(record.get("version", ""))
+        previous_version = str(record.get("previous_version", ""))
+        if previous_version and release_identity_key(previous_version) in affected:
+            affected.add(release_identity_key(record_version))
     raw = block.get("problems", [])
     problems: list[dict[str, object]] = []
     for item in raw if isinstance(raw, list) else []:
         if not isinstance(item, dict):
             continue
-        related = (
-            str(item.get("version", "")) in affected
-            or str(item.get("previous_version", "")) in affected
-            or str(item.get("expected_previous", "")) in affected
+        related = any(
+            value
+            and release_identity_key(value) in affected
+            for value in (
+                str(item.get("version", "")),
+                str(item.get("previous_version", "")),
+                str(item.get("expected_previous", "")),
+            )
         )
         annotated = dict(item)
         annotated["scope"] = "target" if related else "history"
@@ -1117,6 +1152,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         audit=audit_block,
         changelog=changelog_block,
         checks=checks,
+        proposed_released_at=proposed_released_at,
     )
 
     result: dict[str, object] = {

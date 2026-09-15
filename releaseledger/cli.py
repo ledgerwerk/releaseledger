@@ -880,7 +880,10 @@ def release_finalize_command(
     ] = None,
     changelog_file: Annotated[
         str | None,
-        typer.Option("--changelog-file", help="Target changelog file."),
+        typer.Option(
+            "--changelog-file",
+            help="Persist the changelog path on release metadata; does not rebuild the file.",
+        ),
     ] = None,
 ) -> None:
     """Transition a planned/draft/candidate release to 'released'."""
@@ -1327,6 +1330,13 @@ def release_check_command(
             help="Validation scope: target (default) or full history.",
         ),
     ] = "target",
+    acknowledge_changelog_change: Annotated[
+        bool,
+        typer.Option(
+            "--acknowledge-changelog-change",
+            help="Acknowledge that the target changelog changed in the Git range.",
+        ),
+    ] = False,
 ) -> None:
     """Run the consolidated read-only release gate."""
     state = cli_state_from_context(ctx)
@@ -1351,6 +1361,7 @@ def release_check_command(
             history_scope=history_scope,
             phase=phase,
             proposed_released_at=released_at,
+            acknowledge_changelog_change=acknowledge_changelog_change,
         )
     except ReleaseledgerError as exc:
         emit_error(command="release check", error=exc, json_output=state.json_output)
@@ -2840,6 +2851,18 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
             if bool(checks_dict.get("changelog_ok", False))
             else changelog_reason
         )
+    )
+    changelog_owner_ok = bool(checks_dict.get("target_changelog_ok", True))
+    owner_detail = "no unacknowledged target change"
+    if not changelog_owner_ok:
+        owner_detail = "target changelog changed inside reviewed Git range"
+    elif (
+        isinstance(git_block, dict)
+        and git_block.get("target_changelog_modified_in_range") is True
+    ):
+        owner_detail = "target change reviewed and acknowledged"
+    lines.append(
+        f"Changelog owner {'OK' if changelog_owner_ok else 'FAIL'}  {owner_detail}"
     )
     lines.append(
         f"Audit complete  {'OK' if audit_complete_ok else 'FAIL'}  "

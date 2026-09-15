@@ -722,3 +722,47 @@ def test_review_strict_requires_changelog_change_acknowledgement(
     )
     assert acknowledged.exit_code == 0, acknowledged.output
     assert json.loads(acknowledged.output)["result"]["ok"] is True
+    runner.invoke(
+        app,
+        ["--cwd", str(repo), "audit", "init", "0.2.0"],
+    )
+    check_result = runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(repo),
+            "--json",
+            "release",
+            "check",
+            "0.2.0",
+            "--strict",
+        ],
+    )
+    assert check_result.exit_code != 0
+    check_payload = json.loads(check_result.output)
+    assert check_payload["result"]["checks"]["target_changelog_ok"] is False
+    assert "changelog_ownership" in check_payload["result"]["failed_checks"]
+    assert any(
+        action["code"] == "acknowledge_changelog_change"
+        for action in check_payload["result"]["next_actions"]
+    )
+    human_check = runner.invoke(
+        app,
+        ["--cwd", str(repo), "release", "check", "0.2.0", "--strict"],
+    )
+    assert "Changelog owner FAIL" in human_check.output
+    check_acknowledged = runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(repo),
+            "--json",
+            "release",
+            "check",
+            "0.2.0",
+            "--strict",
+            "--acknowledge-changelog-change",
+        ],
+    )
+    acknowledged_payload = json.loads(check_acknowledged.output)
+    assert acknowledged_payload["result"]["checks"]["target_changelog_ok"] is True
