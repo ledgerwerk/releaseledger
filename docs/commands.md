@@ -125,6 +125,8 @@ releaseledger release list
 releaseledger release show VERSION
 ```
 
+`release prepare` is preparation-only. `--released-at` is optional and only adds proposed publication actions; it does not finalize or write changelog content. The command returns structured `next_actions` in JSON and renders the same ordered guidance for human users. For an undated current release, its direct strict changelog dry run includes `--unreleased`; do not remove that mode.
+
 `release tag` creates a release with status `released`. `release finalize`
 transitions an existing release to `released` and is a compatible no-op when
 that release is already finalized. `release cancel` marks a release as

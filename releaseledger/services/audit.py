@@ -120,6 +120,7 @@ def _resolve_range(
 
 def _row_from_candidate(candidate: GitSourceCandidate) -> CommitAuditRow:
     stats = CommitAuditStats(
+        files_changed=len(candidate.paths),
         insertions=candidate.additions or 0,
         deletions=candidate.deletions or 0,
     )

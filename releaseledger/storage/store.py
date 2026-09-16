@@ -543,6 +543,8 @@ def rename_release_bundle(
     Persists ``new_record`` (with its rewritten front matter) under the new
     version directory, rewrites every entry's ``release_version`` front matter
     to the new version (preserving entry ids and order), and removes the old
+    Any commit-audit sheet in the bundle moves with it; callers that change its
+    release identity must persist the revised sheet after the move.
     bundle directory. Returns the persisted ``new_record``.
     """
     paths = _resolve(workspace_root)

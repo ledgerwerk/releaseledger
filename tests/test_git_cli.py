@@ -388,6 +388,10 @@ def test_release_prepare_exports_snapshot_artifacts(tmp_path: Path) -> None:
     assert payload["result_type"] == "release_prepare"
     assert payload["result"]["release"]["released_at"] is None
     assert payload["result"]["proposed_released_at"] == "2026-06-14"
+    actions = payload["result"]["next_actions"]
+    assert actions[0]["code"] == "inspect_audit_evidence"
+    assert actions[-1]["code"] == "release_check_published"
+    assert "--phase finalize" in actions[-4]["command"]
     assert (out_dir / "range.json").is_file()
     assert (out_dir / "audit.yaml").is_file()
     assert (out_dir / "entries.yaml").is_file()
@@ -407,6 +411,9 @@ def test_release_prepare_default_workspace_is_versioned_and_refreshable(
     first = runner.invoke(app, ["--cwd", str(repo), "release", "prepare", "0.2.0"])
     assert first.exit_code == 0, first.output
     work = repo / ".ledger" / "releaseledger" / "work" / "0.2.0"
+    assert "Next:" in first.output
+    assert "--phase current --strict" in first.output
+    assert "--dry-run --strict --unreleased" in first.output
     assert work.is_dir()
     assert (work / "evidence" / "manifest.json").is_file()
     blocked = runner.invoke(app, ["--cwd", str(repo), "release", "prepare", "0.2.0"])
@@ -426,6 +433,9 @@ def test_release_refresh_updates_snapshot_and_pending_decisions(
     prepared = _jrun(repo, "release", "prepare", "0.2.0")
     assert prepared["result_type"] == "release_prepare"
     _commit(repo, "fix: new behavior", "new.txt")
+    current_actions = prepared["result"]["next_actions"]
+    assert current_actions[-2]["code"] == "release_check_current"
+    assert "--unreleased" in current_actions[-1]["command"]
     output = tmp_path / "pending.yaml"
     refreshed = _jrun(
         repo,

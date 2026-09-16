@@ -16,7 +16,11 @@ from typer.testing import CliRunner
 
 from releaseledger.cli import app
 from releaseledger.domain.release import ReleaseRecord
-from releaseledger.services.review import _scope_health_block
+from releaseledger.services.review import (
+    _build_next_actions,
+    _coverage_recommendation,
+    _scope_health_block,
+)
 
 runner = CliRunner()
 
@@ -366,3 +370,89 @@ def test_release_check_passes_after_finalize(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
+
+
+def test_next_actions_are_lifecycle_aware_and_target_scoped() -> None:
+    chain = {
+        "problems": [
+            {"kind": "tag_without_release", "version": "0.1.0", "scope": "history"},
+            {"kind": "release_without_tag", "version": "0.2.0", "scope": "target"},
+        ]
+    }
+    changelog = {
+        "unreleased": True,
+        "effective_release_date": None,
+    }
+    checks = {"changelog_ok": False, "target_changelog_ok": True}
+    actions, follow_ups = _build_next_actions(
+        version="0.2.0",
+        target_file=Path("CHANGELOG.md"),
+        chain=chain,
+        reconciliation={"problems": []},
+        audit=None,
+        changelog=changelog,
+        checks=checks,
+        history_scope="target",
+    )
+    assert any(action["code"] == "create_external_git_tag" for action in actions)
+    assert all(action["scope"] != "history" for action in actions)
+    assert follow_ups[0]["code"] == "import_release_tag"
+    changelog_action = next(
+        action for action in actions if action["code"] == "resolve_changelog_dry_run"
+    )
+    assert "--dry-run" in changelog_action["command"]
+    assert "--unreleased" in changelog_action["command"]
+    assert changelog_action["mutates"] is False
+    assert changelog_action["requires_confirmation"] is False
+
+    full_actions, full_follow_ups = _build_next_actions(
+        version="0.2.0",
+        target_file=Path("CHANGELOG.md"),
+        chain=chain,
+        reconciliation={"problems": []},
+        audit=None,
+        changelog={"unreleased": False, "effective_release_date": "2026-09-16"},
+        checks={"changelog_ok": False, "target_changelog_ok": True},
+        history_scope="full",
+    )
+    assert full_follow_ups == []
+    assert any(action["scope"] == "history" for action in full_actions)
+    dated_action = next(
+        action
+        for action in full_actions
+        if action["code"] == "resolve_changelog_dry_run"
+    )
+    assert "--dry-run" in dated_action["command"]
+    assert "--release-date 2026-09-16" in dated_action["command"]
+
+
+def test_coverage_recommendation_uses_ref_provenance() -> None:
+    git_recommendation = _coverage_recommendation(
+        {"source_ref": "git:abc", "status": "missing", "origin": "git_range"}
+    )
+    assert git_recommendation is not None
+    assert "remove" not in git_recommendation
+    assert "commit audit" in git_recommendation
+    metadata_recommendation = _coverage_recommendation(
+        {
+            "source_ref": "tl:task-1",
+            "status": "missing",
+            "origin": "release_source_ref",
+        }
+    )
+    assert metadata_recommendation is not None
+    assert "remove" in metadata_recommendation
+
+
+def test_acknowledged_changelog_ownership_is_resolved() -> None:
+    assert (
+        _coverage_recommendation(
+            {
+                "source_ref": "git:abc",
+                "status": "missing",
+                "origin": "git_range",
+                "audit_decision": "accepted",
+            }
+        )
+        == "Add accepted public entry coverage for git:abc."
+    )

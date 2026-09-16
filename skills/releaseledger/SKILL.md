@@ -97,8 +97,8 @@ releaseledger commands
 releaseledger help release review
 releaseledger branch status
 releaseledger changelog build --strict --output CHANGELOG.md
-releaseledger changelog build VERSION --strict --output CHANGELOG.md
-releaseledger changelog build VERSION --strict --output CHANGELOG.md --replace-existing
+releaseledger changelog build VERSION --strict --unreleased --output CHANGELOG.md
+releaseledger changelog build VERSION --strict --unreleased --output CHANGELOG.md --replace-existing
 
 releaseledger storage where
 releaseledger storage validate --strict
@@ -133,8 +133,9 @@ releaseledger --root PATH --json release show VERSION
 
 ## Release creation protocol
 
-1. Prepare a planned release and proposed date with:
-   `releaseledger release prepare VERSION --previous PREV_VERSION --released-at YYYY-MM-DD`.
+1. Prepare a planned release and snapshot with:
+   `releaseledger release prepare VERSION --previous PREV_VERSION --git-base PREV_TAG --git-head HEAD`.
+   The command is preparation-only and returns structured `next_actions` guidance; it never finalizes or writes changelog content.
 2. Use `releaseledger release create VERSION --title "Release VERSION"` only when no
    proposed date is being persisted on a planned record.
 3. Use `releaseledger release tag VERSION` to create a released Releaseledger record;
@@ -162,8 +163,9 @@ Decision tree:
    and run the exact suggested `changelog-section rename-section` command.
    The rename preserves title and status unless explicitly overridden.
 3. Prepare the corrected release in one step:
-   `releaseledger release prepare NEW --previous PREV --released-at DATE`
+   `releaseledger release prepare NEW --previous PREV`
    with `--git-base` and `--git-head` when the range is known.
+   Persist a release date only during explicit finalization with `--released-at DATE`.
 4. If the wrong version should remain as a visible audit tombstone, use
    `release cancel --reason "..." --superseded-by VERSION` (sets status
    `canceled`).
@@ -182,7 +184,7 @@ releaseledger release rename OLD NEW --previous PREV \
   --target-file CHANGELOG.md --rename-changelog-section --dry-run
 releaseledger release rename OLD NEW --previous PREV \
   --target-file CHANGELOG.md --rename-changelog-section
-releaseledger release prepare NEW --previous PREV --released-at DATE \
+releaseledger release prepare NEW --previous PREV \
   --git-base PREV_TAG --git-head HEAD --refresh
 releaseledger entry apply NEW --file .ledger/releaseledger/work/NEW/entries.yaml --dry-run --strict --guard-commit-subjects
 releaseledger entry apply NEW --file .ledger/releaseledger/work/NEW/entries.yaml --strict --guard-commit-subjects --sync-audit
@@ -191,8 +193,8 @@ releaseledger audit apply NEW --file .ledger/releaseledger/work/NEW/audit-decisi
 releaseledger audit apply NEW --file .ledger/releaseledger/work/NEW/audit-decisions.yaml
 releaseledger release check NEW --phase finalize --released-at DATE --strict \
   --target-file CHANGELOG.md
-releaseledger changelog build NEW --output CHANGELOG.md --strict --replace-existing
 releaseledger release finalize NEW --released-at DATE
+releaseledger changelog build NEW --output CHANGELOG.md --strict --replace-existing
 git add CHANGELOG.md .ledger/releaseledger && git commit -m "Release NEW"
 git tag NEW  # explicit external action; Releaseledger does not create Git tags
 releaseledger release check NEW --phase published --strict --target-file CHANGELOG.md
@@ -327,10 +329,9 @@ Use this for any git-backed changelog or release-note backfill.
    followed by
    `releaseledger entry apply VERSION --file entries.yaml --strict --guard-commit-subjects --sync-audit`.
 10. Validate the complete phase after entries exist:
-11. Validate the complete public phase after entries exist:
     `releaseledger audit validate VERSION --phase complete --strict`.
     Add `--include-internal` only when internal changelog-entry coverage is explicitly requested.
-12. Run `releaseledger release check VERSION --phase finalize --released-at DATE --strict --target-file CHANGELOG.md` before any final build. Use the
+11. Run `releaseledger release check VERSION --phase finalize --released-at DATE --strict --target-file CHANGELOG.md` before any final build. Use the
     `published` phase after finalization and tagging.
 
 `audit init` writes one `needs_review` row per git candidate commit. Decisions
@@ -348,22 +349,25 @@ Use this when the user asks to build, generate, or update `CHANGELOG.md`.
    `releaseledger release check VERSION --strict --target-file CHANGELOG.md`.
    If it reports missing `git:<sha>` coverage, audit failures, lint errors, or
    release-state blockers, stop and resolve them before building.
-1. Generate a strict dry run first:
-   `releaseledger changelog build VERSION --dry-run --strict --output CHANGELOG.md`.
+1. Generate a strict dry run first. For an undated current release, pass the
+   required `--unreleased` mode explicitly:
+   `releaseledger changelog build VERSION --dry-run --strict --unreleased --output CHANGELOG.md`.
 2. Inspect the rendered section:
-
    - heading version is correct
    - release date is exact, omitted, or marked unreleased according to user intent
    - internal entries are absent unless requested
    - groups appear in deterministic order
-
-   - A released section must use the exact persisted release date. Reconciliation reports `Unreleased`, missing-date, and date-mismatch headings as blockers.
-   - A release metadata update invalidates the affected changelog sections. Inspect the reported `invalidated_changelog_sections` values and rebuild them explicitly.
-   - Rebuild a stale predecessor section as well as the target when predecessor metadata or identity changed.
    - breaking changes are visible
-
-3. Apply the build:
-   `releaseledger changelog build VERSION --output CHANGELOG.md`.
+   - A released section uses the exact persisted release date. Reconciliation reports
+     `Unreleased`, missing-date, and date-mismatch headings as blockers.
+   - A release metadata update invalidates affected changelog sections. Inspect
+     `invalidated_changelog_sections` and rebuild them explicitly.
+   - Rebuild a stale predecessor section when predecessor metadata or identity changed.
+3. Apply the build after the appropriate lifecycle check:
+   - For an undated planned release:
+     `releaseledger changelog build VERSION --unreleased --output CHANGELOG.md`.
+   - After finalization, use the persisted release date:
+     `releaseledger changelog build VERSION --strict --output CHANGELOG.md`.
 4. Read `CHANGELOG.md` back and verify:
    - no duplicate release heading exists
    - new section is below `## Unreleased` when that heading exists
@@ -391,7 +395,7 @@ Use this when the user asks to build, generate, or update `CHANGELOG.md`.
 An explicit release version means single-section intent:
 
 ```bash
-releaseledger changelog build VERSION --strict --output CHANGELOG.md
+releaseledger changelog build VERSION --strict --unreleased --output CHANGELOG.md
 ```
 
 Use a full document rebuild only when the user explicitly asks for all history,
@@ -416,10 +420,14 @@ For routine work on one release, keep validation scoped to the target. Do not im
 
 ```text
 1. releaseledger release refresh VERSION --head HEAD --decisions-output pending.yaml
-2. inspect and apply the pending audit decisions
-3. releaseledger entry lint VERSION --strict
-4. releaseledger changelog build VERSION --strict --output CHANGELOG.md --replace-existing
-5. releaseledger release check VERSION --strict
+2. inspect and apply the pending audit decisions with `audit apply --dry-run` first
+3. releaseledger audit apply VERSION --file pending.yaml --dry-run
+4. releaseledger audit apply VERSION --file pending.yaml
+5. releaseledger audit validate VERSION --phase evidence --strict
+6. releaseledger entry lint VERSION --strict
+7. releaseledger release check VERSION --phase current --strict --target-file CHANGELOG.md
+8. releaseledger changelog build VERSION --dry-run --strict --unreleased --output CHANGELOG.md
+9. releaseledger changelog build VERSION --unreleased --output CHANGELOG.md
 ```
 
 The routine single-release rebuild command uses `--replace-existing` only when the request explicitly calls for regenerating an existing section. If the target section is absent, omit the flag. If the request is ambiguous, use a dry run without replacement and ask for confirmation before overwriting.

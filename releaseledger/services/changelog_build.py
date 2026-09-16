@@ -469,8 +469,8 @@ def build_changelog_render_context(
     current_contributors: list[str] = []
     current_identity_keys: set[str] = set()
     for entry_payload in current_entries:
-        for contributor in _as_object_list(entry_payload.get("contributors", [])):
-            value = str(contributor)
+        for contributor_value in _as_object_list(entry_payload.get("contributors", [])):
+            value = str(contributor_value)
             identity = contributor_identity_key(value)
             if identity not in current_identity_keys:
                 current_identity_keys.add(identity)

@@ -147,6 +147,7 @@ require a tag. `--phase published` checks post-release consistency, including a
 release date, matching Git tag when Git is active, changelog presence, and clean
 reconciliation. Human output renders every gate included in the final result;
 JSON exposes stable `failed_checks` and actionable `next_actions`.
+`release prepare` is preparation-only and never finalizes a release. Its JSON result contains ordered `next_actions` with command text, mutation metadata, and manual-action markers; human output renders the same list. Without a proposed date, the generated current-release changelog dry run includes `--unreleased`.
 
 ## Versioning
 

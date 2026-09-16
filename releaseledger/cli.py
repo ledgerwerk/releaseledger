@@ -1077,20 +1077,25 @@ def release_prepare_command(
         outputs = result.get("outputs")
         outputs_dict = outputs if isinstance(outputs, dict) else {}
         work_dir = str(outputs_dict.get("work_dir", ""))
-        entries_path = str(outputs_dict.get("entries_yaml", ""))
-        human = (
-            f"Prepared release workspace: {work_dir}\n\n"
-            "Next:\n"
-            f"1. Review {outputs_dict.get('audit_yaml', '')} and "
-            f"{outputs_dict.get('evidence_manifest', '')}.\n"
-            f"2. Record include/exclude decisions in {outputs_dict.get('audit_decisions_yaml', '')}.\n"
-            "3. Edit entries.yaml from reviewed behavior; do not copy commit subjects.\n"
-            f"4. releaseledger entry apply {version} --file {entries_path} --dry-run\n"
-            f"5. releaseledger entry apply {version} --file {entries_path}\n"
-            f"6. releaseledger release check {version} --phase finalize "
-            f"--released-at {released_at or 'YYYY-MM-DD'} --strict\n"
-            f"7. releaseledger changelog build {version} --output CHANGELOG.md\n"
-            "8. Stop here for preparation-only work; publication requires finalize, an external commit/tag, then the published check."
+        actions = result.get("next_actions", [])
+        next_lines: list[str] = []
+        if isinstance(actions, list):
+            for index, action in enumerate(actions, start=1):
+                if not isinstance(action, dict):
+                    continue
+                command = str(action.get("command", ""))
+                reason = action.get("reason")
+                labels = ["mutates" if action.get("mutates") else "read-only"]
+                if action.get("requires_confirmation"):
+                    labels.append("confirmation required")
+                if action.get("manual_action_required"):
+                    labels.append("manual action")
+                line = f"{index}. [{', '.join(labels)}] {command}"
+                if reason:
+                    line += f" ({reason})"
+                next_lines.append(line)
+        human = f"Prepared release workspace: {work_dir}\n\nNext:\n" + "\n".join(
+            next_lines
         )
         return result, [], human
 
@@ -1551,9 +1556,25 @@ def release_rename_command(
             dry_run=dry_run,
         )
         if dry_run:
+            before = result.get("release_before", {})
+            after = result.get("release_after", {})
+            before_title = before.get("title") if isinstance(before, dict) else None
+            after_title = after.get("title") if isinstance(after, dict) else None
+            after_previous = (
+                after.get("previous_version") if isinstance(after, dict) else None
+            )
+            audit_text = (
+                "move + rewrite release_version"
+                if result.get("audit_rewritten")
+                else "none"
+            )
             human = (
                 f"previewed rename of release {old_version} to {new_version}\n"
-                f"  bundle move: {result.get('bundle_move')}\n"
+                f"  version: {old_version} -> {new_version}\n"
+                f"  title: {before_title} -> {after_title}\n"
+                f"  previous_version: {after_previous}\n"
+                f"  audit: {audit_text}\n"
+                "  git snapshot: preserved\n"
                 f"  changelog: {result.get('changelog_action')}"
             )
         else:

@@ -60,7 +60,6 @@ as the canonical evidence of shipped changes.
 ```bash
 releaseledger release prepare 1.2.0 \
   --previous 1.1.0 \
-  --released-at 2026-06-14 \
   --git-base v1.1.0 \
   --git-head HEAD
 work=.ledger/releaseledger/work/1.2.0
@@ -73,7 +72,10 @@ refresh the stored snapshot to a newer commit.
 
 ````bash
 # release prepare already emitted evidence/, audit.yaml, audit-decisions.yaml, and entries.yaml.
+# `release prepare` returns structured `next_actions` in JSON and renders the same ordered guidance in human output.
+# Sequence: inspect audit, dry-run/apply audit, validate evidence, edit behavior-based entries, dry-run/apply entries with subject guards, validate complete audit, then run the lifecycle check.
 ls "$work"
+# For a planned release without a date, use `--unreleased` on direct strict changelog builds. Do not treat preparation as publication.
 ls "$work/evidence"
 
 Curate the audit annotations, then validate the evidence phase:
@@ -211,6 +213,7 @@ Use `build VERSION` to render and insert a final section:
 releaseledger changelog build 1.2.0 \
   --dry-run \
   --strict \
+  --unreleased \
   --target-file CHANGELOG.md
 
 releaseledger changelog build 1.2.0 \

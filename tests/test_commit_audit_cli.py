@@ -126,6 +126,11 @@ class TestAuditInit:
         payload = _jrun(repo, "audit", "init", "0.2.0")
         assert payload["result_type"] == "commit_audit_sheet_created"
         assert int(payload["result"]["row_count"]) == 2
+        show = _jrun(repo, "audit", "show", "0.2.0", "--format", "json")
+        rows = show["result"]["sheet"]["rows"]
+        assert all(
+            row["stats"]["files_changed"] == len(row["changed_paths"]) for row in rows
+        )
 
     def test_init_uses_stored_release_range_when_omitted(self, tmp_path: Path) -> None:
         repo, _sha_a, _sha_b = _seed_range(tmp_path)

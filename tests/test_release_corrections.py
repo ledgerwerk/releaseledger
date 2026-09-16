@@ -17,9 +17,15 @@ import pytest
 from typer.testing import CliRunner
 
 from releaseledger.cli import app
+from releaseledger.domain.audit import (
+    CommitAuditRow,
+    CommitAuditSheetRecord,
+    CommitAuditStats,
+)
 from releaseledger.domain.states import RELEASE_STATUSES
-from releaseledger.domain.versioning import bump_versioning
+from releaseledger.domain.versioning import RecordVersioning, bump_versioning
 from releaseledger.errors import LaunchError
+from releaseledger.services.audit import validate_commit_audit_sheet
 from releaseledger.services.changelog_build import (
     find_release_section,
     remove_release_section,
@@ -35,7 +41,13 @@ from releaseledger.services.releases import (
     tag_release,
     update_release,
 )
-from releaseledger.storage.store import list_releases, load_release, save_release
+from releaseledger.storage.store import (
+    list_releases,
+    load_commit_audit_sheet,
+    load_release,
+    save_commit_audit_sheet,
+    save_release,
+)
 
 runner = CliRunner()
 
@@ -330,6 +342,118 @@ class TestCancelRelease:
 
 
 class TestRenameRelease:
+    def test_rename_preserves_identity_fields_and_rewrites_audit(
+        self, tmp_path: Path
+    ) -> None:
+        from releaseledger.services.entries import add_release_entry
+
+        _init(tmp_path)
+        create_release(
+            tmp_path,
+            version="0.7.0",
+            title="Release 0.7.0",
+            history_state="audited",
+        )
+        original = load_release(tmp_path, "0.7.0")
+        save_release(
+            tmp_path,
+            replace(
+                original,
+                git_base_ref="v0.6.1",
+                git_base_sha="a" * 40,
+                versioning=bump_versioning(original.versioning),
+                git_head_ref="HEAD",
+                git_head_sha="b" * 40,
+                git_range="v0.6.1..HEAD",
+                git_commit_count=1,
+            ),
+            overwrite=True,
+        )
+        source_ref = "git:" + "c" * 40
+        add_release_entry(
+            tmp_path,
+            release_version="0.7.0",
+            kind="added",
+            summary="Reviewed feature",
+            source_refs=(source_ref,),
+        )
+        row = CommitAuditRow(
+            sha="c" * 40,
+            source_ref=source_ref,
+            evidence_subject="feat: reviewed feature",
+            changed_paths=("src/feature.py",),
+            stats=CommitAuditStats(files_changed=1, insertions=2),
+            inspected=True,
+            inspected_paths=("src/feature.py",),
+            observed_behavior="Reviewed feature behavior.",
+            decision="accepted",
+        )
+        save_commit_audit_sheet(
+            tmp_path,
+            CommitAuditSheetRecord(
+                release_version="0.7.0",
+                versioning=RecordVersioning(),
+                git_base_ref="v0.6.1",
+                git_base_sha="a" * 40,
+                git_head_ref="HEAD",
+                git_head_sha="b" * 40,
+                git_range="v0.6.1..HEAD",
+                commit_count=1,
+                rows=(row,),
+            ),
+        )
+
+        rename_release(tmp_path, old_version="0.7.0", new_version="0.6.2")
+        renamed = load_release(tmp_path, "0.6.2")
+        assert renamed.title == "Release 0.6.2"
+        assert renamed.history_state == "audited"
+        assert renamed.git_base_ref == "v0.6.1"
+        assert renamed.git_base_sha == "a" * 40
+        assert renamed.git_head_ref == "HEAD"
+        assert renamed.git_head_sha == "b" * 40
+        assert renamed.git_range == "v0.6.1..HEAD"
+        assert renamed.git_commit_count == 1
+        audit = load_commit_audit_sheet(tmp_path, "0.6.2")
+        assert audit is not None
+        assert audit.release_version == "0.6.2"
+        assert audit.versioning.revision == 2
+        assert audit.rows == (row,)
+        assert (
+            validate_commit_audit_sheet(
+                tmp_path, version="0.6.2", phase="evidence", strict=True
+            )["ok"]
+            is True
+        )
+
+    def test_rename_dry_run_exposes_after_identity_without_mutating(
+        self, tmp_path: Path
+    ) -> None:
+        _init(tmp_path)
+        create_release(tmp_path, version="0.7.0", title="Release 0.7.0")
+        preview = rename_release(
+            tmp_path, old_version="0.7.0", new_version="0.6.2", dry_run=True
+        )
+        assert preview["release_before"]["title"] == "Release 0.7.0"
+        assert preview["release_after"]["title"] == "Release 0.6.2"
+        assert preview["field_changes"]["version"] == ["0.7.0", "0.6.2"]
+        assert load_release(tmp_path, "0.7.0").title == "Release 0.7.0"
+        human = _run(
+            tmp_path,
+            "release",
+            "rename",
+            "0.7.0",
+            "0.6.2",
+            "--dry-run",
+        )
+        assert human.exit_code == 0, human.stdout
+        assert "title: Release 0.7.0 -> Release 0.6.2" in human.stdout
+
+    def test_rename_preserves_custom_title(self, tmp_path: Path) -> None:
+        _init(tmp_path)
+        create_release(tmp_path, version="0.7.0", title="Internal milestone")
+        rename_release(tmp_path, old_version="0.7.0", new_version="0.6.2")
+        assert load_release(tmp_path, "0.6.2").title == "Internal milestone"
+
     def test_release_rename_moves_bundle_and_updates_release_frontmatter(
         self, tmp_path: Path
     ) -> None:

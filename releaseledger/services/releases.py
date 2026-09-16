@@ -18,6 +18,7 @@ from typing import Any, cast
 import ledgercore
 import yaml
 
+from releaseledger.domain.audit import CommitAuditSheetRecord
 from releaseledger.domain.event import (
     EVENT_RELEASE_CANCELED,
     EVENT_RELEASE_CHAIN_REPAIRED,
@@ -76,6 +77,7 @@ from releaseledger.storage.store import (
     release_markdown_path,
     rename_release_bundle,
     replace_canceled_release_bundle,
+    save_commit_audit_sheet,
     save_release,
     validate_release_version,
 )
@@ -1357,6 +1359,123 @@ def prepare_release(
         scaffold_path,
         yaml.safe_dump(scaffold, sort_keys=False, default_flow_style=False),
     )
+    changelog_target = str(
+        resolve_project_paths(workspace_root).config.changelog_output
+    )
+    next_actions: list[dict[str, object]] = [
+        {
+            "code": "inspect_audit_evidence",
+            "command": f"ls {evidence_dir}",
+            "mutates": False,
+        },
+        {
+            "code": "audit_apply_dry_run",
+            "command": (
+                f"releaseledger audit apply {version} --file {decisions_path} --dry-run"
+            ),
+            "mutates": False,
+        },
+        {
+            "code": "audit_apply",
+            "command": f"releaseledger audit apply {version} --file {decisions_path}",
+            "mutates": True,
+            "requires_confirmation": True,
+        },
+        {
+            "code": "audit_validate_evidence",
+            "command": f"releaseledger audit validate {version} --phase evidence --strict",
+            "mutates": False,
+        },
+        {
+            "code": "edit_entries_from_reviewed_behavior",
+            "command": f"edit {scaffold_path}",
+            "mutates": True,
+            "manual_action_required": True,
+            "reason": "Write summaries from reviewed behavior, not commit subjects.",
+        },
+        {
+            "code": "entry_apply_dry_run",
+            "command": (
+                f"releaseledger entry apply {version} --file {scaffold_path} "
+                "--dry-run --strict --guard-commit-subjects"
+            ),
+            "mutates": False,
+        },
+        {
+            "code": "entry_apply",
+            "command": (
+                f"releaseledger entry apply {version} --file {scaffold_path} "
+                "--strict --guard-commit-subjects --sync-audit"
+            ),
+            "mutates": True,
+            "requires_confirmation": True,
+        },
+        {
+            "code": "audit_validate_complete",
+            "command": f"releaseledger audit validate {version} --phase complete --strict",
+            "mutates": False,
+        },
+    ]
+    if released_at:
+        next_actions.extend(
+            [
+                {
+                    "code": "release_check_finalize",
+                    "command": (
+                        f"releaseledger release check {version} --phase finalize "
+                        f"--released-at {released_at} --strict --target-file {changelog_target}"
+                    ),
+                    "mutates": False,
+                },
+                {
+                    "code": "release_finalize",
+                    "command": (
+                        f"releaseledger release finalize {version} "
+                        f"--released-at {released_at}"
+                    ),
+                    "mutates": True,
+                    "requires_confirmation": True,
+                },
+                {
+                    "code": "changelog_build_released",
+                    "command": (
+                        f"releaseledger changelog build {version} --strict "
+                        f"--output {changelog_target}"
+                    ),
+                    "mutates": True,
+                    "requires_confirmation": True,
+                },
+                {
+                    "code": "release_check_published",
+                    "command": (
+                        f"releaseledger release check {version} --phase published "
+                        f"--strict --target-file {changelog_target}"
+                    ),
+                    "mutates": False,
+                },
+            ]
+        )
+    else:
+        next_actions.extend(
+            [
+                {
+                    "code": "release_check_current",
+                    "command": (
+                        f"releaseledger release check {version} --phase current --strict "
+                        f"--target-file {changelog_target}"
+                    ),
+                    "mutates": False,
+                },
+                {
+                    "code": "changelog_build_unreleased_dry_run",
+                    "command": (
+                        f"releaseledger changelog build {version} --dry-run --strict "
+                        f"--unreleased --output {changelog_target}"
+                    ),
+                    "mutates": False,
+                },
+            ]
+        )
     return {
         "kind": "release_prepare",
         "version": version,
@@ -1373,6 +1492,7 @@ def prepare_release(
             ),
             "work_dir": str(output_dir),
         },
+        "next_actions": next_actions,
     }
 
 
@@ -1855,7 +1975,13 @@ def rename_release(  # noqa: C901 - coordinates bundle, entry, and successor rew
             )
         else:
             resolved_previous = validate_release_version(str(resolved_previous))
-    resolved_title = title if title is not None else existing.title
+    resolved_title: str | None
+    if title is not None:
+        resolved_title = title
+    elif existing.title == f"Release {old_version}":
+        resolved_title = f"Release {new_version}"
+    else:
+        resolved_title = existing.title
     # Successor check: any release pointing at the old version as a predecessor.
     successors = [
         r
@@ -1885,6 +2011,7 @@ def rename_release(  # noqa: C901 - coordinates bundle, entry, and successor rew
         rename_section=rename_changelog_section,
         replace_existing=replace_existing_section,
     )
+    source_audit = load_commit_audit_sheet(workspace_root, old_version)
     rename_plan: dict[str, object] = {
         "old_version": old_version,
         "new_version": new_version,
@@ -1897,10 +2024,8 @@ def rename_release(  # noqa: C901 - coordinates bundle, entry, and successor rew
             len(load_entries(workspace_root, new_version)) if target_record else 0
         ),
         "successors_to_rewrite": len(successors) if rewrite_successors else 0,
-        "audit_to_move": load_commit_audit_sheet(workspace_root, old_version)
-        is not None,
-        "source_audit_present": load_commit_audit_sheet(workspace_root, old_version)
-        is not None,
+        "audit_to_move": source_audit is not None,
+        "source_audit_present": source_audit is not None,
         "target_audit_present": (
             load_commit_audit_sheet(workspace_root, new_version) is not None
             if target_record
@@ -1909,34 +2034,42 @@ def rename_release(  # noqa: C901 - coordinates bundle, entry, and successor rew
         **changelog_plan,
         "would_write": not dry_run,
     }
+    new_record = replace(
+        existing,
+        version=new_version,
+        title=resolved_title,
+        released_at=resolved_released_at,
+        previous_version=resolved_previous,
+        versioning=bump_versioning(existing.versioning),
+    )
+    rename_plan["release_before"] = existing.to_dict()
+    rename_plan["release_after"] = new_record.to_dict()
+    rename_plan["field_changes"] = {
+        field: [getattr(existing, field), getattr(new_record, field)]
+        for field in ("version", "title", "previous_version")
+    }
+    rename_plan["audit_rewritten"] = source_audit is not None
     if dry_run:
         rename_plan["release"] = existing.to_dict()
         return {"kind": "release_rename_preview", **rename_plan}
-    new_record = ReleaseRecord(
-        version=new_version,
-        status=existing.status,
-        title=resolved_title,
-        versioning=bump_versioning(existing.versioning),
-        released_at=resolved_released_at,
-        previous_version=resolved_previous,
-        cancel_reason=existing.cancel_reason,
-        superseded_by=existing.superseded_by,
-        note=existing.note,
-        changelog_file=existing.changelog_file,
-        boundary_ref=existing.boundary_ref,
-        source_refs=existing.source_refs,
-        source_count=existing.source_count,
-        entry_count=existing.entry_count,
-        artifact_count=existing.artifact_count,
-    )
     if replace_canceled_target:
         replace_canceled_release_bundle(workspace_root, old_version, new_record)
     else:
         rename_release_bundle(workspace_root, old_version, new_record)
+    rewritten_audit: CommitAuditSheetRecord | None = None
+    if source_audit is not None:
+        rewritten_audit = replace(
+            source_audit,
+            release_version=new_version,
+            versioning=bump_versioning(source_audit.versioning),
+        )
+        save_commit_audit_sheet(workspace_root, rewritten_audit, overwrite=True)
     rewrote_successors = False
     record_revisions = {
         f"release:{new_version}": new_record.versioning.revision,
     }
+    if rewritten_audit is not None:
+        record_revisions[f"audit:{new_version}"] = rewritten_audit.versioning.revision
     for entry in load_entries(workspace_root, new_version):
         record_revisions[f"entry:{new_version}/{entry.entry_id}"] = (
             entry.versioning.revision
@@ -1963,6 +2096,7 @@ def rename_release(  # noqa: C901 - coordinates bundle, entry, and successor rew
             "rewrote_successors": bool(rewrote_successors),
             "replace_canceled_target": replace_canceled_target,
             "reason": reason,
+            "audit_rewritten": rewritten_audit is not None,
         },
     )
     rebuild_indexes(workspace_root)
@@ -1980,6 +2114,8 @@ def rename_release(  # noqa: C901 - coordinates bundle, entry, and successor rew
     else:
         payload["changelog"] = {**changelog_plan, "updated": False}
     payload["rename_plan"] = rename_plan
+    rename_plan["audit_rewritten"] = rewritten_audit is not None
+    payload["audit_rewritten"] = rewritten_audit is not None
     if (
         released_at is not UNSET
         and released_at is not None

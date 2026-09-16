@@ -13,6 +13,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "releaseledger" / "SKILL.md"
 
+COMMANDS = ROOT / "docs" / "commands.md"
+CONCEPTS = ROOT / "docs" / "concepts.md"
+QUICKSTART = ROOT / "docs" / "quickstart.md"
+
 
 def test_skill_requires_commit_by_commit_git_audit() -> None:
     text = SKILL.read_text(encoding="utf-8")
@@ -45,3 +49,22 @@ def test_skill_uses_builtin_commit_subject_guard_and_snapshot_rule() -> None:
     assert "--guard-commit-subjects" in text
     assert "Resolve `HEAD` once" in text
     assert "omit `--head`" in text
+
+
+def test_prepare_guidance_is_structured_and_lifecycle_aware() -> None:
+    skill_text = SKILL.read_text(encoding="utf-8")
+    commands_text = COMMANDS.read_text(encoding="utf-8")
+    concepts_text = CONCEPTS.read_text(encoding="utf-8")
+    quickstart_text = QUICKSTART.read_text(encoding="utf-8")
+
+    assert "structured `next_actions`" in skill_text
+    assert "preparation-only" in commands_text
+    assert "never finalizes" in concepts_text
+    assert "--unreleased" in quickstart_text
+    assert "dry-run/apply audit" in quickstart_text
+
+
+def test_skill_does_not_document_undated_strict_single_build() -> None:
+    text = SKILL.read_text(encoding="utf-8")
+    assert "changelog build VERSION --dry-run --strict --unreleased" in text
+    assert "release prepare VERSION --previous PREV_VERSION" in text

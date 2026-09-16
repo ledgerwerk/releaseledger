@@ -53,6 +53,27 @@ COVERAGE_INTERNAL_ONLY = "internal_only"
 COVERAGE_MISSING = "missing"
 
 
+_ACTIVE_RELEASE_STATUSES = frozenset({"planned", "draft", "candidate"})
+
+
+def _review_changelog_mode(
+    release: ReleaseRecord,
+    *,
+    phase: str,
+    proposed_released_at: str | None,
+) -> tuple[str | None, bool, str]:
+    """Derive explicit changelog rendering mode for a review phase."""
+    if phase == "finalize":
+        return proposed_released_at, False, "released"
+    if (
+        phase == "current"
+        and release.status in _ACTIVE_RELEASE_STATUSES
+        and release.released_at is None
+    ):
+        return None, True, "unreleased"
+    return None, False, "released"
+
+
 def compute_entry_fingerprint(entry: ReleaseEntryRecord) -> str:
     """Return a stable fingerprint for fallback duplicate detection.
 
@@ -148,11 +169,22 @@ def _is_orphan(entry: ReleaseEntryRecord) -> bool:
     return not (entry.source_refs or entry.issues or entry.prs or entry.sources)
 
 
-def _coverage_recommendation(ref: str, label: str) -> str | None:
+def _coverage_recommendation(row: dict[str, object]) -> str | None:
+    ref = str(row["source_ref"])
+    label = str(row["status"])
+    origin = str(row.get("origin", "release_source_ref"))
+    if label == COVERAGE_MISSING and origin == "git_range":
+        if row.get("audit_decision") in {"accepted", "grouped"}:
+            return f"Add accepted public entry coverage for {ref}."
+        return (
+            f"Inspect {ref} in the commit audit and account for it as "
+            "accepted, grouped, internal, or rejected; public accepted/grouped "
+            "changes require entry coverage."
+        )
     if label == COVERAGE_MISSING:
         return (
-            f"Add an accepted entry covering {ref} or remove it from release"
-            " source refs."
+            f"Add an accepted entry covering {ref} or remove the incorrect ref "
+            "from the release metadata."
         )
     if label == COVERAGE_DRAFT_ONLY:
         return f"Review draft entry for {ref} and set status to accepted or rejected."
@@ -160,8 +192,8 @@ def _coverage_recommendation(ref: str, label: str) -> str | None:
         return f"Confirm {ref} is intentionally omitted; its only entry is rejected."
     if label == COVERAGE_INTERNAL_ONLY:
         return (
-            f"{ref} is only covered by internal entries; expose an accepted"
-            " user-facing entry or include internal entries."
+            f"{ref} is only covered by internal entries; expose an accepted "
+            "user-facing entry or include internal entries."
         )
     return None
 
@@ -375,8 +407,7 @@ def _problem_next_action(
         return {
             "code": "create_external_git_tag",
             "command": f"git tag {tag}",
-            "mutates": False,
-            "manual_action_required": True,
+            "mutates": True,
             "suggested_tag": tag,
             "after_action": {
                 "command": (
@@ -434,10 +465,11 @@ def _build_next_actions(
     changelog: dict[str, object],
     checks: dict[str, object],
     proposed_released_at: str | None = None,
-) -> list[dict[str, object]]:
+    history_scope: str,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Build stable, machine-actionable release-check next actions."""
     target_display = str(target_file or "CHANGELOG.md")
-    actions: list[dict[str, object]] = []
+    all_actions: list[dict[str, object]] = []
 
     for block in (chain, reconciliation):
         problems = block.get("problems", [])
@@ -449,22 +481,29 @@ def _build_next_actions(
             action = _problem_next_action(
                 problem, target_file=target_display, version=version
             )
-            if action is not None and action not in actions:
-                actions.append(action)
+            if action is not None and action not in all_actions:
+                all_actions.append(action)
 
     if not bool(checks.get("changelog_ok", True)):
+        command = (
+            f"releaseledger changelog build {version} --dry-run --strict "
+            f"--output {target_display}"
+        )
+        if bool(changelog.get("unreleased", False)):
+            command += " --unreleased"
+        else:
+            effective_date = changelog.get("effective_release_date")
+            if effective_date:
+                command += f" --release-date {effective_date}"
         action = {
             "code": "resolve_changelog_dry_run",
-            "command": (
-                f"releaseledger changelog build {version} --output "
-                f"{target_display} --strict"
-            ),
+            "command": command,
             "mutates": False,
             "requires_confirmation": False,
             "scope": "target",
         }
-        if action not in actions:
-            actions.append(action)
+        if action not in all_actions:
+            all_actions.append(action)
     if not bool(checks.get("target_changelog_ok", True)):
         phase = str(checks.get("phase", "current"))
         command = (
@@ -485,8 +524,8 @@ def _build_next_actions(
                 "acknowledging ownership."
             ),
         }
-        if action not in actions:
-            actions.append(action)
+        if action not in all_actions:
+            all_actions.append(action)
     if audit is not None and not bool(audit.get("ok", False)):
         action = {
             "code": "complete_commit_audit",
@@ -495,8 +534,8 @@ def _build_next_actions(
             "requires_confirmation": False,
             "scope": "target",
         }
-        if action not in actions:
-            actions.append(action)
+        if action not in all_actions:
+            all_actions.append(action)
     if not bool(checks.get("lint_ok", True)):
         action = {
             "code": "fix_entry_lint",
@@ -505,9 +544,17 @@ def _build_next_actions(
             "requires_confirmation": False,
             "scope": "target",
         }
-        if action not in actions:
+        if action not in all_actions:
+            all_actions.append(action)
+
+    actions: list[dict[str, object]] = []
+    history_follow_ups: list[dict[str, object]] = []
+    for action in all_actions:
+        if history_scope == "target" and action.get("scope") == "history":
+            history_follow_ups.append(action)
+        else:
             actions.append(action)
-    return actions
+    return actions, history_follow_ups
 
 
 def _failed_checks(
@@ -645,7 +692,7 @@ def _build_review_recommendations(
     for row in coverage:
         if row.get("gate_satisfied") is True:
             continue
-        rec = _coverage_recommendation(str(row["source_ref"]), str(row["status"]))
+        rec = _coverage_recommendation(row)
         if rec is not None:
             recommendations.append(rec)
     for orphan in orphans:
@@ -676,6 +723,8 @@ def _compute_coverage(
     git_block: dict[str, object] | None = None,
     git_ref_map: dict[str, object] | None = None,
     audit_rows: dict[str, object] | None = None,
+    release_source_refs: set[str] | frozenset[str] = frozenset(),
+    boundary_ref: str | None = None,
 ) -> list[dict[str, object]]:
     """Build coverage rows from expected refs and entries."""
     by_ref: dict[str, list[ReleaseEntryRecord]] = {}
@@ -689,8 +738,17 @@ def _compute_coverage(
         label, breakdown = classify_source_ref(
             ref, matching, include_internal=include_internal
         )
+        if ref in release_source_refs:
+            origin = "release_source_ref"
+        elif ref == boundary_ref:
+            origin = "boundary_ref"
+        elif ref.startswith("git:") and git_block is not None:
+            origin = "git_range"
+        else:
+            origin = "release_source_ref"
         row: dict[str, object] = {
             "source_ref": ref,
+            "origin": origin,
             "status": label,
             **breakdown,
         }
@@ -848,6 +906,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
     if is_coverable_boundary_ref(release.boundary_ref) and release.boundary_ref:
         expected_refs.append(release.boundary_ref)
     expected_refs = _dedupe_preserve_order(expected_refs)
+    release_source_refs = set(release.source_refs)
     # 2b. Git-derived expected refs when git is enabled.
     git_block, git_warnings, git_ref_map, expected_refs = _compute_git_expected_refs(
         workspace_root,
@@ -866,7 +925,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
     )
     if git_block is not None:
         git_block["target_changelog_modified_in_range"] = target_changelog_modified
-        if target_changelog_modified:
+        if target_changelog_modified and not acknowledge_changelog_change:
             git_warnings.append(
                 "target_changelog_modified_in_range: true; reconcile the changelog "
                 "ownership before building."
@@ -880,6 +939,8 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         git_block=git_block,
         git_ref_map=git_ref_map,
         audit_rows=audit_rows,
+        boundary_ref=release.boundary_ref,
+        release_source_refs=release_source_refs,
     )
 
     # 4. Entry counts over all recorded entries (independent of include scope).
@@ -951,9 +1012,15 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
             "history_scope": history_scope,
         }
 
-    # 7. Changelog dry-run. Try a strict dry-run when requested so the review
+    # 7. Changelog dry-run. Select the lifecycle mode here rather than changing
+    #    the explicit contract of the direct changelog build command.
     #    reports exactly what `build --strict` would reject; fall back to a
     #    non-strict dry-run render to recover a section heading and a reason.
+    release_date, unreleased, changelog_mode = _review_changelog_mode(
+        release,
+        phase=phase,
+        proposed_released_at=proposed_released_at,
+    )
     changelog_block = _run_changelog_dry_run(
         workspace_root,
         version=version,
@@ -962,8 +1029,10 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         statuses=statuses,
         target_file=target_file,
         strict=strict,
-        release_date=proposed_released_at if phase == "finalize" else None,
+        release_date=release_date,
+        unreleased=unreleased,
     )
+    changelog_block["mode"] = changelog_mode
     # Coverage is satisfied when every expected ref is covered; with no
     # expected refs, coverage is trivially satisfied.
     coverage_ok = all(
@@ -1037,6 +1106,11 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         and not acknowledge_changelog_change
     )
 
+    changelog_ownership = {
+        "modified_in_range": target_changelog_modified is True,
+        "acknowledged": acknowledge_changelog_change,
+        "ok": target_changelog_ok,
+    }
     # Commit audit sheet integration (opt-in via --require-audit-sheet).
     audit_block = _build_audit_block(
         workspace_root,
@@ -1143,7 +1217,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         git_block=git_block,
         strict=strict,
     )
-    next_actions = _build_next_actions(
+    next_actions, history_follow_ups = _build_next_actions(
         version=version,
         target_file=target_file,
         chain=chain_block,
@@ -1152,6 +1226,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         changelog=changelog_block,
         checks=checks,
         proposed_released_at=proposed_released_at,
+        history_scope=history_scope,
     )
 
     result: dict[str, object] = {
@@ -1186,6 +1261,8 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         "chain": chain_block,
         "reconciliation": reconciliation_block,
         "failed_checks": failed_checks,
+        "changelog_ownership": changelog_ownership,
+        "history_follow_ups": history_follow_ups,
         "next_actions": next_actions,
     }
     if git_block is not None:
@@ -1278,6 +1355,7 @@ def _run_changelog_dry_run(
     target_file: Path | None,
     strict: bool,
     release_date: str | None = None,
+    unreleased: bool = False,
 ) -> dict[str, object]:
     """Run the changelog dry-run without writing and normalize the verdict.
 
@@ -1294,6 +1372,11 @@ def _run_changelog_dry_run(
         "target_file": target_display,
         "dry_run_ok": True,
         "strict": strict,
+        "mode": "unreleased" if unreleased else "released",
+        "unreleased": unreleased,
+        "effective_release_date": (
+            None if unreleased else (release_date or release.released_at)
+        ),
         "section_heading": None,
         "reason": None,
     }
@@ -1304,6 +1387,7 @@ def _run_changelog_dry_run(
             target_file=target_file,
             include_internal=include_internal,
             release_date=release_date,
+            unreleased=unreleased,
             dry_run=True,
             replace_existing=False,
             include_statuses=statuses,
@@ -1323,6 +1407,8 @@ def _run_changelog_dry_run(
                 version=version,
                 include_internal=include_internal,
                 include_statuses=statuses,
+                release_date=release_date,
+                unreleased=unreleased,
             )
             block["section_heading"] = rendered.get("section_heading")
         except LaunchError:

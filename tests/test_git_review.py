@@ -766,3 +766,9 @@ def test_review_strict_requires_changelog_change_acknowledgement(
     )
     acknowledged_payload = json.loads(check_acknowledged.output)
     assert acknowledged_payload["result"]["checks"]["target_changelog_ok"] is True
+    ownership = acknowledged_payload["result"]["changelog_ownership"]
+    assert ownership == {"modified_in_range": True, "acknowledged": True, "ok": True}
+    assert all(
+        "target_changelog_modified_in_range" not in recommendation
+        for recommendation in acknowledged_payload["result"]["recommendations"]
+    )
