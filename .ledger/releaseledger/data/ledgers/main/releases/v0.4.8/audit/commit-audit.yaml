@@ -1,0 +1,68 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: v0.4.8
+git_base_ref: v0.4.7
+git_base_sha: 0c68bec39b57923debc892327124174b493e1f08
+git_head_ref: HEAD
+git_head_sha: f87617e2509dacfe49e6ef7660d0fc9a7c918a33
+git_range: 0c68bec39b57923debc892327124174b493e1f08..f87617e2509dacfe49e6ef7660d0fc9a7c918a33
+commit_count: 1
+rows:
+  - sha: f87617e2509dacfe49e6ef7660d0fc9a7c918a33
+    source_ref: git:f87617e2509dacfe49e6ef7660d0fc9a7c918a33
+    short_sha: f87617e
+    changed_paths:
+      - docs/commands.md
+      - docs/concepts.md
+      - docs/quickstart.md
+      - releaseledger/cli.py
+      - releaseledger/services/audit.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/releases.py
+      - releaseledger/services/review.py
+      - releaseledger/storage/store.py
+      - skills/releaseledger/SKILL.md
+      - tests/test_commit_audit_cli.py
+      - tests/test_git_cli.py
+      - tests/test_git_review.py
+      - tests/test_release_check_phases.py
+      - tests/test_release_corrections.py
+      - tests/test_release_review.py
+      - tests/test_releaseledger_skill_protocol.py
+    stats:
+      files_changed: 17
+      insertions: 794
+      deletions: 93
+    inspected: true
+    inspected_paths:
+      - docs/commands.md
+      - docs/concepts.md
+      - docs/quickstart.md
+      - releaseledger/cli.py
+      - releaseledger/services/audit.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/releases.py
+      - releaseledger/services/review.py
+      - releaseledger/storage/store.py
+      - skills/releaseledger/SKILL.md
+      - tests/test_commit_audit_cli.py
+      - tests/test_git_cli.py
+      - tests/test_git_review.py
+      - tests/test_release_check_phases.py
+      - tests/test_release_corrections.py
+      - tests/test_release_review.py
+      - tests/test_releaseledger_skill_protocol.py
+    observed_behavior:
+      Added lifecycle-aware preparation guidance and release checks,
+      including explicit unreleased versus finalized changelog modes, target-scoped
+      follow-ups, changelog ownership acknowledgement, and audit-sheet preservation
+      during release renames.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: better build command and other fixes"
+    target_entry_id: entry-0001
+    notes: ""

@@ -1,0 +1,29 @@
+rows:
+  - sha: f87617e2509dacfe49e6ef7660d0fc9a7c918a33
+    inspected: true
+    inspected_paths:
+      - docs/commands.md
+      - docs/concepts.md
+      - docs/quickstart.md
+      - releaseledger/cli.py
+      - releaseledger/services/audit.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/releases.py
+      - releaseledger/services/review.py
+      - releaseledger/storage/store.py
+      - skills/releaseledger/SKILL.md
+      - tests/test_commit_audit_cli.py
+      - tests/test_git_cli.py
+      - tests/test_git_review.py
+      - tests/test_release_check_phases.py
+      - tests/test_release_corrections.py
+      - tests/test_release_review.py
+      - tests/test_releaseledger_skill_protocol.py
+    observed_behavior: >-
+      Added lifecycle-aware preparation guidance and release checks, including explicit unreleased versus finalized changelog modes, target-scoped follow-ups, changelog ownership acknowledgement, and audit-sheet preservation during release renames.
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false

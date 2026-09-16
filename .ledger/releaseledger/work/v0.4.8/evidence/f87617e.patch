@@ -1,0 +1,1475 @@
+ docs/commands.md                           |   2 +
+ docs/concepts.md                           |   1 +
+ docs/quickstart.md                         |   5 +-
+ releaseledger/cli.py                       |  51 +++++---
+ releaseledger/services/audit.py            |   1 +
+ releaseledger/services/changelog_build.py  |   4 +-
+ releaseledger/services/releases.py         | 176 +++++++++++++++++++++++----
+ releaseledger/services/review.py           | 142 +++++++++++++++++-----
+ releaseledger/storage/store.py             |   2 +
+ skills/releaseledger/SKILL.md              |  56 +++++----
+ tests/test_commit_audit_cli.py             |   5 +
+ tests/test_git_cli.py                      |  10 ++
+ tests/test_git_review.py                   |   6 +
+ tests/test_release_check_phases.py         | 183 +++++++++++++++++++++++++++++
+ tests/test_release_corrections.py          | 128 +++++++++++++++++++-
+ tests/test_release_review.py               |  92 ++++++++++++++-
+ tests/test_releaseledger_skill_protocol.py |  23 ++++
+ 17 files changed, 794 insertions(+), 93 deletions(-)
+
+diff --git a/docs/commands.md b/docs/commands.md
+index bce2bbc..b08d0cf 100644
+--- a/docs/commands.md
++++ b/docs/commands.md
+@@ -125,6 +125,8 @@ releaseledger release list
+ releaseledger release show VERSION
+ ```
+
++`release prepare` is preparation-only. `--released-at` is optional and only adds proposed publication actions; it does not finalize or write changelog content. The command returns structured `next_actions` in JSON and renders the same ordered guidance for human users. For an undated current release, its direct strict changelog dry run includes `--unreleased`; do not remove that mode.
++
+ `release tag` creates a release with status `released`. `release finalize`
+ transitions an existing release to `released` and is a compatible no-op when
+ that release is already finalized. `release cancel` marks a release as
+diff --git a/docs/concepts.md b/docs/concepts.md
+index 3ec7e77..e89b868 100644
+--- a/docs/concepts.md
++++ b/docs/concepts.md
+@@ -147,6 +147,7 @@ require a tag. `--phase published` checks post-release consistency, including a
+ release date, matching Git tag when Git is active, changelog presence, and clean
+ reconciliation. Human output renders every gate included in the final result;
+ JSON exposes stable `failed_checks` and actionable `next_actions`.
++`release prepare` is preparation-only and never finalizes a release. Its JSON result contains ordered `next_actions` with command text, mutation metadata, and manual-action markers; human output renders the same list. Without a proposed date, the generated current-release changelog dry run includes `--unreleased`.
+
+ ## Versioning
+
+diff --git a/docs/quickstart.md b/docs/quickstart.md
+index 10dfcf3..265de1b 100644
+--- a/docs/quickstart.md
++++ b/docs/quickstart.md
+@@ -60,7 +60,6 @@ as the canonical evidence of shipped changes.
+ ```bash
+ releaseledger release prepare 1.2.0 \
+   --previous 1.1.0 \
+-  --released-at 2026-06-14 \
+   --git-base v1.1.0 \
+   --git-head HEAD
+ work=.ledger/releaseledger/work/1.2.0
+@@ -73,7 +72,10 @@ refresh the stored snapshot to a newer commit.
+
+ ````bash
+ # release prepare already emitted evidence/, audit.yaml, audit-decisions.yaml, and entries.yaml.
++# `release prepare` returns structured `next_actions` in JSON and renders the same ordered guidance in human output.
++# Sequence: inspect audit, dry-run/apply audit, validate evidence, edit behavior-based entries, dry-run/apply entries with subject guards, validate complete audit, then run the lifecycle check.
+ ls "$work"
++# For a planned release without a date, use `--unreleased` on direct strict changelog builds. Do not treat preparation as publication.
+ ls "$work/evidence"
+
+ Curate the audit annotations, then validate the evidence phase:
+@@ -211,6 +213,7 @@ Use `build VERSION` to render and insert a final section:
+ releaseledger changelog build 1.2.0 \
+   --dry-run \
+   --strict \
++  --unreleased \
+   --target-file CHANGELOG.md
+
+ releaseledger changelog build 1.2.0 \
+diff --git a/releaseledger/cli.py b/releaseledger/cli.py
+index eeb9159..c81c63a 100644
+--- a/releaseledger/cli.py
++++ b/releaseledger/cli.py
+@@ -1077,20 +1077,25 @@ def release_prepare_command(
+         outputs = result.get("outputs")
+         outputs_dict = outputs if isinstance(outputs, dict) else {}
+         work_dir = str(outputs_dict.get("work_dir", ""))
+-        entries_path = str(outputs_dict.get("entries_yaml", ""))
+-        human = (
+-            f"Prepared release workspace: {work_dir}\n\n"
+-            "Next:\n"
+-            f"1. Review {outputs_dict.get('audit_yaml', '')} and "
+-            f"{outputs_dict.get('evidence_manifest', '')}.\n"
+-            f"2. Record include/exclude decisions in {outputs_dict.get('audit_decisions_yaml', '')}.\n"
+-            "3. Edit entries.yaml from reviewed behavior; do not copy commit subjects.\n"
+-            f"4. releaseledger entry apply {version} --file {entries_path} --dry-run\n"
+-            f"5. releaseledger entry apply {version} --file {entries_path}\n"
+-            f"6. releaseledger release check {version} --phase finalize "
+-            f"--released-at {released_at or 'YYYY-MM-DD'} --strict\n"
+-            f"7. releaseledger changelog build {version} --output CHANGELOG.md\n"
+-            "8. Stop here for preparation-only work; publication requires finalize, an external commit/tag, then the published check."
++        actions = result.get("next_actions", [])
++        next_lines: list[str] = []
++        if isinstance(actions, list):
++            for index, action in enumerate(actions, start=1):
++                if not isinstance(action, dict):
++                    continue
++                command = str(action.get("command", ""))
++                reason = action.get("reason")
++                labels = ["mutates" if action.get("mutates") else "read-only"]
++                if action.get("requires_confirmation"):
++                    labels.append("confirmation required")
++                if action.get("manual_action_required"):
++                    labels.append("manual action")
++                line = f"{index}. [{', '.join(labels)}] {command}"
++                if reason:
++                    line += f" ({reason})"
++                next_lines.append(line)
++        human = f"Prepared release workspace: {work_dir}\n\nNext:\n" + "\n".join(
++            next_lines
+         )
+         return result, [], human
+
+@@ -1551,9 +1556,25 @@ def release_rename_command(
+             dry_run=dry_run,
+         )
+         if dry_run:
++            before = result.get("release_before", {})
++            after = result.get("release_after", {})
++            before_title = before.get("title") if isinstance(before, dict) else None
++            after_title = after.get("title") if isinstance(after, dict) else None
++            after_previous = (
++                after.get("previous_version") if isinstance(after, dict) else None
++            )
++            audit_text = (
++                "move + rewrite release_version"
++                if result.get("audit_rewritten")
++                else "none"
++            )
+             human = (
+                 f"previewed rename of release {old_version} to {new_version}\n"
+-                f"  bundle move: {result.get('bundle_move')}\n"
++                f"  version: {old_version} -> {new_version}\n"
++                f"  title: {before_title} -> {after_title}\n"
++                f"  previous_version: {after_previous}\n"
++                f"  audit: {audit_text}\n"
++                "  git snapshot: preserved\n"
+                 f"  changelog: {result.get('changelog_action')}"
+             )
+         else:
+diff --git a/releaseledger/services/audit.py b/releaseledger/services/audit.py
+index bc5b4b0..cccfecb 100644
+--- a/releaseledger/services/audit.py
++++ b/releaseledger/services/audit.py
+@@ -120,6 +120,7 @@ def _resolve_range(
+
+ def _row_from_candidate(candidate: GitSourceCandidate) -> CommitAuditRow:
+     stats = CommitAuditStats(
++        files_changed=len(candidate.paths),
+         insertions=candidate.additions or 0,
+         deletions=candidate.deletions or 0,
+     )
+diff --git a/releaseledger/services/changelog_build.py b/releaseledger/services/changelog_build.py
+index b80a32a..9137638 100644
+--- a/releaseledger/services/changelog_build.py
++++ b/releaseledger/services/changelog_build.py
+@@ -469,8 +469,8 @@ def build_changelog_render_context(
+     current_contributors: list[str] = []
+     current_identity_keys: set[str] = set()
+     for entry_payload in current_entries:
+-        for contributor in _as_object_list(entry_payload.get("contributors", [])):
+-            value = str(contributor)
++        for contributor_value in _as_object_list(entry_payload.get("contributors", [])):
++            value = str(contributor_value)
+             identity = contributor_identity_key(value)
+             if identity not in current_identity_keys:
+                 current_identity_keys.add(identity)
+diff --git a/releaseledger/services/releases.py b/releaseledger/services/releases.py
+index 891f561..13dfbee 100644
+--- a/releaseledger/services/releases.py
++++ b/releaseledger/services/releases.py
+@@ -18,6 +18,7 @@ from typing import Any, cast
+ import ledgercore
+ import yaml
+
++from releaseledger.domain.audit import CommitAuditSheetRecord
+ from releaseledger.domain.event import (
+     EVENT_RELEASE_CANCELED,
+     EVENT_RELEASE_CHAIN_REPAIRED,
+@@ -76,6 +77,7 @@ from releaseledger.storage.store import (
+     release_markdown_path,
+     rename_release_bundle,
+     replace_canceled_release_bundle,
++    save_commit_audit_sheet,
+     save_release,
+     validate_release_version,
+ )
+@@ -1357,6 +1359,123 @@ def prepare_release(
+         scaffold_path,
+         yaml.safe_dump(scaffold, sort_keys=False, default_flow_style=False),
+     )
++    changelog_target = str(
++        resolve_project_paths(workspace_root).config.changelog_output
++    )
++    next_actions: list[dict[str, object]] = [
++        {
++            "code": "inspect_audit_evidence",
++            "command": f"ls {evidence_dir}",
++            "mutates": False,
++        },
++        {
++            "code": "audit_apply_dry_run",
++            "command": (
++                f"releaseledger audit apply {version} --file {decisions_path} --dry-run"
++            ),
++            "mutates": False,
++        },
++        {
++            "code": "audit_apply",
++            "command": f"releaseledger audit apply {version} --file {decisions_path}",
++            "mutates": True,
++            "requires_confirmation": True,
++        },
++        {
++            "code": "audit_validate_evidence",
++            "command": f"releaseledger audit validate {version} --phase evidence --strict",
++            "mutates": False,
++        },
++        {
++            "code": "edit_entries_from_reviewed_behavior",
++            "command": f"edit {scaffold_path}",
++            "mutates": True,
++            "manual_action_required": True,
++            "reason": "Write summaries from reviewed behavior, not commit subjects.",
++        },
++        {
++            "code": "entry_apply_dry_run",
++            "command": (
++                f"releaseledger entry apply {version} --file {scaffold_path} "
++                "--dry-run --strict --guard-commit-subjects"
++            ),
++            "mutates": False,
++        },
++        {
++            "code": "entry_apply",
++            "command": (
++                f"releaseledger entry apply {version} --file {scaffold_path} "
++                "--strict --guard-commit-subjects --sync-audit"
++            ),
++            "mutates": True,
++            "requires_confirmation": True,
++        },
++        {
++            "code": "audit_validate_complete",
++            "command": f"releaseledger audit validate {version} --phase complete --strict",
++            "mutates": False,
++        },
++    ]
++    if released_at:
++        next_actions.extend(
++            [
++                {
++                    "code": "release_check_finalize",
++                    "command": (
++                        f"releaseledger release check {version} --phase finalize "
++                        f"--released-at {released_at} --strict --target-file {changelog_target}"
++                    ),
++                    "mutates": False,
++                },
++                {
++                    "code": "release_finalize",
++                    "command": (
++                        f"releaseledger release finalize {version} "
++                        f"--released-at {released_at}"
++                    ),
++                    "mutates": True,
++                    "requires_confirmation": True,
++                },
++                {
++                    "code": "changelog_build_released",
++                    "command": (
++                        f"releaseledger changelog build {version} --strict "
++                        f"--output {changelog_target}"
++                    ),
++                    "mutates": True,
++                    "requires_confirmation": True,
++                },
++                {
++                    "code": "release_check_published",
++                    "command": (
++                        f"releaseledger release check {version} --phase published "
++                        f"--strict --target-file {changelog_target}"
++                    ),
++                    "mutates": False,
++                },
++            ]
++        )
++    else:
++        next_actions.extend(
++            [
++                {
++                    "code": "release_check_current",
++                    "command": (
++                        f"releaseledger release check {version} --phase current --strict "
++                        f"--target-file {changelog_target}"
++                    ),
++                    "mutates": False,
++                },
++                {
++                    "code": "changelog_build_unreleased_dry_run",
++                    "command": (
++                        f"releaseledger changelog build {version} --dry-run --strict "
++                        f"--unreleased --output {changelog_target}"
++                    ),
++                    "mutates": False,
++                },
++            ]
++        )
+     return {
+         "kind": "release_prepare",
+         "version": version,
+@@ -1373,6 +1492,7 @@ def prepare_release(
+             ),
+             "work_dir": str(output_dir),
+         },
++        "next_actions": next_actions,
+     }
+
+
+@@ -1855,7 +1975,13 @@ def rename_release(  # noqa: C901 - coordinates bundle, entry, and successor rew
+             )
+         else:
+             resolved_previous = validate_release_version(str(resolved_previous))
+-    resolved_title = title if title is not None else existing.title
++    resolved_title: str | None
++    if title is not None:
++        resolved_title = title
++    elif existing.title == f"Release {old_version}":
++        resolved_title = f"Release {new_version}"
++    else:
++        resolved_title = existing.title
+     # Successor check: any release pointing at the old version as a predecessor.
+     successors = [
+         r
+@@ -1885,6 +2011,7 @@ def rename_release(  # noqa: C901 - coordinates bundle, entry, and successor rew
+         rename_section=rename_changelog_section,
+         replace_existing=replace_existing_section,
+     )
++    source_audit = load_commit_audit_sheet(workspace_root, old_version)
+     rename_plan: dict[str, object] = {
+         "old_version": old_version,
+         "new_version": new_version,
+@@ -1897,10 +2024,8 @@ def rename_release(  # noqa: C901 - coordinates bundle, entry, and successor rew
+             len(load_entries(workspace_root, new_version)) if target_record else 0
+         ),
+         "successors_to_rewrite": len(successors) if rewrite_successors else 0,
+-        "audit_to_move": load_commit_audit_sheet(workspace_root, old_version)
+-        is not None,
+-        "source_audit_present": load_commit_audit_sheet(workspace_root, old_version)
+-        is not None,
++        "audit_to_move": source_audit is not None,
++        "source_audit_present": source_audit is not None,
+         "target_audit_present": (
+             load_commit_audit_sheet(workspace_root, new_version) is not None
+             if target_record
+@@ -1909,34 +2034,42 @@ def rename_release(  # noqa: C901 - coordinates bundle, entry, and successor rew
+         **changelog_plan,
+         "would_write": not dry_run,
+     }
+-    if dry_run:
+-        rename_plan["release"] = existing.to_dict()
+-        return {"kind": "release_rename_preview", **rename_plan}
+-    new_record = ReleaseRecord(
++    new_record = replace(
++        existing,
+         version=new_version,
+-        status=existing.status,
+         title=resolved_title,
+-        versioning=bump_versioning(existing.versioning),
+         released_at=resolved_released_at,
+         previous_version=resolved_previous,
+-        cancel_reason=existing.cancel_reason,
+-        superseded_by=existing.superseded_by,
+-        note=existing.note,
+-        changelog_file=existing.changelog_file,
+-        boundary_ref=existing.boundary_ref,
+-        source_refs=existing.source_refs,
+-        source_count=existing.source_count,
+-        entry_count=existing.entry_count,
+-        artifact_count=existing.artifact_count,
++        versioning=bump_versioning(existing.versioning),
+     )
++    rename_plan["release_before"] = existing.to_dict()
++    rename_plan["release_after"] = new_record.to_dict()
++    rename_plan["field_changes"] = {
++        field: [getattr(existing, field), getattr(new_record, field)]
++        for field in ("version", "title", "previous_version")
++    }
++    rename_plan["audit_rewritten"] = source_audit is not None
++    if dry_run:
++        rename_plan["release"] = existing.to_dict()
++        return {"kind": "release_rename_preview", **rename_plan}
+     if replace_canceled_target:
+         replace_canceled_release_bundle(workspace_root, old_version, new_record)
+     else:
+         rename_release_bundle(workspace_root, old_version, new_record)
++    rewritten_audit: CommitAuditSheetRecord | None = None
++    if source_audit is not None:
++        rewritten_audit = replace(
++            source_audit,
++            release_version=new_version,
++            versioning=bump_versioning(source_audit.versioning),
++        )
++        save_commit_audit_sheet(workspace_root, rewritten_audit, overwrite=True)
+     rewrote_successors = False
+     record_revisions = {
+         f"release:{new_version}": new_record.versioning.revision,
+     }
++    if rewritten_audit is not None:
++        record_revisions[f"audit:{new_version}"] = rewritten_audit.versioning.revision
+     for entry in load_entries(workspace_root, new_version):
+         record_revisions[f"entry:{new_version}/{entry.entry_id}"] = (
+             entry.versioning.revision
+@@ -1963,6 +2096,7 @@ def rename_release(  # noqa: C901 - coordinates bundle, entry, and successor rew
+             "rewrote_successors": bool(rewrote_successors),
+             "replace_canceled_target": replace_canceled_target,
+             "reason": reason,
++            "audit_rewritten": rewritten_audit is not None,
+         },
+     )
+     rebuild_indexes(workspace_root)
+@@ -1980,6 +2114,8 @@ def rename_release(  # noqa: C901 - coordinates bundle, entry, and successor rew
+     else:
+         payload["changelog"] = {**changelog_plan, "updated": False}
+     payload["rename_plan"] = rename_plan
++    rename_plan["audit_rewritten"] = rewritten_audit is not None
++    payload["audit_rewritten"] = rewritten_audit is not None
+     if (
+         released_at is not UNSET
+         and released_at is not None
+diff --git a/releaseledger/services/review.py b/releaseledger/services/review.py
+index 7920b4f..1275fde 100644
+--- a/releaseledger/services/review.py
++++ b/releaseledger/services/review.py
+@@ -53,6 +53,27 @@ COVERAGE_INTERNAL_ONLY = "internal_only"
+ COVERAGE_MISSING = "missing"
+
+
++_ACTIVE_RELEASE_STATUSES = frozenset({"planned", "draft", "candidate"})
++
++
++def _review_changelog_mode(
++    release: ReleaseRecord,
++    *,
++    phase: str,
++    proposed_released_at: str | None,
++) -> tuple[str | None, bool, str]:
++    """Derive explicit changelog rendering mode for a review phase."""
++    if phase == "finalize":
++        return proposed_released_at, False, "released"
++    if (
++        phase == "current"
++        and release.status in _ACTIVE_RELEASE_STATUSES
++        and release.released_at is None
++    ):
++        return None, True, "unreleased"
++    return None, False, "released"
++
++
+ def compute_entry_fingerprint(entry: ReleaseEntryRecord) -> str:
+     """Return a stable fingerprint for fallback duplicate detection.
+
+@@ -148,11 +169,22 @@ def _is_orphan(entry: ReleaseEntryRecord) -> bool:
+     return not (entry.source_refs or entry.issues or entry.prs or entry.sources)
+
+
+-def _coverage_recommendation(ref: str, label: str) -> str | None:
++def _coverage_recommendation(row: dict[str, object]) -> str | None:
++    ref = str(row["source_ref"])
++    label = str(row["status"])
++    origin = str(row.get("origin", "release_source_ref"))
++    if label == COVERAGE_MISSING and origin == "git_range":
++        if row.get("audit_decision") in {"accepted", "grouped"}:
++            return f"Add accepted public entry coverage for {ref}."
++        return (
++            f"Inspect {ref} in the commit audit and account for it as "
++            "accepted, grouped, internal, or rejected; public accepted/grouped "
++            "changes require entry coverage."
++        )
+     if label == COVERAGE_MISSING:
+         return (
+-            f"Add an accepted entry covering {ref} or remove it from release"
+-            " source refs."
++            f"Add an accepted entry covering {ref} or remove the incorrect ref "
++            "from the release metadata."
+         )
+     if label == COVERAGE_DRAFT_ONLY:
+         return f"Review draft entry for {ref} and set status to accepted or rejected."
+@@ -160,8 +192,8 @@ def _coverage_recommendation(ref: str, label: str) -> str | None:
+         return f"Confirm {ref} is intentionally omitted; its only entry is rejected."
+     if label == COVERAGE_INTERNAL_ONLY:
+         return (
+-            f"{ref} is only covered by internal entries; expose an accepted"
+-            " user-facing entry or include internal entries."
++            f"{ref} is only covered by internal entries; expose an accepted "
++            "user-facing entry or include internal entries."
+         )
+     return None
+
+@@ -375,8 +407,7 @@ def _problem_next_action(
+         return {
+             "code": "create_external_git_tag",
+             "command": f"git tag {tag}",
+-            "mutates": False,
+-            "manual_action_required": True,
++            "mutates": True,
+             "suggested_tag": tag,
+             "after_action": {
+                 "command": (
+@@ -434,10 +465,11 @@ def _build_next_actions(
+     changelog: dict[str, object],
+     checks: dict[str, object],
+     proposed_released_at: str | None = None,
+-) -> list[dict[str, object]]:
++    history_scope: str,
++) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+     """Build stable, machine-actionable release-check next actions."""
+     target_display = str(target_file or "CHANGELOG.md")
+-    actions: list[dict[str, object]] = []
++    all_actions: list[dict[str, object]] = []
+
+     for block in (chain, reconciliation):
+         problems = block.get("problems", [])
+@@ -449,22 +481,29 @@ def _build_next_actions(
+             action = _problem_next_action(
+                 problem, target_file=target_display, version=version
+             )
+-            if action is not None and action not in actions:
+-                actions.append(action)
++            if action is not None and action not in all_actions:
++                all_actions.append(action)
+
+     if not bool(checks.get("changelog_ok", True)):
++        command = (
++            f"releaseledger changelog build {version} --dry-run --strict "
++            f"--output {target_display}"
++        )
++        if bool(changelog.get("unreleased", False)):
++            command += " --unreleased"
++        else:
++            effective_date = changelog.get("effective_release_date")
++            if effective_date:
++                command += f" --release-date {effective_date}"
+         action = {
+             "code": "resolve_changelog_dry_run",
+-            "command": (
+-                f"releaseledger changelog build {version} --output "
+-                f"{target_display} --strict"
+-            ),
++            "command": command,
+             "mutates": False,
+             "requires_confirmation": False,
+             "scope": "target",
+         }
+-        if action not in actions:
+-            actions.append(action)
++        if action not in all_actions:
++            all_actions.append(action)
+     if not bool(checks.get("target_changelog_ok", True)):
+         phase = str(checks.get("phase", "current"))
+         command = (
+@@ -485,8 +524,8 @@ def _build_next_actions(
+                 "acknowledging ownership."
+             ),
+         }
+-        if action not in actions:
+-            actions.append(action)
++        if action not in all_actions:
++            all_actions.append(action)
+     if audit is not None and not bool(audit.get("ok", False)):
+         action = {
+             "code": "complete_commit_audit",
+@@ -495,8 +534,8 @@ def _build_next_actions(
+             "requires_confirmation": False,
+             "scope": "target",
+         }
+-        if action not in actions:
+-            actions.append(action)
++        if action not in all_actions:
++            all_actions.append(action)
+     if not bool(checks.get("lint_ok", True)):
+         action = {
+             "code": "fix_entry_lint",
+@@ -505,9 +544,17 @@ def _build_next_actions(
+             "requires_confirmation": False,
+             "scope": "target",
+         }
+-        if action not in actions:
++        if action not in all_actions:
++            all_actions.append(action)
++
++    actions: list[dict[str, object]] = []
++    history_follow_ups: list[dict[str, object]] = []
++    for action in all_actions:
++        if history_scope == "target" and action.get("scope") == "history":
++            history_follow_ups.append(action)
++        else:
+             actions.append(action)
+-    return actions
++    return actions, history_follow_ups
+
+
+ def _failed_checks(
+@@ -645,7 +692,7 @@ def _build_review_recommendations(
+     for row in coverage:
+         if row.get("gate_satisfied") is True:
+             continue
+-        rec = _coverage_recommendation(str(row["source_ref"]), str(row["status"]))
++        rec = _coverage_recommendation(row)
+         if rec is not None:
+             recommendations.append(rec)
+     for orphan in orphans:
+@@ -676,6 +723,8 @@ def _compute_coverage(
+     git_block: dict[str, object] | None = None,
+     git_ref_map: dict[str, object] | None = None,
+     audit_rows: dict[str, object] | None = None,
++    release_source_refs: set[str] | frozenset[str] = frozenset(),
++    boundary_ref: str | None = None,
+ ) -> list[dict[str, object]]:
+     """Build coverage rows from expected refs and entries."""
+     by_ref: dict[str, list[ReleaseEntryRecord]] = {}
+@@ -689,8 +738,17 @@ def _compute_coverage(
+         label, breakdown = classify_source_ref(
+             ref, matching, include_internal=include_internal
+         )
++        if ref in release_source_refs:
++            origin = "release_source_ref"
++        elif ref == boundary_ref:
++            origin = "boundary_ref"
++        elif ref.startswith("git:") and git_block is not None:
++            origin = "git_range"
++        else:
++            origin = "release_source_ref"
+         row: dict[str, object] = {
+             "source_ref": ref,
++            "origin": origin,
+             "status": label,
+             **breakdown,
+         }
+@@ -848,6 +906,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+     if is_coverable_boundary_ref(release.boundary_ref) and release.boundary_ref:
+         expected_refs.append(release.boundary_ref)
+     expected_refs = _dedupe_preserve_order(expected_refs)
++    release_source_refs = set(release.source_refs)
+     # 2b. Git-derived expected refs when git is enabled.
+     git_block, git_warnings, git_ref_map, expected_refs = _compute_git_expected_refs(
+         workspace_root,
+@@ -866,7 +925,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+     )
+     if git_block is not None:
+         git_block["target_changelog_modified_in_range"] = target_changelog_modified
+-        if target_changelog_modified:
++        if target_changelog_modified and not acknowledge_changelog_change:
+             git_warnings.append(
+                 "target_changelog_modified_in_range: true; reconcile the changelog "
+                 "ownership before building."
+@@ -880,6 +939,8 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+         git_block=git_block,
+         git_ref_map=git_ref_map,
+         audit_rows=audit_rows,
++        boundary_ref=release.boundary_ref,
++        release_source_refs=release_source_refs,
+     )
+
+     # 4. Entry counts over all recorded entries (independent of include scope).
+@@ -951,9 +1012,15 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+             "history_scope": history_scope,
+         }
+
+-    # 7. Changelog dry-run. Try a strict dry-run when requested so the review
++    # 7. Changelog dry-run. Select the lifecycle mode here rather than changing
++    #    the explicit contract of the direct changelog build command.
+     #    reports exactly what `build --strict` would reject; fall back to a
+     #    non-strict dry-run render to recover a section heading and a reason.
++    release_date, unreleased, changelog_mode = _review_changelog_mode(
++        release,
++        phase=phase,
++        proposed_released_at=proposed_released_at,
++    )
+     changelog_block = _run_changelog_dry_run(
+         workspace_root,
+         version=version,
+@@ -962,8 +1029,10 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+         statuses=statuses,
+         target_file=target_file,
+         strict=strict,
+-        release_date=proposed_released_at if phase == "finalize" else None,
++        release_date=release_date,
++        unreleased=unreleased,
+     )
++    changelog_block["mode"] = changelog_mode
+     # Coverage is satisfied when every expected ref is covered; with no
+     # expected refs, coverage is trivially satisfied.
+     coverage_ok = all(
+@@ -1037,6 +1106,11 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+         and not acknowledge_changelog_change
+     )
+
++    changelog_ownership = {
++        "modified_in_range": target_changelog_modified is True,
++        "acknowledged": acknowledge_changelog_change,
++        "ok": target_changelog_ok,
++    }
+     # Commit audit sheet integration (opt-in via --require-audit-sheet).
+     audit_block = _build_audit_block(
+         workspace_root,
+@@ -1143,7 +1217,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+         git_block=git_block,
+         strict=strict,
+     )
+-    next_actions = _build_next_actions(
++    next_actions, history_follow_ups = _build_next_actions(
+         version=version,
+         target_file=target_file,
+         chain=chain_block,
+@@ -1152,6 +1226,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+         changelog=changelog_block,
+         checks=checks,
+         proposed_released_at=proposed_released_at,
++        history_scope=history_scope,
+     )
+
+     result: dict[str, object] = {
+@@ -1186,6 +1261,8 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+         "chain": chain_block,
+         "reconciliation": reconciliation_block,
+         "failed_checks": failed_checks,
++        "changelog_ownership": changelog_ownership,
++        "history_follow_ups": history_follow_ups,
+         "next_actions": next_actions,
+     }
+     if git_block is not None:
+@@ -1278,6 +1355,7 @@ def _run_changelog_dry_run(
+     target_file: Path | None,
+     strict: bool,
+     release_date: str | None = None,
++    unreleased: bool = False,
+ ) -> dict[str, object]:
+     """Run the changelog dry-run without writing and normalize the verdict.
+
+@@ -1294,6 +1372,11 @@ def _run_changelog_dry_run(
+         "target_file": target_display,
+         "dry_run_ok": True,
+         "strict": strict,
++        "mode": "unreleased" if unreleased else "released",
++        "unreleased": unreleased,
++        "effective_release_date": (
++            None if unreleased else (release_date or release.released_at)
++        ),
+         "section_heading": None,
+         "reason": None,
+     }
+@@ -1304,6 +1387,7 @@ def _run_changelog_dry_run(
+             target_file=target_file,
+             include_internal=include_internal,
+             release_date=release_date,
++            unreleased=unreleased,
+             dry_run=True,
+             replace_existing=False,
+             include_statuses=statuses,
+@@ -1323,6 +1407,8 @@ def _run_changelog_dry_run(
+                 version=version,
+                 include_internal=include_internal,
+                 include_statuses=statuses,
++                release_date=release_date,
++                unreleased=unreleased,
+             )
+             block["section_heading"] = rendered.get("section_heading")
+         except LaunchError:
+diff --git a/releaseledger/storage/store.py b/releaseledger/storage/store.py
+index 22a26a9..2a9aa0c 100644
+--- a/releaseledger/storage/store.py
++++ b/releaseledger/storage/store.py
+@@ -543,6 +543,8 @@ def rename_release_bundle(
+     Persists ``new_record`` (with its rewritten front matter) under the new
+     version directory, rewrites every entry's ``release_version`` front matter
+     to the new version (preserving entry ids and order), and removes the old
++    Any commit-audit sheet in the bundle moves with it; callers that change its
++    release identity must persist the revised sheet after the move.
+     bundle directory. Returns the persisted ``new_record``.
+     """
+     paths = _resolve(workspace_root)
+diff --git a/skills/releaseledger/SKILL.md b/skills/releaseledger/SKILL.md
+index 8ddd226..921289f 100644
+--- a/skills/releaseledger/SKILL.md
++++ b/skills/releaseledger/SKILL.md
+@@ -97,8 +97,8 @@ releaseledger commands
+ releaseledger help release review
+ releaseledger branch status
+ releaseledger changelog build --strict --output CHANGELOG.md
+-releaseledger changelog build VERSION --strict --output CHANGELOG.md
+-releaseledger changelog build VERSION --strict --output CHANGELOG.md --replace-existing
++releaseledger changelog build VERSION --strict --unreleased --output CHANGELOG.md
++releaseledger changelog build VERSION --strict --unreleased --output CHANGELOG.md --replace-existing
+
+ releaseledger storage where
+ releaseledger storage validate --strict
+@@ -133,8 +133,9 @@ releaseledger --root PATH --json release show VERSION
+
+ ## Release creation protocol
+
+-1. Prepare a planned release and proposed date with:
+-   `releaseledger release prepare VERSION --previous PREV_VERSION --released-at YYYY-MM-DD`.
++1. Prepare a planned release and snapshot with:
++   `releaseledger release prepare VERSION --previous PREV_VERSION --git-base PREV_TAG --git-head HEAD`.
++   The command is preparation-only and returns structured `next_actions` guidance; it never finalizes or writes changelog content.
+ 2. Use `releaseledger release create VERSION --title "Release VERSION"` only when no
+    proposed date is being persisted on a planned record.
+ 3. Use `releaseledger release tag VERSION` to create a released Releaseledger record;
+@@ -162,8 +163,9 @@ Decision tree:
+    and run the exact suggested `changelog-section rename-section` command.
+    The rename preserves title and status unless explicitly overridden.
+ 3. Prepare the corrected release in one step:
+-   `releaseledger release prepare NEW --previous PREV --released-at DATE`
++   `releaseledger release prepare NEW --previous PREV`
+    with `--git-base` and `--git-head` when the range is known.
++   Persist a release date only during explicit finalization with `--released-at DATE`.
+ 4. If the wrong version should remain as a visible audit tombstone, use
+    `release cancel --reason "..." --superseded-by VERSION` (sets status
+    `canceled`).
+@@ -182,7 +184,7 @@ releaseledger release rename OLD NEW --previous PREV \
+   --target-file CHANGELOG.md --rename-changelog-section --dry-run
+ releaseledger release rename OLD NEW --previous PREV \
+   --target-file CHANGELOG.md --rename-changelog-section
+-releaseledger release prepare NEW --previous PREV --released-at DATE \
++releaseledger release prepare NEW --previous PREV \
+   --git-base PREV_TAG --git-head HEAD --refresh
+ releaseledger entry apply NEW --file .ledger/releaseledger/work/NEW/entries.yaml --dry-run --strict --guard-commit-subjects
+ releaseledger entry apply NEW --file .ledger/releaseledger/work/NEW/entries.yaml --strict --guard-commit-subjects --sync-audit
+@@ -191,8 +193,8 @@ releaseledger audit apply NEW --file .ledger/releaseledger/work/NEW/audit-decisi
+ releaseledger audit apply NEW --file .ledger/releaseledger/work/NEW/audit-decisions.yaml
+ releaseledger release check NEW --phase finalize --released-at DATE --strict \
+   --target-file CHANGELOG.md
+-releaseledger changelog build NEW --output CHANGELOG.md --strict --replace-existing
+ releaseledger release finalize NEW --released-at DATE
++releaseledger changelog build NEW --output CHANGELOG.md --strict --replace-existing
+ git add CHANGELOG.md .ledger/releaseledger && git commit -m "Release NEW"
+ git tag NEW  # explicit external action; Releaseledger does not create Git tags
+ releaseledger release check NEW --phase published --strict --target-file CHANGELOG.md
+@@ -327,10 +329,9 @@ Use this for any git-backed changelog or release-note backfill.
+    followed by
+    `releaseledger entry apply VERSION --file entries.yaml --strict --guard-commit-subjects --sync-audit`.
+ 10. Validate the complete phase after entries exist:
+-11. Validate the complete public phase after entries exist:
+     `releaseledger audit validate VERSION --phase complete --strict`.
+     Add `--include-internal` only when internal changelog-entry coverage is explicitly requested.
+-12. Run `releaseledger release check VERSION --phase finalize --released-at DATE --strict --target-file CHANGELOG.md` before any final build. Use the
++11. Run `releaseledger release check VERSION --phase finalize --released-at DATE --strict --target-file CHANGELOG.md` before any final build. Use the
+     `published` phase after finalization and tagging.
+
+ `audit init` writes one `needs_review` row per git candidate commit. Decisions
+@@ -348,22 +349,25 @@ Use this when the user asks to build, generate, or update `CHANGELOG.md`.
+    `releaseledger release check VERSION --strict --target-file CHANGELOG.md`.
+    If it reports missing `git:<sha>` coverage, audit failures, lint errors, or
+    release-state blockers, stop and resolve them before building.
+-1. Generate a strict dry run first:
+-   `releaseledger changelog build VERSION --dry-run --strict --output CHANGELOG.md`.
++1. Generate a strict dry run first. For an undated current release, pass the
++   required `--unreleased` mode explicitly:
++   `releaseledger changelog build VERSION --dry-run --strict --unreleased --output CHANGELOG.md`.
+ 2. Inspect the rendered section:
+-
+    - heading version is correct
+    - release date is exact, omitted, or marked unreleased according to user intent
+    - internal entries are absent unless requested
+    - groups appear in deterministic order
+-
+-   - A released section must use the exact persisted release date. Reconciliation reports `Unreleased`, missing-date, and date-mismatch headings as blockers.
+-   - A release metadata update invalidates the affected changelog sections. Inspect the reported `invalidated_changelog_sections` values and rebuild them explicitly.
+-   - Rebuild a stale predecessor section as well as the target when predecessor metadata or identity changed.
+    - breaking changes are visible
+-
+-3. Apply the build:
+-   `releaseledger changelog build VERSION --output CHANGELOG.md`.
++   - A released section uses the exact persisted release date. Reconciliation reports
++     `Unreleased`, missing-date, and date-mismatch headings as blockers.
++   - A release metadata update invalidates affected changelog sections. Inspect
++     `invalidated_changelog_sections` and rebuild them explicitly.
++   - Rebuild a stale predecessor section when predecessor metadata or identity changed.
++3. Apply the build after the appropriate lifecycle check:
++   - For an undated planned release:
++     `releaseledger changelog build VERSION --unreleased --output CHANGELOG.md`.
++   - After finalization, use the persisted release date:
++     `releaseledger changelog build VERSION --strict --output CHANGELOG.md`.
+ 4. Read `CHANGELOG.md` back and verify:
+    - no duplicate release heading exists
+    - new section is below `## Unreleased` when that heading exists
+@@ -391,7 +395,7 @@ Use this when the user asks to build, generate, or update `CHANGELOG.md`.
+ An explicit release version means single-section intent:
+
+ ```bash
+-releaseledger changelog build VERSION --strict --output CHANGELOG.md
++releaseledger changelog build VERSION --strict --unreleased --output CHANGELOG.md
+ ```
+
+ Use a full document rebuild only when the user explicitly asks for all history,
+@@ -416,10 +420,14 @@ For routine work on one release, keep validation scoped to the target. Do not im
+
+ ```text
+ 1. releaseledger release refresh VERSION --head HEAD --decisions-output pending.yaml
+-2. inspect and apply the pending audit decisions
+-3. releaseledger entry lint VERSION --strict
+-4. releaseledger changelog build VERSION --strict --output CHANGELOG.md --replace-existing
+-5. releaseledger release check VERSION --strict
++2. inspect and apply the pending audit decisions with `audit apply --dry-run` first
++3. releaseledger audit apply VERSION --file pending.yaml --dry-run
++4. releaseledger audit apply VERSION --file pending.yaml
++5. releaseledger audit validate VERSION --phase evidence --strict
++6. releaseledger entry lint VERSION --strict
++7. releaseledger release check VERSION --phase current --strict --target-file CHANGELOG.md
++8. releaseledger changelog build VERSION --dry-run --strict --unreleased --output CHANGELOG.md
++9. releaseledger changelog build VERSION --unreleased --output CHANGELOG.md
+ ```
+
+ The routine single-release rebuild command uses `--replace-existing` only when the request explicitly calls for regenerating an existing section. If the target section is absent, omit the flag. If the request is ambiguous, use a dry run without replacement and ask for confirmation before overwriting.
+diff --git a/tests/test_commit_audit_cli.py b/tests/test_commit_audit_cli.py
+index c65530a..dfa0a3b 100644
+--- a/tests/test_commit_audit_cli.py
++++ b/tests/test_commit_audit_cli.py
+@@ -126,6 +126,11 @@ class TestAuditInit:
+         payload = _jrun(repo, "audit", "init", "0.2.0")
+         assert payload["result_type"] == "commit_audit_sheet_created"
+         assert int(payload["result"]["row_count"]) == 2
++        show = _jrun(repo, "audit", "show", "0.2.0", "--format", "json")
++        rows = show["result"]["sheet"]["rows"]
++        assert all(
++            row["stats"]["files_changed"] == len(row["changed_paths"]) for row in rows
++        )
+
+     def test_init_uses_stored_release_range_when_omitted(self, tmp_path: Path) -> None:
+         repo, _sha_a, _sha_b = _seed_range(tmp_path)
+diff --git a/tests/test_git_cli.py b/tests/test_git_cli.py
+index 92d8434..8d00385 100644
+--- a/tests/test_git_cli.py
++++ b/tests/test_git_cli.py
+@@ -388,6 +388,10 @@ def test_release_prepare_exports_snapshot_artifacts(tmp_path: Path) -> None:
+     assert payload["result_type"] == "release_prepare"
+     assert payload["result"]["release"]["released_at"] is None
+     assert payload["result"]["proposed_released_at"] == "2026-06-14"
++    actions = payload["result"]["next_actions"]
++    assert actions[0]["code"] == "inspect_audit_evidence"
++    assert actions[-1]["code"] == "release_check_published"
++    assert "--phase finalize" in actions[-4]["command"]
+     assert (out_dir / "range.json").is_file()
+     assert (out_dir / "audit.yaml").is_file()
+     assert (out_dir / "entries.yaml").is_file()
+@@ -407,6 +411,9 @@ def test_release_prepare_default_workspace_is_versioned_and_refreshable(
+     first = runner.invoke(app, ["--cwd", str(repo), "release", "prepare", "0.2.0"])
+     assert first.exit_code == 0, first.output
+     work = repo / ".ledger" / "releaseledger" / "work" / "0.2.0"
++    assert "Next:" in first.output
++    assert "--phase current --strict" in first.output
++    assert "--dry-run --strict --unreleased" in first.output
+     assert work.is_dir()
+     assert (work / "evidence" / "manifest.json").is_file()
+     blocked = runner.invoke(app, ["--cwd", str(repo), "release", "prepare", "0.2.0"])
+@@ -426,6 +433,9 @@ def test_release_refresh_updates_snapshot_and_pending_decisions(
+     prepared = _jrun(repo, "release", "prepare", "0.2.0")
+     assert prepared["result_type"] == "release_prepare"
+     _commit(repo, "fix: new behavior", "new.txt")
++    current_actions = prepared["result"]["next_actions"]
++    assert current_actions[-2]["code"] == "release_check_current"
++    assert "--unreleased" in current_actions[-1]["command"]
+     output = tmp_path / "pending.yaml"
+     refreshed = _jrun(
+         repo,
+diff --git a/tests/test_git_review.py b/tests/test_git_review.py
+index 9e3ca72..c257dd8 100644
+--- a/tests/test_git_review.py
++++ b/tests/test_git_review.py
+@@ -766,3 +766,9 @@ def test_review_strict_requires_changelog_change_acknowledgement(
+     )
+     acknowledged_payload = json.loads(check_acknowledged.output)
+     assert acknowledged_payload["result"]["checks"]["target_changelog_ok"] is True
++    ownership = acknowledged_payload["result"]["changelog_ownership"]
++    assert ownership == {"modified_in_range": True, "acknowledged": True, "ok": True}
++    assert all(
++        "target_changelog_modified_in_range" not in recommendation
++        for recommendation in acknowledged_payload["result"]["recommendations"]
++    )
+diff --git a/tests/test_release_check_phases.py b/tests/test_release_check_phases.py
+new file mode 100644
+index 0000000..c39f40d
+--- /dev/null
++++ b/tests/test_release_check_phases.py
+@@ -0,0 +1,183 @@
++"""Regression tests for lifecycle-aware release review/check changelog modes."""
++
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++import pytest
++from typer.testing import CliRunner
++
++from releaseledger.cli import app
++
++runner = CliRunner()
++
++
++def _run(tmp_path: Path, *args: str):
++    return runner.invoke(app, ["--cwd", str(tmp_path), *args])
++
++
++def _json_run(tmp_path: Path, *args: str) -> dict[str, object]:
++    result = runner.invoke(app, ["--cwd", str(tmp_path), "--json", *args])
++    assert result.exit_code == 0, result.output
++    return json.loads(result.output)
++
++
++def _init_keepachangelog(tmp_path: Path) -> None:
++    result = _run(tmp_path, "init")
++    assert result.exit_code == 0, result.output
++    config = tmp_path / ".ledger" / "releaseledger" / "config.toml"
++    config.write_text(
++        """config_version = 2
++ledger_ref = "main"
++ledger_parent_ref = ""
++ledger_branch_guard = "off"
++
++[ledger]
++code = "rl"
++
++[release]
++default_changelog = "CHANGELOG.md"
++default_status = "planned"
++allow_dirty_worktree = true
++
++[changelog]
++output = "CHANGELOG.md"
++standard = "keepachangelog-1.1.0"
++group_mode = "keepachangelog"
++link_references = false
++repository_url = ""
++tag_prefix = "v"
++compare_url_template = ""
++release_url_template = ""
++preamble = ""
++semver = true
++unreleased = true
++trim = true
++render_always = false
++header = ""
++footer = ""
++postprocessors = []
++"""
++    )
++
++
++def _seed_release(tmp_path: Path, *, status: str = "planned") -> None:
++    result = _run(tmp_path, "release", "create", "0.2.0", "--status", status)
++    assert result.exit_code == 0, result.output
++    result = _run(
++        tmp_path,
++        "entry",
++        "add",
++        "0.2.0",
++        "--kind",
++        "added",
++        "--summary",
++        "Feature",
++    )
++    assert result.exit_code == 0, result.output
++
++
++@pytest.mark.parametrize("status", ["planned", "draft", "candidate"])
++def test_current_active_undated_release_uses_unreleased_mode(
++    tmp_path: Path, status: str
++) -> None:
++    _init_keepachangelog(tmp_path)
++    _seed_release(tmp_path, status=status)
++
++    review = _json_run(tmp_path, "review", "0.2.0", "--strict")
++    review_result = review["result"]
++    assert isinstance(review_result, dict)
++    assert review_result["ok"] is True
++    changelog = review_result["changelog"]
++    assert isinstance(changelog, dict)
++    assert changelog["dry_run_ok"] is True
++    assert changelog["mode"] == "unreleased"
++    assert changelog["unreleased"] is True
++    assert changelog["effective_release_date"] is None
++    assert changelog["section_heading"] == "## [0.2.0] - Unreleased"
++    assert review_result["release"]["released_at"] is None
++
++    check = _json_run(tmp_path, "release", "check", "0.2.0", "--strict")
++    assert check["ok"] is True
++    check_result = check["result"]
++    assert isinstance(check_result, dict)
++    assert check_result["checks"]["changelog_ok"] is True
++
++
++def test_direct_strict_build_keeps_explicit_unreleased_contract(tmp_path: Path) -> None:
++    _init_keepachangelog(tmp_path)
++    _seed_release(tmp_path)
++
++    rejected = _run(tmp_path, "changelog", "build", "0.2.0", "--strict")
++    assert rejected.exit_code != 0
++    assert "release date" in rejected.output.lower()
++
++    accepted = _run(
++        tmp_path,
++        "changelog",
++        "build",
++        "0.2.0",
++        "--strict",
++        "--unreleased",
++        "--dry-run",
++    )
++    assert accepted.exit_code == 0, accepted.output
++
++
++def test_finalize_requires_date_and_uses_dated_mode(tmp_path: Path) -> None:
++    _init_keepachangelog(tmp_path)
++    _seed_release(tmp_path)
++
++    missing_date = _run(
++        tmp_path, "release", "check", "0.2.0", "--phase", "finalize", "--strict"
++    )
++    assert missing_date.exit_code != 0
++
++    finalized = _json_run(
++        tmp_path,
++        "release",
++        "check",
++        "0.2.0",
++        "--phase",
++        "finalize",
++        "--released-at",
++        "2026-09-16",
++        "--strict",
++    )
++    assert finalized["ok"] is True
++    result = finalized["result"]
++    assert isinstance(result, dict)
++    changelog = result["changelog"]
++    assert isinstance(changelog, dict)
++    assert changelog["mode"] == "released"
++    assert changelog["unreleased"] is False
++    assert changelog["effective_release_date"] == "2026-09-16"
++    assert result["release"]["released_at"] is None
++
++
++def test_published_requires_released_state_and_persisted_date(tmp_path: Path) -> None:
++    _init_keepachangelog(tmp_path)
++    result = _run(tmp_path, "release", "tag", "0.2.0", "--released-at", "2026-09-16")
++    assert result.exit_code == 0, result.output
++    _run(
++        tmp_path,
++        "entry",
++        "add",
++        "0.2.0",
++        "--kind",
++        "added",
++        "--summary",
++        "Feature",
++    )
++
++    published = _json_run(
++        tmp_path, "release", "check", "0.2.0", "--phase", "published", "--strict"
++    )
++    assert published["ok"] is True
++    result = published["result"]
++    assert isinstance(result, dict)
++    changelog = result["changelog"]
++    assert isinstance(changelog, dict)
++    assert changelog["mode"] == "released"
++    assert changelog["effective_release_date"] == "2026-09-16"
+diff --git a/tests/test_release_corrections.py b/tests/test_release_corrections.py
+index 30cb601..1034e88 100644
+--- a/tests/test_release_corrections.py
++++ b/tests/test_release_corrections.py
+@@ -17,9 +17,15 @@ import pytest
+ from typer.testing import CliRunner
+
+ from releaseledger.cli import app
++from releaseledger.domain.audit import (
++    CommitAuditRow,
++    CommitAuditSheetRecord,
++    CommitAuditStats,
++)
+ from releaseledger.domain.states import RELEASE_STATUSES
+-from releaseledger.domain.versioning import bump_versioning
++from releaseledger.domain.versioning import RecordVersioning, bump_versioning
+ from releaseledger.errors import LaunchError
++from releaseledger.services.audit import validate_commit_audit_sheet
+ from releaseledger.services.changelog_build import (
+     find_release_section,
+     remove_release_section,
+@@ -35,7 +41,13 @@ from releaseledger.services.releases import (
+     tag_release,
+     update_release,
+ )
+-from releaseledger.storage.store import list_releases, load_release, save_release
++from releaseledger.storage.store import (
++    list_releases,
++    load_commit_audit_sheet,
++    load_release,
++    save_commit_audit_sheet,
++    save_release,
++)
+
+ runner = CliRunner()
+
+@@ -330,6 +342,118 @@ class TestCancelRelease:
+
+
+ class TestRenameRelease:
++    def test_rename_preserves_identity_fields_and_rewrites_audit(
++        self, tmp_path: Path
++    ) -> None:
++        from releaseledger.services.entries import add_release_entry
++
++        _init(tmp_path)
++        create_release(
++            tmp_path,
++            version="0.7.0",
++            title="Release 0.7.0",
++            history_state="audited",
++        )
++        original = load_release(tmp_path, "0.7.0")
++        save_release(
++            tmp_path,
++            replace(
++                original,
++                git_base_ref="v0.6.1",
++                git_base_sha="a" * 40,
++                versioning=bump_versioning(original.versioning),
++                git_head_ref="HEAD",
++                git_head_sha="b" * 40,
++                git_range="v0.6.1..HEAD",
++                git_commit_count=1,
++            ),
++            overwrite=True,
++        )
++        source_ref = "git:" + "c" * 40
++        add_release_entry(
++            tmp_path,
++            release_version="0.7.0",
++            kind="added",
++            summary="Reviewed feature",
++            source_refs=(source_ref,),
++        )
++        row = CommitAuditRow(
++            sha="c" * 40,
++            source_ref=source_ref,
++            evidence_subject="feat: reviewed feature",
++            changed_paths=("src/feature.py",),
++            stats=CommitAuditStats(files_changed=1, insertions=2),
++            inspected=True,
++            inspected_paths=("src/feature.py",),
++            observed_behavior="Reviewed feature behavior.",
++            decision="accepted",
++        )
++        save_commit_audit_sheet(
++            tmp_path,
++            CommitAuditSheetRecord(
++                release_version="0.7.0",
++                versioning=RecordVersioning(),
++                git_base_ref="v0.6.1",
++                git_base_sha="a" * 40,
++                git_head_ref="HEAD",
++                git_head_sha="b" * 40,
++                git_range="v0.6.1..HEAD",
++                commit_count=1,
++                rows=(row,),
++            ),
++        )
++
++        rename_release(tmp_path, old_version="0.7.0", new_version="0.6.2")
++        renamed = load_release(tmp_path, "0.6.2")
++        assert renamed.title == "Release 0.6.2"
++        assert renamed.history_state == "audited"
++        assert renamed.git_base_ref == "v0.6.1"
++        assert renamed.git_base_sha == "a" * 40
++        assert renamed.git_head_ref == "HEAD"
++        assert renamed.git_head_sha == "b" * 40
++        assert renamed.git_range == "v0.6.1..HEAD"
++        assert renamed.git_commit_count == 1
++        audit = load_commit_audit_sheet(tmp_path, "0.6.2")
++        assert audit is not None
++        assert audit.release_version == "0.6.2"
++        assert audit.versioning.revision == 2
++        assert audit.rows == (row,)
++        assert (
++            validate_commit_audit_sheet(
++                tmp_path, version="0.6.2", phase="evidence", strict=True
++            )["ok"]
++            is True
++        )
++
++    def test_rename_dry_run_exposes_after_identity_without_mutating(
++        self, tmp_path: Path
++    ) -> None:
++        _init(tmp_path)
++        create_release(tmp_path, version="0.7.0", title="Release 0.7.0")
++        preview = rename_release(
++            tmp_path, old_version="0.7.0", new_version="0.6.2", dry_run=True
++        )
++        assert preview["release_before"]["title"] == "Release 0.7.0"
++        assert preview["release_after"]["title"] == "Release 0.6.2"
++        assert preview["field_changes"]["version"] == ["0.7.0", "0.6.2"]
++        assert load_release(tmp_path, "0.7.0").title == "Release 0.7.0"
++        human = _run(
++            tmp_path,
++            "release",
++            "rename",
++            "0.7.0",
++            "0.6.2",
++            "--dry-run",
++        )
++        assert human.exit_code == 0, human.stdout
++        assert "title: Release 0.7.0 -> Release 0.6.2" in human.stdout
++
++    def test_rename_preserves_custom_title(self, tmp_path: Path) -> None:
++        _init(tmp_path)
++        create_release(tmp_path, version="0.7.0", title="Internal milestone")
++        rename_release(tmp_path, old_version="0.7.0", new_version="0.6.2")
++        assert load_release(tmp_path, "0.6.2").title == "Internal milestone"
++
+     def test_release_rename_moves_bundle_and_updates_release_frontmatter(
+         self, tmp_path: Path
+     ) -> None:
+diff --git a/tests/test_release_review.py b/tests/test_release_review.py
+index ea06b28..aa7d3b6 100644
+--- a/tests/test_release_review.py
++++ b/tests/test_release_review.py
+@@ -16,7 +16,11 @@ from typer.testing import CliRunner
+
+ from releaseledger.cli import app
+ from releaseledger.domain.release import ReleaseRecord
+-from releaseledger.services.review import _scope_health_block
++from releaseledger.services.review import (
++    _build_next_actions,
++    _coverage_recommendation,
++    _scope_health_block,
++)
+
+ runner = CliRunner()
+
+@@ -366,3 +370,89 @@ def test_release_check_passes_after_finalize(tmp_path: Path) -> None:
+     assert result.exit_code == 0, result.stdout
+     payload = json.loads(result.stdout)
+     assert payload["ok"] is True
++
++
++def test_next_actions_are_lifecycle_aware_and_target_scoped() -> None:
++    chain = {
++        "problems": [
++            {"kind": "tag_without_release", "version": "0.1.0", "scope": "history"},
++            {"kind": "release_without_tag", "version": "0.2.0", "scope": "target"},
++        ]
++    }
++    changelog = {
++        "unreleased": True,
++        "effective_release_date": None,
++    }
++    checks = {"changelog_ok": False, "target_changelog_ok": True}
++    actions, follow_ups = _build_next_actions(
++        version="0.2.0",
++        target_file=Path("CHANGELOG.md"),
++        chain=chain,
++        reconciliation={"problems": []},
++        audit=None,
++        changelog=changelog,
++        checks=checks,
++        history_scope="target",
++    )
++    assert any(action["code"] == "create_external_git_tag" for action in actions)
++    assert all(action["scope"] != "history" for action in actions)
++    assert follow_ups[0]["code"] == "import_release_tag"
++    changelog_action = next(
++        action for action in actions if action["code"] == "resolve_changelog_dry_run"
++    )
++    assert "--dry-run" in changelog_action["command"]
++    assert "--unreleased" in changelog_action["command"]
++    assert changelog_action["mutates"] is False
++    assert changelog_action["requires_confirmation"] is False
++
++    full_actions, full_follow_ups = _build_next_actions(
++        version="0.2.0",
++        target_file=Path("CHANGELOG.md"),
++        chain=chain,
++        reconciliation={"problems": []},
++        audit=None,
++        changelog={"unreleased": False, "effective_release_date": "2026-09-16"},
++        checks={"changelog_ok": False, "target_changelog_ok": True},
++        history_scope="full",
++    )
++    assert full_follow_ups == []
++    assert any(action["scope"] == "history" for action in full_actions)
++    dated_action = next(
++        action
++        for action in full_actions
++        if action["code"] == "resolve_changelog_dry_run"
++    )
++    assert "--dry-run" in dated_action["command"]
++    assert "--release-date 2026-09-16" in dated_action["command"]
++
++
++def test_coverage_recommendation_uses_ref_provenance() -> None:
++    git_recommendation = _coverage_recommendation(
++        {"source_ref": "git:abc", "status": "missing", "origin": "git_range"}
++    )
++    assert git_recommendation is not None
++    assert "remove" not in git_recommendation
++    assert "commit audit" in git_recommendation
++    metadata_recommendation = _coverage_recommendation(
++        {
++            "source_ref": "tl:task-1",
++            "status": "missing",
++            "origin": "release_source_ref",
++        }
++    )
++    assert metadata_recommendation is not None
++    assert "remove" in metadata_recommendation
++
++
++def test_acknowledged_changelog_ownership_is_resolved() -> None:
++    assert (
++        _coverage_recommendation(
++            {
++                "source_ref": "git:abc",
++                "status": "missing",
++                "origin": "git_range",
++                "audit_decision": "accepted",
++            }
++        )
++        == "Add accepted public entry coverage for git:abc."
++    )
+diff --git a/tests/test_releaseledger_skill_protocol.py b/tests/test_releaseledger_skill_protocol.py
+index 85457aa..427f9ae 100644
+--- a/tests/test_releaseledger_skill_protocol.py
++++ b/tests/test_releaseledger_skill_protocol.py
+@@ -13,6 +13,10 @@ from pathlib import Path
+ ROOT = Path(__file__).resolve().parents[1]
+ SKILL = ROOT / "skills" / "releaseledger" / "SKILL.md"
+
++COMMANDS = ROOT / "docs" / "commands.md"
++CONCEPTS = ROOT / "docs" / "concepts.md"
++QUICKSTART = ROOT / "docs" / "quickstart.md"
++
+
+ def test_skill_requires_commit_by_commit_git_audit() -> None:
+     text = SKILL.read_text(encoding="utf-8")
+@@ -45,3 +49,22 @@ def test_skill_uses_builtin_commit_subject_guard_and_snapshot_rule() -> None:
+     assert "--guard-commit-subjects" in text
+     assert "Resolve `HEAD` once" in text
+     assert "omit `--head`" in text
++
++
++def test_prepare_guidance_is_structured_and_lifecycle_aware() -> None:
++    skill_text = SKILL.read_text(encoding="utf-8")
++    commands_text = COMMANDS.read_text(encoding="utf-8")
++    concepts_text = CONCEPTS.read_text(encoding="utf-8")
++    quickstart_text = QUICKSTART.read_text(encoding="utf-8")
++
++    assert "structured `next_actions`" in skill_text
++    assert "preparation-only" in commands_text
++    assert "never finalizes" in concepts_text
++    assert "--unreleased" in quickstart_text
++    assert "dry-run/apply audit" in quickstart_text
++
++
++def test_skill_does_not_document_undated_strict_single_build() -> None:
++    text = SKILL.read_text(encoding="utf-8")
++    assert "changelog build VERSION --dry-run --strict --unreleased" in text
++    assert "release prepare VERSION --previous PREV_VERSION" in text
