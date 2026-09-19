@@ -1,0 +1,730 @@
+ .ledger/releaseledger/config.toml          |  1 +
+ README.md                                  | 11 +++++
+ docs/commands.md                           |  3 ++
+ docs/concepts.md                           |  4 ++
+ docs/quickstart.md                         | 11 +++++
+ docs/storage.md                            |  2 +
+ releaseledger/cli.py                       | 15 ++++++-
+ releaseledger/services/config.py           |  1 +
+ releaseledger/services/releases.py         | 39 +++++++++++++---
+ releaseledger/services/review.py           | 37 ++++++++++++++-
+ releaseledger/storage/config.py            | 32 +++++++++++++
+ skills/releaseledger/SKILL.md              | 17 ++++---
+ tests/test_cli.py                          | 13 ++++++
+ tests/test_config_v2.py                    | 29 ++++++++++++
+ tests/test_git_cli.py                      | 50 +++++++++++++++++++++
+ tests/test_release_review.py               | 72 ++++++++++++++++++++++++++++++
+ tests/test_releaseledger_skill_protocol.py |  9 ++++
+ 17 files changed, 328 insertions(+), 18 deletions(-)
+
+diff --git a/.ledger/releaseledger/config.toml b/.ledger/releaseledger/config.toml
+index f7fac12..bd66b65 100644
+--- a/.ledger/releaseledger/config.toml
++++ b/.ledger/releaseledger/config.toml
+@@ -54,3 +54,4 @@ require_clean_worktree = false
+ max_commits = 500
+ max_diff_chars_per_commit = 12000
+ candidate_status = "draft"
++tag_creation = "external"
+diff --git a/README.md b/README.md
+index fc5ba85..d3a6fcc 100644
+--- a/README.md
++++ b/README.md
+@@ -38,6 +38,17 @@ Taskledger, issue trackers, and PR descriptions are optional provenance context.
+ Release notes are generated from the commits reachable from the release target
+ and absent from the previous release target:
+
++## Git tag ownership
++
++Git tags remain evidence of shipped releases. Projects that publish releases through GitHub or another external system can set this Releaseledger policy in `.ledger/releaseledger/config.toml`:
++
++```toml
++[git]
++tag_creation = "external"
++```
++
++The default is `local`. In `external` mode, Releaseledger never emits an executable tag-creation command. It reports a manual publication handoff, permits read-only tag inspection and `git fetch --tags`, and still requires a real tag during `release check --phase published`.
++
+ ```bash
+ releaseledger release update 1.2.0 --git-base v1.1.0 --git-head HEAD
+ releaseledger git scaffold 1.2.0 --output entries.yaml
+diff --git a/docs/commands.md b/docs/commands.md
+index b08d0cf..ee5648b 100644
+--- a/docs/commands.md
++++ b/docs/commands.md
+@@ -127,6 +127,9 @@ releaseledger release show VERSION
+
+ `release prepare` is preparation-only. `--released-at` is optional and only adds proposed publication actions; it does not finalize or write changelog content. The command returns structured `next_actions` in JSON and renders the same ordered guidance for human users. For an undated current release, its direct strict changelog dry run includes `--unreleased`; do not remove that mode.
+
++`releaseledger config show` exposes the effective `git.tag_creation` policy in human and JSON output. A review or dated preparation can return a manual `await_external_git_tag` action without a `command`; human output displays its instruction instead of a blank command.
++
++For external publication, prepare and build the upcoming release locally, stop before tag creation, have the human publish the release through the configured external system, then run `git fetch --tags` and repeat reconciliation and published checks. `releaseledger release tag VERSION` creates a Releaseledger record only; it never means `git tag`.
+ `release tag` creates a release with status `released`. `release finalize`
+ transitions an existing release to `released` and is a compatible no-op when
+ that release is already finalized. `release cancel` marks a release as
+diff --git a/docs/concepts.md b/docs/concepts.md
+index e89b868..bcf428d 100644
+--- a/docs/concepts.md
++++ b/docs/concepts.md
+@@ -6,6 +6,10 @@ Releaseledger is git-first. Git tags and commit ranges define the shipped change
+ set. The canonical evidence of what shipped is `git rev-list --reverse --topo-order <base>..<head>`
+ — every commit reachable from the release target and absent from the previous release.
+
++## Git tag ownership policy
++
++Git tags remain evidence of shipped releases. The `[git]` key `tag_creation` defaults to `local` and accepts `local` or `external`. With `tag_creation = "external"`, an external publication workflow owns tag creation. This changes remediation ownership only; `release check --phase published` still fails until the externally created tag is visible.
++
+ Taskledger, issue trackers, and PR descriptions are optional provenance that enrich
+ curated entries, but releaseledger works correctly with only git.
+
+diff --git a/docs/quickstart.md b/docs/quickstart.md
+index 265de1b..380e8b5 100644
+--- a/docs/quickstart.md
++++ b/docs/quickstart.md
+@@ -117,6 +117,17 @@ releaseledger release finalize 1.2.0 --released-at 2026-06-14
+ releaseledger changelog build 1.2.0 --strict --output CHANGELOG.md
+ ```
+
++## Local and external tag workflows
++
++The default local policy keeps the existing explicit local release workflow. For a project where GitHub creates the tag, configure the policy before preparation:
++
++```toml
++[git]
++tag_creation = "external"
++```
++
++An undated preparation remains planned and unreleased. A dated preparation reports the external publication handoff before the published check. The agent must not run tag creation or release publication commands. The human publishes the release externally, then the agent may fetch the tag and resume reconciliation and `release check --phase published --strict`.
++
+ ## Correct a recorded version safely
+
+ Preview and apply a planned-version correction as one explicit workflow. The
+diff --git a/docs/storage.md b/docs/storage.md
+index 4b232b3..ee9bbd8 100644
+--- a/docs/storage.md
++++ b/docs/storage.md
+@@ -3,6 +3,8 @@
+ Releaseledger storage topology is owned by the canonical Ledgercore project
+ manifest. New projects use schema 3 and keep Releaseledger configuration at
+ `.ledger/releaseledger/config.toml`; authoritative data is a `data` mount and
++
++The `[git]` table may include `tag_creation = "local"` or `tag_creation = "external"`. The key is a Releaseledger release-workflow policy, not storage topology. It defaults to `local`; external mode assigns authoritative tag creation to the external publication workflow while published validation still requires tag evidence. `releaseledger config show` displays this policy.
+ derived indexes are a `cache` mount. Inspect the resolved topology with:
+
+ ```bash
+diff --git a/releaseledger/cli.py b/releaseledger/cli.py
+index c81c63a..2450516 100644
+--- a/releaseledger/cli.py
++++ b/releaseledger/cli.py
+@@ -533,6 +533,16 @@ def _release_human_summary(record: dict[str, object]) -> str:
+     return f"{version}  {status}  {date_value}  {title_text}".rstrip()
+
+
++def _render_action_instruction(action: dict[str, object]) -> str:
++    command = str(action.get("command") or "").strip()
++    if command:
++        return command
++    instruction = str(action.get("instruction") or "").strip()
++    if instruction:
++        return instruction
++    return str(action.get("code") or "")
++
++
+ @release_app.command("create")
+ def release_create_command(
+     ctx: typer.Context,
+@@ -1083,7 +1093,7 @@ def release_prepare_command(
+             for index, action in enumerate(actions, start=1):
+                 if not isinstance(action, dict):
+                     continue
+-                command = str(action.get("command", ""))
++                command = _render_action_instruction(action)
+                 reason = action.get("reason")
+                 labels = ["mutates" if action.get("mutates") else "read-only"]
+                 if action.get("requires_confirmation"):
+@@ -2931,7 +2941,7 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
+         for action in next_actions:
+             if not isinstance(action, dict):
+                 continue
+-            lines.append(f"  {action.get('command', '')}")
++            lines.append(f"  {_render_action_instruction(action)}")
+     lines.append(f"Result          {'OK' if result.get('ok') else 'FAIL'}")
+     return "\n".join(lines)
+
+@@ -4630,6 +4640,7 @@ def config_show_command(ctx: typer.Context) -> None:
+             f"Ledger parent: {cfg.get('ledger_parent_ref', '')}",
+             f"Ledger code: {cfg.get('ledger_code', '')}",
+             f"Branch guard: {cfg.get('ledger_branch_guard', 'off')}",
++            f"Git tag creation: {cfg.get('git', {}).get('tag_creation', '') if isinstance(cfg.get('git', {}), dict) else ''}",
+         ]
+         human = "\n".join(lines)
+         return result, [], human
+diff --git a/releaseledger/services/config.py b/releaseledger/services/config.py
+index e8992d7..dae21d2 100644
+--- a/releaseledger/services/config.py
++++ b/releaseledger/services/config.py
+@@ -237,6 +237,7 @@ def config_show(workspace_root: Path) -> dict[str, object]:
+                 "require_clean_worktree": config.git_require_clean_worktree,
+                 "max_commits": config.git_max_commits,
+                 "max_diff_chars_per_commit": config.git_max_diff_chars_per_commit,
++                "tag_creation": config.git_tag_creation,
+                 "candidate_status": config.git_candidate_status,
+             },
+         }
+diff --git a/releaseledger/services/releases.py b/releaseledger/services/releases.py
+index 13dfbee..a07d6d6 100644
+--- a/releaseledger/services/releases.py
++++ b/releaseledger/services/releases.py
+@@ -1257,6 +1257,7 @@ def prepare_release(
+ ) -> dict[str, object]:
+     """Create/update a planned release snapshot and export working artifacts."""
+     workspace_root = workspace_root.expanduser().resolve()
++    project_config = resolve_project_paths(workspace_root).project.config
+     output_dir = Path(output_dir)
+     if not output_dir.is_absolute():
+         output_dir = workspace_root / output_dir
+@@ -1445,15 +1446,36 @@ def prepare_release(
+                     "mutates": True,
+                     "requires_confirmation": True,
+                 },
++            ]
++        )
++        if project_config.git_tag_creation == "external":
++            next_actions.append(
+                 {
+-                    "code": "release_check_published",
+-                    "command": (
+-                        f"releaseledger release check {version} --phase published "
+-                        f"--strict --target-file {changelog_target}"
++                    "code": "await_external_git_tag",
++                    "instruction": (
++                        "Publish/create the release in the external release system "
++                        f"so it creates Git tag v{version.lstrip('v')}. "
++                        "Do not create the tag locally."
+                     ),
+-                    "mutates": False,
+-                },
+-            ]
++                    "manual_action_required": True,
++                    "mutates": True,
++                    "requires_confirmation": False,
++                    "suggested_tag": f"v{version.lstrip('v')}",
++                    "reason": (
++                        "git.tag_creation=external assigns Git tag creation to the "
++                        "external publication workflow."
++                    ),
++                }
++            )
++        next_actions.append(
++            {
++                "code": "release_check_published",
++                "command": (
++                    f"releaseledger release check {version} --phase published "
++                    f"--strict --target-file {changelog_target}"
++                ),
++                "mutates": False,
++            }
+         )
+     else:
+         next_actions.extend(
+@@ -1480,6 +1502,9 @@ def prepare_release(
+         "kind": "release_prepare",
+         "version": version,
+         "release": load_release(workspace_root, version).to_dict(),
++        "publication_policy": {
++            "tag_creation": project_config.git_tag_creation,
++        },
+         "proposed_released_at": released_at,
+         "audit": audit_result,
+         "outputs": {
+diff --git a/releaseledger/services/review.py b/releaseledger/services/review.py
+index 1275fde..ee35835 100644
+--- a/releaseledger/services/review.py
++++ b/releaseledger/services/review.py
+@@ -33,6 +33,7 @@ from releaseledger.services.releases import (
+     list_release_records,
+     reconcile_releases,
+ )
++from releaseledger.storage.config import GIT_DEFAULT_TAG_CREATION
+ from releaseledger.storage.store import (
+     load_commit_audit_sheet,
+     load_entries,
+@@ -361,7 +362,11 @@ def _compute_git_coverage(
+
+
+ def _problem_next_action(
+-    problem: dict[str, object], *, target_file: str, version: str
++    problem: dict[str, object],
++    *,
++    target_file: str,
++    version: str,
++    tag_creation: str = GIT_DEFAULT_TAG_CREATION,
+ ) -> dict[str, object] | None:
+     """Return one deterministic, explicitly scoped remediation action."""
+     kind = str(problem.get("kind", ""))
+@@ -404,6 +409,29 @@ def _problem_next_action(
+             if problem_version.startswith("v")
+             else f"v{problem_version}"
+         )
++        if tag_creation == "external":
++            return {
++                "code": "await_external_git_tag",
++                "instruction": (
++                    "Publish/create the release in the external release system so it "
++                    f"creates Git tag {tag}. Do not create the tag locally."
++                ),
++                "manual_action_required": True,
++                "mutates": True,
++                "requires_confirmation": False,
++                "scope": scope,
++                "suggested_tag": tag,
++                "reason": (
++                    "git.tag_creation=external assigns Git tag creation to the "
++                    "external publication workflow."
++                ),
++                "after_action": {
++                    "command": (
++                        f"releaseledger release check {problem_version} "
++                        "--phase published --strict"
++                    )
++                },
++            }
+         return {
+             "code": "create_external_git_tag",
+             "command": f"git tag {tag}",
+@@ -466,6 +494,7 @@ def _build_next_actions(
+     checks: dict[str, object],
+     proposed_released_at: str | None = None,
+     history_scope: str,
++    tag_creation: str = GIT_DEFAULT_TAG_CREATION,
+ ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+     """Build stable, machine-actionable release-check next actions."""
+     target_display = str(target_file or "CHANGELOG.md")
+@@ -479,7 +508,10 @@ def _build_next_actions(
+             if not isinstance(problem, dict):
+                 continue
+             action = _problem_next_action(
+-                problem, target_file=target_display, version=version
++                problem,
++                target_file=target_display,
++                version=version,
++                tag_creation=tag_creation,
+             )
+             if action is not None and action not in all_actions:
+                 all_actions.append(action)
+@@ -1226,6 +1258,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release
+         changelog=changelog_block,
+         checks=checks,
+         proposed_released_at=proposed_released_at,
++        tag_creation=project_config.git_tag_creation,
+         history_scope=history_scope,
+     )
+
+diff --git a/releaseledger/storage/config.py b/releaseledger/storage/config.py
+index d1873a8..7d921e1 100644
+--- a/releaseledger/storage/config.py
++++ b/releaseledger/storage/config.py
+@@ -48,7 +48,9 @@ __all__ = [
+     "GIT_DEFAULT_MAX_DIFF_CHARS",
+     "GIT_DEFAULT_PREVIOUS_TAG_PATTERNS",
+     "GIT_DEFAULT_REQUIRE_CLEAN_WORKTREE",
++    "GIT_DEFAULT_TAG_CREATION",
+     "GIT_INCLUDE_MERGE_POLICIES",
++    "GIT_TAG_CREATION_MODES",
+     "KEEPACHANGELOG_PREAMBLE",
+     "REMOVED_FIELDS",
+     "ProjectConfig",
+@@ -93,6 +95,8 @@ GIT_DEFAULT_REQUIRE_CLEAN_WORKTREE = False
+ GIT_DEFAULT_MAX_COMMITS = 500
+ GIT_DEFAULT_MAX_DIFF_CHARS = 12000
+ GIT_DEFAULT_CANDIDATE_STATUS = "draft"
++GIT_DEFAULT_TAG_CREATION = "local"
++GIT_TAG_CREATION_MODES: frozenset[str] = frozenset({"local", "external"})
+ GIT_INCLUDE_MERGE_POLICIES: frozenset[str] = frozenset(
+     {"never", "always", "nontrivial"}
+ )
+@@ -199,6 +203,7 @@ ALLOWED_GIT_KEYS: frozenset[str] = frozenset(
+         "max_commits",
+         "max_diff_chars_per_commit",
+         "candidate_status",
++        "tag_creation",
+     }
+ )
+
+@@ -246,6 +251,7 @@ class ProjectConfig:
+     changelog_generated_notice_text: str = "> **Generated by releaseledger.** Manual edits may be overwritten. Update releaseledger entries and rebuild this file instead."
+     changelog_generated_sentinel: str = "<!-- releaseledger:generated-file -->"
+     git_enabled: bool = True
++    git_tag_creation: str = GIT_DEFAULT_TAG_CREATION
+     git_default_base: str = GIT_DEFAULT_BASE
+     git_default_head: str = GIT_DEFAULT_HEAD
+     git_previous_tag_patterns: tuple[str, ...] = GIT_DEFAULT_PREVIOUS_TAG_PATTERNS
+@@ -482,6 +488,19 @@ def _config_from_dict(data: Mapping[str, Any], source: str) -> ProjectConfig:
+             code=CODE_CONFIG_ERROR,
+             exit_code=2,
+         )
++    git_tag_creation = _require_str(
++        git_section.get("tag_creation", GIT_DEFAULT_TAG_CREATION),
++        "git.tag_creation",
++        source,
++    )
++    if git_tag_creation not in GIT_TAG_CREATION_MODES:
++        raise LaunchError(
++            f"Config key 'git.tag_creation' in {source} must be one of"
++            f" {', '.join(sorted(GIT_TAG_CREATION_MODES))}.",
++            code=CODE_CONFIG_ERROR,
++            exit_code=2,
++        )
++
+     git_include_merges = _require_str(
+         git_section.get("include_merges", GIT_DEFAULT_INCLUDE_MERGES),
+         "git.include_merges",
+@@ -643,6 +662,7 @@ def _config_from_dict(data: Mapping[str, Any], source: str) -> ProjectConfig:
+             "changelog.generated_sentinel",
+             source,
+         ),
++        git_tag_creation=git_tag_creation,
+         git_enabled=_require_bool(
+             git_section.get("enabled", True), "git.enabled", source
+         ),
+@@ -798,6 +818,7 @@ def _config_to_tomlkit(config: ProjectConfig) -> tomlkit.TOMLDocument:
+     doc.add(tomlkit.comment("Git-first release evidence."))
+     git = tomlkit.table()
+     git.add("enabled", config.git_enabled)
++    git.add("tag_creation", config.git_tag_creation)
+     git.add("default_base", config.git_default_base)
+     git.add("default_head", config.git_default_head)
+     git.add("previous_tag_patterns", list(config.git_previous_tag_patterns))
+@@ -957,6 +978,7 @@ def _apply_config_to_document(
+         git = tomlkit.table()
+         document.add("git", git)
+     _set(git, "enabled", config.git_enabled)
++    _set(git, "tag_creation", config.git_tag_creation)
+     _set(git, "default_base", config.git_default_base)
+     _set(git, "default_head", config.git_default_head)
+     _set(git, "previous_tag_patterns", list(config.git_previous_tag_patterns))
+@@ -1065,6 +1087,16 @@ def _apply_changes(config: ProjectConfig, changes: Mapping[str, Any]) -> Project
+                 flat["changelog.footer"], "changelog.footer", "patch"
+             )
+         )
++    if "git.tag_creation" in flat:
++        value = _require_str(flat["git.tag_creation"], "git.tag_creation", "patch")
++        if value not in GIT_TAG_CREATION_MODES:
++            raise LaunchError(
++                f"Config key 'git.tag_creation' in patch must be one of"
++                f" {', '.join(sorted(GIT_TAG_CREATION_MODES))}.",
++                code=CODE_CONFIG_ERROR,
++                exit_code=2,
++            )
++        config = config.replace(git_tag_creation=value)
+     if "git.max_commits" in flat:
+         config = config.replace(
+             git_max_commits=_require_int(
+diff --git a/skills/releaseledger/SKILL.md b/skills/releaseledger/SKILL.md
+index 921289f..e564a86 100644
+--- a/skills/releaseledger/SKILL.md
++++ b/skills/releaseledger/SKILL.md
+@@ -124,12 +124,13 @@ releaseledger --root PATH --json release show VERSION
+ 1. Run `releaseledger --version`.
+ 2. Run `releaseledger storage where` or `releaseledger --json storage where`.
+ 3. Run `releaseledger config show` to verify the resolved configuration.
+-4. Run `releaseledger release list`.
+-5. For a known release, run `releaseledger release show VERSION`.
+-6. Run `releaseledger entry list VERSION`.
+-7. Generate machine context when needed:
+-   `releaseledger changelog preview VERSION --format json`.
+-8. Do not inspect `.releaseledger/` internals unless the CLI cannot start and the user explicitly requested forensic inspection.
++
++Read `git.tag_creation` before taking any release-publication action.
++
++When `git.tag_creation = "external"`, do not run `git tag`, `git push --tags`, or direct tag pushes. do not use `gh release create` or equivalent GitHub API or plugin publication actions. Tag creation belongs to the external release workflow. The agent may inspect tags with read-only commands such as `git tag --list`, `git tag --points-at`, `git show-ref --tags`, and `git ls-remote --tags`, and may run `git fetch --tags` to import externally created refs.
++
++In external mode, prepare and audit the release, update and validate the changelog, then stop and tell the user to publish the release through the external workflow. After the external tag exists, resume reconciliation and published checks. 4. Run `releaseledger release list`. 5. For a known release, run `releaseledger release show VERSION`. 6. Run `releaseledger entry list VERSION`. 7. Generate machine context when needed:
++`releaseledger changelog preview VERSION --format json`. 8. Do not inspect `.releaseledger/` internals unless the CLI cannot start and the user explicitly requested forensic inspection.
+
+ ## Release creation protocol
+
+@@ -196,10 +197,12 @@ releaseledger release check NEW --phase finalize --released-at DATE --strict \
+ releaseledger release finalize NEW --released-at DATE
+ releaseledger changelog build NEW --output CHANGELOG.md --strict --replace-existing
+ git add CHANGELOG.md .ledger/releaseledger && git commit -m "Release NEW"
+-git tag NEW  # explicit external action; Releaseledger does not create Git tags
++# With git.tag_creation=local, an explicitly approved local tag action may be used.
+ releaseledger release check NEW --phase published --strict --target-file CHANGELOG.md
+ ```
+
++When `git.tag_creation=external`, replace the local tag step with the external publication handoff. Never create or publish the tag through Git, GitHub CLI, or an API/tool.
++
+ Internal or rejected commits with complete audit evidence are accounted for by
+ the audit sheet and do not need unrelated public entry refs. Use
+ `--add-source-ref` to add genuine provenance while preserving existing refs;
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index 4a86069..f1db080 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -17,6 +17,7 @@ from typer.testing import CliRunner
+
+ from releaseledger import __version__
+ from releaseledger.cli import app
++from releaseledger.storage.config import update_project_config
+
+ runner = CliRunner()
+
+@@ -1342,6 +1343,8 @@ class TestPhase10ConfigCommands:
+         assert "Config path:" in result.stdout
+         assert "Ledger ref: main" in result.stdout
+
++        assert "Git tag creation: local" in result.stdout
++
+     def test_config_show_json_mode(self, tmp_path: Path) -> None:
+         _init_project(tmp_path)
+         payload = _json(_jrun(tmp_path, "config", "show"))
+@@ -1353,6 +1356,8 @@ class TestPhase10ConfigCommands:
+         assert "releaseledger_dir_policy" not in r["config"]  # removed v2
+         assert r["config"]["ledger_ref"] == "main"
+
++        assert r["config"]["git"]["tag_creation"] == "local"
++
+     def test_config_set_rejects_uninitialized(self, tmp_path: Path) -> None:
+         """config set without init raises error."""
+         result = _run(tmp_path, "config", "set", "releaseledger_dir", ".custom")
+@@ -1362,6 +1367,14 @@ class TestPhase10ConfigCommands:
+             or "no longer supported" in _human_error(result).lower()
+         )
+
++    def test_config_show_external_tag_creation(self, tmp_path: Path) -> None:
++        _init_project(tmp_path)
++        config_path = tmp_path / ".ledger" / "releaseledger" / "config.toml"
++        update_project_config(config_path, {"git.tag_creation": "external"})
++        result = _run(tmp_path, "config", "show")
++        assert result.exit_code == 0, result.stdout
++        assert "Git tag creation: external" in result.stdout
++
+     def test_config_set_rejects_external_without_flag(self, tmp_path: Path) -> None:
+         """config set releaseledger_dir is no longer supported."""
+         _init_project(tmp_path)
+diff --git a/tests/test_config_v2.py b/tests/test_config_v2.py
+index 47d44cd..4de3391 100644
+--- a/tests/test_config_v2.py
++++ b/tests/test_config_v2.py
+@@ -51,6 +51,35 @@ def test_load_default_v2_config(tmp_path: Path) -> None:
+     assert loaded.ledger_code == "rl"
+
+
++def test_default_git_tag_creation_is_local() -> None:
++    assert cfg.ProjectConfig().git_tag_creation == "local"
++
++
++def test_parse_external_git_tag_creation(tmp_path: Path) -> None:
++    path = tmp_path / "config.toml"
++    path.write_text('config_version = 2\n[git]\ntag_creation = "external"\n')
++    loaded = cfg.load_project_config(path)
++    assert loaded.git_tag_creation == "external"
++
++
++def test_reject_invalid_git_tag_creation(tmp_path: Path) -> None:
++    path = tmp_path / "config.toml"
++    path.write_text('config_version = 2\n[git]\ntag_creation = "github-maybe"\n')
++    with pytest.raises(LaunchError) as exc:
++        cfg.load_project_config(path)
++    assert exc.value.code == "CONFIG_ERROR"
++    assert "git.tag_creation" in str(exc.value)
++
++
++def test_git_tag_creation_renders_and_patches(tmp_path: Path) -> None:
++    path = tmp_path / "config.toml"
++    cfg.write_project_config(path, cfg.ProjectConfig(git_tag_creation="external"))
++    assert 'tag_creation = "external"' in path.read_text()
++    updated = cfg.update_project_config(path, {"git.tag_creation": "local"})
++    assert updated.git_tag_creation == "local"
++    assert cfg.load_project_config(path).git_tag_creation == "local"
++
++
+ def test_reject_v1_config_version(tmp_path: Path) -> None:
+     p = tmp_path / "config.toml"
+     p.write_text("config_version = 1\nledger_ref = 'main'\n")
+diff --git a/tests/test_git_cli.py b/tests/test_git_cli.py
+index 8d00385..813084f 100644
+--- a/tests/test_git_cli.py
++++ b/tests/test_git_cli.py
+@@ -11,6 +11,7 @@ import yaml
+ from typer.testing import CliRunner
+
+ from releaseledger.cli import app
++from releaseledger.storage.config import update_project_config
+
+ runner = CliRunner()
+
+@@ -404,6 +405,55 @@ def test_release_prepare_exports_snapshot_artifacts(tmp_path: Path) -> None:
+     assert prepared_batch["operation"] == "create"
+
+
++def test_release_prepare_external_tag_policy_has_manual_handoff(tmp_path: Path) -> None:
++    (tmp_path / "dated").mkdir()
++    repo, _sha_a, _sha_b = _setup_release(tmp_path / "dated")
++    update_project_config(
++        repo / ".ledger" / "releaseledger" / "config.toml",
++        {"git.tag_creation": "external"},
++    )
++    payload = _jrun(
++        repo,
++        "release",
++        "prepare",
++        "0.2.0",
++        "--released-at",
++        "2026-06-14",
++        "--output-dir",
++        str(tmp_path / "dated-work"),
++    )
++    result = payload["result"]
++    assert result["publication_policy"]["tag_creation"] == "external"
++    actions = result["next_actions"]
++    handoff_index = next(
++        i
++        for i, action in enumerate(actions)
++        if action["code"] == "await_external_git_tag"
++    )
++    published_index = next(
++        i
++        for i, action in enumerate(actions)
++        if action["code"] == "release_check_published"
++    )
++    assert handoff_index < published_index
++    assert not actions[handoff_index].get("command")
++    assert "Do not create the tag locally" in actions[handoff_index]["instruction"]
++
++
++def test_release_prepare_external_undated_keeps_upcoming_flow(tmp_path: Path) -> None:
++    (tmp_path / "undated").mkdir()
++    repo, _sha_a, _sha_b = _setup_release(tmp_path / "undated")
++    update_project_config(
++        repo / ".ledger" / "releaseledger" / "config.toml",
++        {"git.tag_creation": "external"},
++    )
++    payload = _jrun(repo, "release", "prepare", "0.2.0")
++    actions = payload["result"]["next_actions"]
++    assert not any(action["code"] == "await_external_git_tag" for action in actions)
++    assert actions[-2]["code"] == "release_check_current"
++    assert actions[-1]["code"] == "changelog_build_unreleased_dry_run"
++
++
+ def test_release_prepare_default_workspace_is_versioned_and_refreshable(
+     tmp_path: Path,
+ ) -> None:
+diff --git a/tests/test_release_review.py b/tests/test_release_review.py
+index aa7d3b6..638a612 100644
+--- a/tests/test_release_review.py
++++ b/tests/test_release_review.py
+@@ -10,6 +10,7 @@ isolated ``tmp_path`` style of ``tests/test_cli.py``.
+ from __future__ import annotations
+
+ import json
++import subprocess
+ from pathlib import Path
+
+ from typer.testing import CliRunner
+@@ -21,6 +22,7 @@ from releaseledger.services.review import (
+     _coverage_recommendation,
+     _scope_health_block,
+ )
++from releaseledger.storage.config import update_project_config
+
+ runner = CliRunner()
+
+@@ -426,6 +428,76 @@ def test_next_actions_are_lifecycle_aware_and_target_scoped() -> None:
+     assert "--release-date 2026-09-16" in dated_action["command"]
+
+
++def test_external_tag_policy_uses_manual_action_without_tag_command() -> None:
++    chain = {
++        "problems": [
++            {"kind": "release_without_tag", "version": "0.2.0", "scope": "target"}
++        ]
++    }
++    actions, _ = _build_next_actions(
++        version="0.2.0",
++        target_file=Path("CHANGELOG.md"),
++        chain=chain,
++        reconciliation={"problems": []},
++        audit=None,
++        changelog={"unreleased": False, "effective_release_date": "2026-09-16"},
++        checks={"changelog_ok": True, "target_changelog_ok": True},
++        history_scope="target",
++        tag_creation="external",
++    )
++    tag_action = next(
++        action for action in actions if action["code"] == "await_external_git_tag"
++    )
++    assert not tag_action.get("command")
++    assert tag_action["manual_action_required"] is True
++    assert tag_action["suggested_tag"] == "v0.2.0"
++    assert "Do not create the tag locally" in tag_action["instruction"]
++    assert not any(
++        str(action.get("command") or "").startswith("git tag ") for action in actions
++    )
++
++
++def test_external_policy_published_check_keeps_missing_tag_failure(
++    tmp_path: Path,
++) -> None:
++    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
++    _init(tmp_path)
++    _create_release(tmp_path, "0.2.0")
++    update_project_config(
++        tmp_path / ".ledger" / "releaseledger" / "config.toml",
++        {"git.tag_creation": "external"},
++    )
++    finalized = _run(
++        tmp_path, "release", "finalize", "0.2.0", "--released-at", "2026-09-16"
++    )
++    assert finalized.exit_code == 0, finalized.stdout
++    result = runner.invoke(
++        app,
++        [
++            "--cwd",
++            str(tmp_path),
++            "--json",
++            "release",
++            "check",
++            "0.2.0",
++            "--phase",
++            "published",
++            "--strict",
++        ],
++    )
++    assert result.exit_code != 0
++    payload = json.loads(result.stdout)
++    review = payload["result"]
++    assert "release_without_tag" in json.dumps(review)
++    tag_action = next(
++        action
++        for action in review["next_actions"]
++        if action["code"] == "await_external_git_tag"
++    )
++    assert not tag_action.get("command")
++    assert "Do not create the tag locally" in tag_action["instruction"]
++
++
+ def test_coverage_recommendation_uses_ref_provenance() -> None:
+     git_recommendation = _coverage_recommendation(
+         {"source_ref": "git:abc", "status": "missing", "origin": "git_range"}
+diff --git a/tests/test_releaseledger_skill_protocol.py b/tests/test_releaseledger_skill_protocol.py
+index 427f9ae..ec593f9 100644
+--- a/tests/test_releaseledger_skill_protocol.py
++++ b/tests/test_releaseledger_skill_protocol.py
+@@ -64,6 +64,15 @@ def test_prepare_guidance_is_structured_and_lifecycle_aware() -> None:
+     assert "dry-run/apply audit" in quickstart_text
+
+
++def test_skill_documents_external_git_tag_ownership() -> None:
++    text = SKILL.read_text(encoding="utf-8")
++    assert "git.tag_creation" in text
++    assert 'When `git.tag_creation = "external"`' in text
++    assert "do not run `git tag`" in text
++    assert "do not use `gh release create`" in text
++    assert "git fetch --tags" in text
++
++
+ def test_skill_does_not_document_undated_strict_single_build() -> None:
+     text = SKILL.read_text(encoding="utf-8")
+     assert "changelog build VERSION --dry-run --strict --unreleased" in text
