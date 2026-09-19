@@ -6,6 +6,10 @@ Releaseledger is git-first. Git tags and commit ranges define the shipped change
 set. The canonical evidence of what shipped is `git rev-list --reverse --topo-order <base>..<head>`
 — every commit reachable from the release target and absent from the previous release.
 
+## Git tag ownership policy
+
+Git tags remain evidence of shipped releases. The `[git]` key `tag_creation` defaults to `local` and accepts `local` or `external`. With `tag_creation = "external"`, an external publication workflow owns tag creation. This changes remediation ownership only; `release check --phase published` still fails until the externally created tag is visible.
+
 Taskledger, issue trackers, and PR descriptions are optional provenance that enrich
 curated entries, but releaseledger works correctly with only git.
 

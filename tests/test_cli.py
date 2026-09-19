@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 
 from releaseledger import __version__
 from releaseledger.cli import app
+from releaseledger.storage.config import update_project_config
 
 runner = CliRunner()
 
@@ -1342,6 +1343,8 @@ class TestPhase10ConfigCommands:
         assert "Config path:" in result.stdout
         assert "Ledger ref: main" in result.stdout
 
+        assert "Git tag creation: local" in result.stdout
+
     def test_config_show_json_mode(self, tmp_path: Path) -> None:
         _init_project(tmp_path)
         payload = _json(_jrun(tmp_path, "config", "show"))
@@ -1353,6 +1356,8 @@ class TestPhase10ConfigCommands:
         assert "releaseledger_dir_policy" not in r["config"]  # removed v2
         assert r["config"]["ledger_ref"] == "main"
 
+        assert r["config"]["git"]["tag_creation"] == "local"
+
     def test_config_set_rejects_uninitialized(self, tmp_path: Path) -> None:
         """config set without init raises error."""
         result = _run(tmp_path, "config", "set", "releaseledger_dir", ".custom")
@@ -1361,6 +1366,14 @@ class TestPhase10ConfigCommands:
             "not initialized" in _human_error(result).lower()
             or "no longer supported" in _human_error(result).lower()
         )
+
+    def test_config_show_external_tag_creation(self, tmp_path: Path) -> None:
+        _init_project(tmp_path)
+        config_path = tmp_path / ".ledger" / "releaseledger" / "config.toml"
+        update_project_config(config_path, {"git.tag_creation": "external"})
+        result = _run(tmp_path, "config", "show")
+        assert result.exit_code == 0, result.stdout
+        assert "Git tag creation: external" in result.stdout
 
     def test_config_set_rejects_external_without_flag(self, tmp_path: Path) -> None:
         """config set releaseledger_dir is no longer supported."""

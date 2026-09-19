@@ -3,6 +3,8 @@
 Releaseledger storage topology is owned by the canonical Ledgercore project
 manifest. New projects use schema 3 and keep Releaseledger configuration at
 `.ledger/releaseledger/config.toml`; authoritative data is a `data` mount and
+
+The `[git]` table may include `tag_creation = "local"` or `tag_creation = "external"`. The key is a Releaseledger release-workflow policy, not storage topology. It defaults to `local`; external mode assigns authoritative tag creation to the external publication workflow while published validation still requires tag evidence. `releaseledger config show` displays this policy.
 derived indexes are a `cache` mount. Inspect the resolved topology with:
 
 ```bash

@@ -237,6 +237,7 @@ def config_show(workspace_root: Path) -> dict[str, object]:
                 "require_clean_worktree": config.git_require_clean_worktree,
                 "max_commits": config.git_max_commits,
                 "max_diff_chars_per_commit": config.git_max_diff_chars_per_commit,
+                "tag_creation": config.git_tag_creation,
                 "candidate_status": config.git_candidate_status,
             },
         }

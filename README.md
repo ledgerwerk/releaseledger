@@ -38,6 +38,17 @@ Taskledger, issue trackers, and PR descriptions are optional provenance context.
 Release notes are generated from the commits reachable from the release target
 and absent from the previous release target:
 
+## Git tag ownership
+
+Git tags remain evidence of shipped releases. Projects that publish releases through GitHub or another external system can set this Releaseledger policy in `.ledger/releaseledger/config.toml`:
+
+```toml
+[git]
+tag_creation = "external"
+```
+
+The default is `local`. In `external` mode, Releaseledger never emits an executable tag-creation command. It reports a manual publication handoff, permits read-only tag inspection and `git fetch --tags`, and still requires a real tag during `release check --phase published`.
+
 ```bash
 releaseledger release update 1.2.0 --git-base v1.1.0 --git-head HEAD
 releaseledger git scaffold 1.2.0 --output entries.yaml

@@ -51,6 +51,35 @@ def test_load_default_v2_config(tmp_path: Path) -> None:
     assert loaded.ledger_code == "rl"
 
 
+def test_default_git_tag_creation_is_local() -> None:
+    assert cfg.ProjectConfig().git_tag_creation == "local"
+
+
+def test_parse_external_git_tag_creation(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('config_version = 2\n[git]\ntag_creation = "external"\n')
+    loaded = cfg.load_project_config(path)
+    assert loaded.git_tag_creation == "external"
+
+
+def test_reject_invalid_git_tag_creation(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('config_version = 2\n[git]\ntag_creation = "github-maybe"\n')
+    with pytest.raises(LaunchError) as exc:
+        cfg.load_project_config(path)
+    assert exc.value.code == "CONFIG_ERROR"
+    assert "git.tag_creation" in str(exc.value)
+
+
+def test_git_tag_creation_renders_and_patches(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    cfg.write_project_config(path, cfg.ProjectConfig(git_tag_creation="external"))
+    assert 'tag_creation = "external"' in path.read_text()
+    updated = cfg.update_project_config(path, {"git.tag_creation": "local"})
+    assert updated.git_tag_creation == "local"
+    assert cfg.load_project_config(path).git_tag_creation == "local"
+
+
 def test_reject_v1_config_version(tmp_path: Path) -> None:
     p = tmp_path / "config.toml"
     p.write_text("config_version = 1\nledger_ref = 'main'\n")

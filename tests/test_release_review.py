@@ -10,6 +10,7 @@ isolated ``tmp_path`` style of ``tests/test_cli.py``.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -21,6 +22,7 @@ from releaseledger.services.review import (
     _coverage_recommendation,
     _scope_health_block,
 )
+from releaseledger.storage.config import update_project_config
 
 runner = CliRunner()
 
@@ -424,6 +426,76 @@ def test_next_actions_are_lifecycle_aware_and_target_scoped() -> None:
     )
     assert "--dry-run" in dated_action["command"]
     assert "--release-date 2026-09-16" in dated_action["command"]
+
+
+def test_external_tag_policy_uses_manual_action_without_tag_command() -> None:
+    chain = {
+        "problems": [
+            {"kind": "release_without_tag", "version": "0.2.0", "scope": "target"}
+        ]
+    }
+    actions, _ = _build_next_actions(
+        version="0.2.0",
+        target_file=Path("CHANGELOG.md"),
+        chain=chain,
+        reconciliation={"problems": []},
+        audit=None,
+        changelog={"unreleased": False, "effective_release_date": "2026-09-16"},
+        checks={"changelog_ok": True, "target_changelog_ok": True},
+        history_scope="target",
+        tag_creation="external",
+    )
+    tag_action = next(
+        action for action in actions if action["code"] == "await_external_git_tag"
+    )
+    assert not tag_action.get("command")
+    assert tag_action["manual_action_required"] is True
+    assert tag_action["suggested_tag"] == "v0.2.0"
+    assert "Do not create the tag locally" in tag_action["instruction"]
+    assert not any(
+        str(action.get("command") or "").startswith("git tag ") for action in actions
+    )
+
+
+def test_external_policy_published_check_keeps_missing_tag_failure(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    _init(tmp_path)
+    _create_release(tmp_path, "0.2.0")
+    update_project_config(
+        tmp_path / ".ledger" / "releaseledger" / "config.toml",
+        {"git.tag_creation": "external"},
+    )
+    finalized = _run(
+        tmp_path, "release", "finalize", "0.2.0", "--released-at", "2026-09-16"
+    )
+    assert finalized.exit_code == 0, finalized.stdout
+    result = runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(tmp_path),
+            "--json",
+            "release",
+            "check",
+            "0.2.0",
+            "--phase",
+            "published",
+            "--strict",
+        ],
+    )
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    review = payload["result"]
+    assert "release_without_tag" in json.dumps(review)
+    tag_action = next(
+        action
+        for action in review["next_actions"]
+        if action["code"] == "await_external_git_tag"
+    )
+    assert not tag_action.get("command")
+    assert "Do not create the tag locally" in tag_action["instruction"]
 
 
 def test_coverage_recommendation_uses_ref_provenance() -> None:

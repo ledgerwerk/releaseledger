@@ -127,6 +127,9 @@ releaseledger release show VERSION
 
 `release prepare` is preparation-only. `--released-at` is optional and only adds proposed publication actions; it does not finalize or write changelog content. The command returns structured `next_actions` in JSON and renders the same ordered guidance for human users. For an undated current release, its direct strict changelog dry run includes `--unreleased`; do not remove that mode.
 
+`releaseledger config show` exposes the effective `git.tag_creation` policy in human and JSON output. A review or dated preparation can return a manual `await_external_git_tag` action without a `command`; human output displays its instruction instead of a blank command.
+
+For external publication, prepare and build the upcoming release locally, stop before tag creation, have the human publish the release through the configured external system, then run `git fetch --tags` and repeat reconciliation and published checks. `releaseledger release tag VERSION` creates a Releaseledger record only; it never means `git tag`.
 `release tag` creates a release with status `released`. `release finalize`
 transitions an existing release to `released` and is a compatible no-op when
 that release is already finalized. `release cancel` marks a release as

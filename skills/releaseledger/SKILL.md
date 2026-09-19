@@ -124,12 +124,13 @@ releaseledger --root PATH --json release show VERSION
 1. Run `releaseledger --version`.
 2. Run `releaseledger storage where` or `releaseledger --json storage where`.
 3. Run `releaseledger config show` to verify the resolved configuration.
-4. Run `releaseledger release list`.
-5. For a known release, run `releaseledger release show VERSION`.
-6. Run `releaseledger entry list VERSION`.
-7. Generate machine context when needed:
-   `releaseledger changelog preview VERSION --format json`.
-8. Do not inspect `.releaseledger/` internals unless the CLI cannot start and the user explicitly requested forensic inspection.
+
+Read `git.tag_creation` before taking any release-publication action.
+
+When `git.tag_creation = "external"`, do not run `git tag`, `git push --tags`, or direct tag pushes. do not use `gh release create` or equivalent GitHub API or plugin publication actions. Tag creation belongs to the external release workflow. The agent may inspect tags with read-only commands such as `git tag --list`, `git tag --points-at`, `git show-ref --tags`, and `git ls-remote --tags`, and may run `git fetch --tags` to import externally created refs.
+
+In external mode, prepare and audit the release, update and validate the changelog, then stop and tell the user to publish the release through the external workflow. After the external tag exists, resume reconciliation and published checks. 4. Run `releaseledger release list`. 5. For a known release, run `releaseledger release show VERSION`. 6. Run `releaseledger entry list VERSION`. 7. Generate machine context when needed:
+`releaseledger changelog preview VERSION --format json`. 8. Do not inspect `.releaseledger/` internals unless the CLI cannot start and the user explicitly requested forensic inspection.
 
 ## Release creation protocol
 
@@ -196,9 +197,11 @@ releaseledger release check NEW --phase finalize --released-at DATE --strict \
 releaseledger release finalize NEW --released-at DATE
 releaseledger changelog build NEW --output CHANGELOG.md --strict --replace-existing
 git add CHANGELOG.md .ledger/releaseledger && git commit -m "Release NEW"
-git tag NEW  # explicit external action; Releaseledger does not create Git tags
+# With git.tag_creation=local, an explicitly approved local tag action may be used.
 releaseledger release check NEW --phase published --strict --target-file CHANGELOG.md
 ```
+
+When `git.tag_creation=external`, replace the local tag step with the external publication handoff. Never create or publish the tag through Git, GitHub CLI, or an API/tool.
 
 Internal or rejected commits with complete audit evidence are accounted for by
 the audit sheet and do not need unrelated public entry refs. Use

@@ -33,6 +33,7 @@ from releaseledger.services.releases import (
     list_release_records,
     reconcile_releases,
 )
+from releaseledger.storage.config import GIT_DEFAULT_TAG_CREATION
 from releaseledger.storage.store import (
     load_commit_audit_sheet,
     load_entries,
@@ -361,7 +362,11 @@ def _compute_git_coverage(
 
 
 def _problem_next_action(
-    problem: dict[str, object], *, target_file: str, version: str
+    problem: dict[str, object],
+    *,
+    target_file: str,
+    version: str,
+    tag_creation: str = GIT_DEFAULT_TAG_CREATION,
 ) -> dict[str, object] | None:
     """Return one deterministic, explicitly scoped remediation action."""
     kind = str(problem.get("kind", ""))
@@ -404,6 +409,29 @@ def _problem_next_action(
             if problem_version.startswith("v")
             else f"v{problem_version}"
         )
+        if tag_creation == "external":
+            return {
+                "code": "await_external_git_tag",
+                "instruction": (
+                    "Publish/create the release in the external release system so it "
+                    f"creates Git tag {tag}. Do not create the tag locally."
+                ),
+                "manual_action_required": True,
+                "mutates": True,
+                "requires_confirmation": False,
+                "scope": scope,
+                "suggested_tag": tag,
+                "reason": (
+                    "git.tag_creation=external assigns Git tag creation to the "
+                    "external publication workflow."
+                ),
+                "after_action": {
+                    "command": (
+                        f"releaseledger release check {problem_version} "
+                        "--phase published --strict"
+                    )
+                },
+            }
         return {
             "code": "create_external_git_tag",
             "command": f"git tag {tag}",
@@ -466,6 +494,7 @@ def _build_next_actions(
     checks: dict[str, object],
     proposed_released_at: str | None = None,
     history_scope: str,
+    tag_creation: str = GIT_DEFAULT_TAG_CREATION,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Build stable, machine-actionable release-check next actions."""
     target_display = str(target_file or "CHANGELOG.md")
@@ -479,7 +508,10 @@ def _build_next_actions(
             if not isinstance(problem, dict):
                 continue
             action = _problem_next_action(
-                problem, target_file=target_display, version=version
+                problem,
+                target_file=target_display,
+                version=version,
+                tag_creation=tag_creation,
             )
             if action is not None and action not in all_actions:
                 all_actions.append(action)
@@ -1226,6 +1258,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
         changelog=changelog_block,
         checks=checks,
         proposed_released_at=proposed_released_at,
+        tag_creation=project_config.git_tag_creation,
         history_scope=history_scope,
     )
 

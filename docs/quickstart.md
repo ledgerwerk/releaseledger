@@ -117,6 +117,17 @@ releaseledger release finalize 1.2.0 --released-at 2026-06-14
 releaseledger changelog build 1.2.0 --strict --output CHANGELOG.md
 ```
 
+## Local and external tag workflows
+
+The default local policy keeps the existing explicit local release workflow. For a project where GitHub creates the tag, configure the policy before preparation:
+
+```toml
+[git]
+tag_creation = "external"
+```
+
+An undated preparation remains planned and unreleased. A dated preparation reports the external publication handoff before the published check. The agent must not run tag creation or release publication commands. The human publishes the release externally, then the agent may fetch the tag and resume reconciliation and `release check --phase published --strict`.
+
 ## Correct a recorded version safely
 
 Preview and apply a planned-version correction as one explicit workflow. The

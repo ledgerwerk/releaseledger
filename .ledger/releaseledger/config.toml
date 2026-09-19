@@ -54,3 +54,4 @@ require_clean_worktree = false
 max_commits = 500
 max_diff_chars_per_commit = 12000
 candidate_status = "draft"
+tag_creation = "external"

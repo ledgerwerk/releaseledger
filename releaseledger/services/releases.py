@@ -1257,6 +1257,7 @@ def prepare_release(
 ) -> dict[str, object]:
     """Create/update a planned release snapshot and export working artifacts."""
     workspace_root = workspace_root.expanduser().resolve()
+    project_config = resolve_project_paths(workspace_root).project.config
     output_dir = Path(output_dir)
     if not output_dir.is_absolute():
         output_dir = workspace_root / output_dir
@@ -1445,15 +1446,36 @@ def prepare_release(
                     "mutates": True,
                     "requires_confirmation": True,
                 },
-                {
-                    "code": "release_check_published",
-                    "command": (
-                        f"releaseledger release check {version} --phase published "
-                        f"--strict --target-file {changelog_target}"
-                    ),
-                    "mutates": False,
-                },
             ]
+        )
+        if project_config.git_tag_creation == "external":
+            next_actions.append(
+                {
+                    "code": "await_external_git_tag",
+                    "instruction": (
+                        "Publish/create the release in the external release system "
+                        f"so it creates Git tag v{version.lstrip('v')}. "
+                        "Do not create the tag locally."
+                    ),
+                    "manual_action_required": True,
+                    "mutates": True,
+                    "requires_confirmation": False,
+                    "suggested_tag": f"v{version.lstrip('v')}",
+                    "reason": (
+                        "git.tag_creation=external assigns Git tag creation to the "
+                        "external publication workflow."
+                    ),
+                }
+            )
+        next_actions.append(
+            {
+                "code": "release_check_published",
+                "command": (
+                    f"releaseledger release check {version} --phase published "
+                    f"--strict --target-file {changelog_target}"
+                ),
+                "mutates": False,
+            }
         )
     else:
         next_actions.extend(
@@ -1480,6 +1502,9 @@ def prepare_release(
         "kind": "release_prepare",
         "version": version,
         "release": load_release(workspace_root, version).to_dict(),
+        "publication_policy": {
+            "tag_creation": project_config.git_tag_creation,
+        },
         "proposed_released_at": released_at,
         "audit": audit_result,
         "outputs": {

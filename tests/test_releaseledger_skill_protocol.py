@@ -64,6 +64,15 @@ def test_prepare_guidance_is_structured_and_lifecycle_aware() -> None:
     assert "dry-run/apply audit" in quickstart_text
 
 
+def test_skill_documents_external_git_tag_ownership() -> None:
+    text = SKILL.read_text(encoding="utf-8")
+    assert "git.tag_creation" in text
+    assert 'When `git.tag_creation = "external"`' in text
+    assert "do not run `git tag`" in text
+    assert "do not use `gh release create`" in text
+    assert "git fetch --tags" in text
+
+
 def test_skill_does_not_document_undated_strict_single_build() -> None:
     text = SKILL.read_text(encoding="utf-8")
     assert "changelog build VERSION --dry-run --strict --unreleased" in text

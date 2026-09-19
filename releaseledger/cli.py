@@ -533,6 +533,16 @@ def _release_human_summary(record: dict[str, object]) -> str:
     return f"{version}  {status}  {date_value}  {title_text}".rstrip()
 
 
+def _render_action_instruction(action: dict[str, object]) -> str:
+    command = str(action.get("command") or "").strip()
+    if command:
+        return command
+    instruction = str(action.get("instruction") or "").strip()
+    if instruction:
+        return instruction
+    return str(action.get("code") or "")
+
+
 @release_app.command("create")
 def release_create_command(
     ctx: typer.Context,
@@ -1083,7 +1093,7 @@ def release_prepare_command(
             for index, action in enumerate(actions, start=1):
                 if not isinstance(action, dict):
                     continue
-                command = str(action.get("command", ""))
+                command = _render_action_instruction(action)
                 reason = action.get("reason")
                 labels = ["mutates" if action.get("mutates") else "read-only"]
                 if action.get("requires_confirmation"):
@@ -2931,7 +2941,7 @@ def _render_release_check_human(version: str, result: dict[str, object]) -> str:
         for action in next_actions:
             if not isinstance(action, dict):
                 continue
-            lines.append(f"  {action.get('command', '')}")
+            lines.append(f"  {_render_action_instruction(action)}")
     lines.append(f"Result          {'OK' if result.get('ok') else 'FAIL'}")
     return "\n".join(lines)
 
@@ -4630,6 +4640,7 @@ def config_show_command(ctx: typer.Context) -> None:
             f"Ledger parent: {cfg.get('ledger_parent_ref', '')}",
             f"Ledger code: {cfg.get('ledger_code', '')}",
             f"Branch guard: {cfg.get('ledger_branch_guard', 'off')}",
+            f"Git tag creation: {cfg.get('git', {}).get('tag_creation', '') if isinstance(cfg.get('git', {}), dict) else ''}",
         ]
         human = "\n".join(lines)
         return result, [], human

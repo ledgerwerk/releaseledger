@@ -11,6 +11,7 @@ import yaml
 from typer.testing import CliRunner
 
 from releaseledger.cli import app
+from releaseledger.storage.config import update_project_config
 
 runner = CliRunner()
 
@@ -402,6 +403,55 @@ def test_release_prepare_exports_snapshot_artifacts(tmp_path: Path) -> None:
     )
     assert prepared_batch["schema"] == "releaseledger.entry-batch.v1"
     assert prepared_batch["operation"] == "create"
+
+
+def test_release_prepare_external_tag_policy_has_manual_handoff(tmp_path: Path) -> None:
+    (tmp_path / "dated").mkdir()
+    repo, _sha_a, _sha_b = _setup_release(tmp_path / "dated")
+    update_project_config(
+        repo / ".ledger" / "releaseledger" / "config.toml",
+        {"git.tag_creation": "external"},
+    )
+    payload = _jrun(
+        repo,
+        "release",
+        "prepare",
+        "0.2.0",
+        "--released-at",
+        "2026-06-14",
+        "--output-dir",
+        str(tmp_path / "dated-work"),
+    )
+    result = payload["result"]
+    assert result["publication_policy"]["tag_creation"] == "external"
+    actions = result["next_actions"]
+    handoff_index = next(
+        i
+        for i, action in enumerate(actions)
+        if action["code"] == "await_external_git_tag"
+    )
+    published_index = next(
+        i
+        for i, action in enumerate(actions)
+        if action["code"] == "release_check_published"
+    )
+    assert handoff_index < published_index
+    assert not actions[handoff_index].get("command")
+    assert "Do not create the tag locally" in actions[handoff_index]["instruction"]
+
+
+def test_release_prepare_external_undated_keeps_upcoming_flow(tmp_path: Path) -> None:
+    (tmp_path / "undated").mkdir()
+    repo, _sha_a, _sha_b = _setup_release(tmp_path / "undated")
+    update_project_config(
+        repo / ".ledger" / "releaseledger" / "config.toml",
+        {"git.tag_creation": "external"},
+    )
+    payload = _jrun(repo, "release", "prepare", "0.2.0")
+    actions = payload["result"]["next_actions"]
+    assert not any(action["code"] == "await_external_git_tag" for action in actions)
+    assert actions[-2]["code"] == "release_check_current"
+    assert actions[-1]["code"] == "changelog_build_unreleased_dry_run"
 
 
 def test_release_prepare_default_workspace_is_versioned_and_refreshable(
