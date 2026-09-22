@@ -1,7 +1,7 @@
 [![PyPI - Version](https://img.shields.io/pypi/v/releaseledger)](https://pypi.org/project/releaseledger/)
 ![PyPI - Python Version](https://img.shields.io/pypi/pyversions/releaseledger)
 ![PyPI - Downloads](https://img.shields.io/pypi/dm/releaseledger)
-[![codecov](https://codecov.io/gh/holgern/releaseledger/graph/badge.svg?token=XH3tdO0CqJ)](https://codecov.io/gh/holgern/releaseledger)
+[![codecov](https://codecov.io/gh/ledgerwerk/releaseledger/graph/badge.svg?token=XH3tdO0CqJ)](https://codecov.io/gh/ledgerwerk/releaseledger)
 
 # releaseledger
 
