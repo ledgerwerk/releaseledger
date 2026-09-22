@@ -6,6 +6,14 @@ Releaseledger is git-first. Git tags and commit ranges define the shipped change
 set. The canonical evidence of what shipped is `git rev-list --reverse --topo-order <base>..<head>`
 — every commit reachable from the release target and absent from the previous release.
 
+## Agent Skill source and discovery
+
+The repository-maintained source skill is `skills/releaseledger/SKILL.md`. It is a canonical source file and legacy compatibility location, not a package-bundled skill that automatically becomes visible to an external agent.
+
+Install the skill for agents at `.agents/skills/releaseledger/SKILL.md` in a project or at `~/.agents/skills/releaseledger/SKILL.md` for the current user. Releaseledger also recognizes supported OpenCode, GitHub Copilot and VS Code, Claude, Gemini, Cursor, and Codex compatibility roots, including an injectable administrator equivalent of `/etc/codex/skills` for diagnostics.
+
+Skill diagnostics use a bounded filesystem registry. They inspect all known local copies, validate the required `name`, `description`, and integer `protocol` metadata, and report conflicts instead of assuming that the first existing path is active. Host runtimes have different precedence rules, so Releaseledger does not claim to reproduce universal activation precedence.
+
 ## Git tag ownership policy
 
 Git tags remain evidence of shipped releases. The `[git]` key `tag_creation` defaults to `local` and accepts `local` or `external`. With `tag_creation = "external"`, an external publication workflow owns tag creation. This changes remediation ownership only; `release check --phase published` still fails until the externally created tag is visible.

@@ -52,6 +52,25 @@ created by new projects:
       indexes/
 ```
 
+## Agent Skill discovery
+
+Releaseledger keeps its canonical Agent Skill source at:
+
+```text
+skills/releaseledger/SKILL.md
+```
+
+For agent-visible installations, use the portable `.agents/skills` location first:
+
+```text
+<project>/.agents/skills/releaseledger/SKILL.md
+~/.agents/skills/releaseledger/SKILL.md
+```
+
+The diagnostics also inspect these bounded host-native project roots: `.opencode/skills`, legacy `.opencode/skill`, `.github/skills`, `.claude/skills`, `.gemini/skills`, `.cursor/skills`, and Cursor's `.codex/skills` compatibility root. The corresponding user roots are supported under `~/.config/opencode`, `~/.copilot`, `~/.claude`, `~/.gemini`, `~/.cursor`, and `~/.codex`. Codex administrator skills can be checked with the `/etc/codex/skills` root.
+
+Run `releaseledger doctor --check` after installing or updating a skill. Diagnostics inspect every known local copy and report malformed, stale, or conflicting metadata conservatively. This order is a deterministic Releaseledger display order, not a claim about which copy every host activates.
+
 Releaseledger is git-first. The recommended workflow uses git commit ranges
 as the canonical evidence of shipped changes.
 

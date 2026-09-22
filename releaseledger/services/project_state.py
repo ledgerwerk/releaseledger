@@ -141,6 +141,49 @@ def project_info(root: Path) -> dict[str, object]:
     }
 
 
+def _skill_protocol_message(protocol: dict[str, object]) -> str:
+    state = str(protocol.get("skill_state", ""))
+    expected = protocol.get("skill_protocol", "")
+    if state == "missing":
+        return (
+            "Releaseledger Agent Skill was not found in supported local "
+            "discovery locations."
+        )
+    if state == "match":
+        return f"All discovered Releaseledger Agent Skill copies match CLI protocol {expected}."
+    if state == "mismatch":
+        return (
+            "Discovered Releaseledger Agent Skill protocol does not match "
+            f"CLI protocol {expected}."
+        )
+    if state == "conflict":
+        return (
+            "Multiple Releaseledger Agent Skill copies were found with "
+            "conflicting or invalid protocol metadata."
+        )
+    return "Discovered Releaseledger Agent Skill copies could not be validated."
+
+
+def _skill_protocol_remediation(protocol: dict[str, object]) -> list[str]:
+    state = str(protocol.get("skill_state", ""))
+    if state == "match":
+        return []
+    if state == "missing":
+        return [
+            (
+                "Install the skill at .agents/skills/releaseledger/SKILL.md for "
+                "this project, or ~/.agents/skills/releaseledger/SKILL.md for the "
+                "current user."
+            )
+        ]
+    return [
+        (
+            "Update or remove stale Releaseledger skill copies listed in the "
+            "diagnostic data, then rerun `releaseledger doctor --check`."
+        )
+    ]
+
+
 def project_doctor(root: Path, *, check: bool = False) -> dict[str, object]:
     """Run deterministic diagnostics without applying repairs."""
     storage = storage_where(root)
@@ -211,14 +254,8 @@ def project_doctor(root: Path, *, check: bool = False) -> dict[str, object]:
         {
             "code": "skill_protocol",
             "status": "pass" if protocol_matches else "fail",
-            "message": (
-                "Releaseledger skill protocol matches the CLI."
-                if protocol_matches
-                else "Releaseledger skill protocol does not match the CLI.",
-            ),
-            "remediation": []
-            if protocol_matches
-            else ["Install or update skills/releaseledger/SKILL.md."],
+            "message": _skill_protocol_message(protocol),
+            "remediation": _skill_protocol_remediation(protocol),
             "data": protocol,
         },
     )

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from releaseledger import protocol
+
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "releaseledger" / "SKILL.md"
 
@@ -77,3 +79,22 @@ def test_skill_does_not_document_undated_strict_single_build() -> None:
     text = SKILL.read_text(encoding="utf-8")
     assert "changelog build VERSION --dry-run --strict --unreleased" in text
     assert "release prepare VERSION --previous PREV_VERSION" in text
+
+
+def test_canonical_skill_has_valid_discoverable_metadata() -> None:
+    metadata, error = protocol.read_skill_metadata(SKILL)
+    assert error is None
+    assert metadata is not None
+    assert metadata.name == protocol.SKILL_NAME
+    assert metadata.description
+    assert metadata.protocol == protocol.SKILL_PROTOCOL_VERSION
+
+
+def test_canonical_skill_is_source_only_not_package_data() -> None:
+    package_skill = (
+        ROOT / "releaseledger" / "resources" / "skills" / "releaseledger" / "SKILL.md"
+    )
+    assert not package_skill.exists()
+    assert not (
+        ROOT / "releaseledger" / "skills" / "releaseledger" / "SKILL.md"
+    ).exists()
