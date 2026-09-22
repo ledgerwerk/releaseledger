@@ -1,0 +1,31 @@
+{
+  "candidate_count": 1,
+  "candidates": [
+    {
+      "additions": 1005,
+      "deletions": 32,
+      "patch_file": "848795a.patch",
+      "patch_sha256": "87dd927ca3057991927237b1f804fbfc3593a3912dcef91fde6952617231754f",
+      "paths": [
+        "docs/concepts.md",
+        "docs/quickstart.md",
+        "releaseledger/protocol.py",
+        "releaseledger/services/project_state.py",
+        "tests/test_cli_common_commands.py",
+        "tests/test_protocol.py",
+        "tests/test_releaseledger_skill_protocol.py"
+      ],
+      "sha": "848795af918b53e25ec679a37bf4ac16df9c3043",
+      "short_sha": "848795a",
+      "source_ref": "git:848795af918b53e25ec679a37bf4ac16df9c3043"
+    }
+  ],
+  "git_base_ref": "ced19030fa9d36a003ef5bedbf2880b0a21762e6",
+  "git_base_sha": "ced19030fa9d36a003ef5bedbf2880b0a21762e6",
+  "git_head_ref": "848795af918b53e25ec679a37bf4ac16df9c3043",
+  "git_head_sha": "848795af918b53e25ec679a37bf4ac16df9c3043",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.4.10",
+  "schema_version": 1
+}

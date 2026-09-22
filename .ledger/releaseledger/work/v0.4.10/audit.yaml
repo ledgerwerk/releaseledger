@@ -1,0 +1,35 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 1
+release_version: v0.4.10
+git_base_ref: v0.4.9
+git_base_sha: ced19030fa9d36a003ef5bedbf2880b0a21762e6
+git_head_ref: HEAD
+git_head_sha: 848795af918b53e25ec679a37bf4ac16df9c3043
+git_range: ced19030fa9d36a003ef5bedbf2880b0a21762e6..848795af918b53e25ec679a37bf4ac16df9c3043
+commit_count: 1
+rows:
+  - sha: 848795af918b53e25ec679a37bf4ac16df9c3043
+    source_ref: git:848795af918b53e25ec679a37bf4ac16df9c3043
+    short_sha: 848795a
+    changed_paths:
+      - docs/concepts.md
+      - docs/quickstart.md
+      - releaseledger/protocol.py
+      - releaseledger/services/project_state.py
+      - tests/test_cli_common_commands.py
+      - tests/test_protocol.py
+      - tests/test_releaseledger_skill_protocol.py
+    stats:
+      files_changed: 7
+      insertions: 1005
+      deletions: 32
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "feat: better skill location detection"

@@ -1,0 +1,1162 @@
+ docs/concepts.md                           |   8 +
+ docs/quickstart.md                         |  19 ++
+ releaseledger/protocol.py                  | 418 +++++++++++++++++++++++++++--
+ releaseledger/services/project_state.py    |  53 +++-
+ tests/test_cli_common_commands.py          | 128 +++++++++
+ tests/test_protocol.py                     | 390 +++++++++++++++++++++++++++
+ tests/test_releaseledger_skill_protocol.py |  21 ++
+ 7 files changed, 1005 insertions(+), 32 deletions(-)
+
+diff --git a/docs/concepts.md b/docs/concepts.md
+index bcf428d..bd6ea1a 100644
+--- a/docs/concepts.md
++++ b/docs/concepts.md
+@@ -6,6 +6,14 @@ Releaseledger is git-first. Git tags and commit ranges define the shipped change
+ set. The canonical evidence of what shipped is `git rev-list --reverse --topo-order <base>..<head>`
+ — every commit reachable from the release target and absent from the previous release.
+
++## Agent Skill source and discovery
++
++The repository-maintained source skill is `skills/releaseledger/SKILL.md`. It is a canonical source file and legacy compatibility location, not a package-bundled skill that automatically becomes visible to an external agent.
++
++Install the skill for agents at `.agents/skills/releaseledger/SKILL.md` in a project or at `~/.agents/skills/releaseledger/SKILL.md` for the current user. Releaseledger also recognizes supported OpenCode, GitHub Copilot and VS Code, Claude, Gemini, Cursor, and Codex compatibility roots, including an injectable administrator equivalent of `/etc/codex/skills` for diagnostics.
++
++Skill diagnostics use a bounded filesystem registry. They inspect all known local copies, validate the required `name`, `description`, and integer `protocol` metadata, and report conflicts instead of assuming that the first existing path is active. Host runtimes have different precedence rules, so Releaseledger does not claim to reproduce universal activation precedence.
++
+ ## Git tag ownership policy
+
+ Git tags remain evidence of shipped releases. The `[git]` key `tag_creation` defaults to `local` and accepts `local` or `external`. With `tag_creation = "external"`, an external publication workflow owns tag creation. This changes remediation ownership only; `release check --phase published` still fails until the externally created tag is visible.
+diff --git a/docs/quickstart.md b/docs/quickstart.md
+index 380e8b5..bff8624 100644
+--- a/docs/quickstart.md
++++ b/docs/quickstart.md
+@@ -52,6 +52,25 @@ created by new projects:
+       indexes/
+ ```
+
++## Agent Skill discovery
++
++Releaseledger keeps its canonical Agent Skill source at:
++
++```text
++skills/releaseledger/SKILL.md
++```
++
++For agent-visible installations, use the portable `.agents/skills` location first:
++
++```text
++<project>/.agents/skills/releaseledger/SKILL.md
++~/.agents/skills/releaseledger/SKILL.md
++```
++
++The diagnostics also inspect these bounded host-native project roots: `.opencode/skills`, legacy `.opencode/skill`, `.github/skills`, `.claude/skills`, `.gemini/skills`, `.cursor/skills`, and Cursor's `.codex/skills` compatibility root. The corresponding user roots are supported under `~/.config/opencode`, `~/.copilot`, `~/.claude`, `~/.gemini`, `~/.cursor`, and `~/.codex`. Codex administrator skills can be checked with the `/etc/codex/skills` root.
++
++Run `releaseledger doctor --check` after installing or updating a skill. Diagnostics inspect every known local copy and report malformed, stale, or conflicting metadata conservatively. This order is a deterministic Releaseledger display order, not a claim about which copy every host activates.
++
+ Releaseledger is git-first. The recommended workflow uses git commit ranges
+ as the canonical evidence of shipped changes.
+
+diff --git a/releaseledger/protocol.py b/releaseledger/protocol.py
+index ec5c84f..4de457e 100644
+--- a/releaseledger/protocol.py
++++ b/releaseledger/protocol.py
+@@ -2,50 +2,420 @@
+
+ from __future__ import annotations
+
++from dataclasses import dataclass
++from hashlib import sha256
+ from pathlib import Path
+ from typing import Any
+
+ import yaml
+
++SKILL_NAME = "releaseledger"
++SKILL_FILENAME = "SKILL.md"
+ SKILL_PROTOCOL_VERSION = 2
++_DEFAULT_ADMIN_SKILL_ROOT = Path("/etc/codex/skills")
+
+
+-def skill_path(workspace_root: Path) -> Path | None:
+-    """Find the repository's external releaseledger skill."""
+-    candidates = (
+-        workspace_root / "skills" / "releaseledger" / "SKILL.md",
+-        Path(__file__).resolve().parents[1] / "skills" / "releaseledger" / "SKILL.md",
++@dataclass(frozen=True)
++class SkillLocation:
++    """A supported local location where an Agent Skill may be installed."""
++
++    source: str
++    scope: str
++    providers: tuple[str, ...]
++    path: Path
++    legacy: bool = False
++
++
++@dataclass(frozen=True)
++class SkillMetadata:
++    """Validated or partially parsed metadata from a skill frontmatter block."""
++
++    name: str | None
++    description: str | None
++    protocol: int | None
++
++
++@dataclass(frozen=True)
++class SkillProbe:
++    """The safe result of inspecting one discovered skill candidate."""
++
++    location: SkillLocation
++    exists: bool
++    name: str | None
++    description: str | None
++    protocol: int | None
++    error: str | None
++    sha256: str | None = None
++
++    def to_dict(self) -> dict[str, object]:
++        """Serialize a probe without exposing skill contents."""
++        return {
++            "path": str(self.location.path),
++            "source": self.location.source,
++            "scope": self.location.scope,
++            "providers": list(self.location.providers),
++            "legacy": self.location.legacy,
++            "name": self.name,
++            "declared_protocol": self.protocol,
++            "matches_cli": self.protocol == SKILL_PROTOCOL_VERSION,
++            "error": self.error,
++        }
++
++
++_PROJECT_LOCATION_SPECS: tuple[tuple[str, str, tuple[str, ...], bool], ...] = (
++    (
++        "project_agents",
++        ".agents/skills",
++        ("codex", "opencode", "copilot", "gemini", "cursor"),
++        False,
++    ),
++    ("project_github", ".github/skills", ("copilot", "vscode"), False),
++    ("project_opencode", ".opencode/skills", ("opencode",), False),
++    (
++        "project_opencode_legacy",
++        ".opencode/skill",
++        ("opencode",),
++        True,
++    ),
++    (
++        "project_claude",
++        ".claude/skills",
++        ("opencode", "copilot", "claude", "cursor"),
++        False,
++    ),
++    ("project_gemini", ".gemini/skills", ("gemini",), False),
++    ("project_cursor", ".cursor/skills", ("cursor",), False),
++    ("project_codex", ".codex/skills", ("cursor",), False),
++)
++
++_USER_LOCATION_SPECS: tuple[tuple[str, str, tuple[str, ...], bool], ...] = (
++    (
++        "user_agents",
++        ".agents/skills",
++        ("codex", "opencode", "copilot", "gemini", "cursor"),
++        False,
++    ),
++    ("user_opencode", ".config/opencode/skills", ("opencode",), False),
++    (
++        "user_opencode_legacy",
++        ".config/opencode/skill",
++        ("opencode",),
++        True,
++    ),
++    ("user_copilot", ".copilot/skills", ("copilot",), False),
++    (
++        "user_claude",
++        ".claude/skills",
++        ("opencode", "vscode", "claude", "cursor"),
++        False,
++    ),
++    ("user_gemini", ".gemini/skills", ("gemini",), False),
++    ("user_cursor", ".cursor/skills", ("cursor",), False),
++    ("user_codex", ".codex/skills", ("cursor",), False),
++)
++
++
++def _resolved(path: Path) -> Path:
++    return Path(path).expanduser().resolve()
++
++
++def _project_search_dirs(workspace_root: Path, start_dir: Path) -> tuple[Path, ...]:
++    """Return the bounded current-directory-to-workspace search chain."""
++    workspace = _resolved(workspace_root)
++    start = _resolved(start_dir)
++    try:
++        start.relative_to(workspace)
++    except ValueError:
++        return (workspace,)
++
++    result: list[Path] = []
++    current = start
++    while True:
++        if current not in result:
++            result.append(current)
++        if current == workspace:
++            break
++        current = current.parent
++    return tuple(result)
++
++
++def _skill_path(root: Path, relative_root: str) -> Path:
++    return root / relative_root / SKILL_NAME / SKILL_FILENAME
++
++
++def skill_locations(
++    workspace_root: Path,
++    *,
++    start_dir: Path | None = None,
++    home: Path | None = None,
++    admin_skill_root: Path | None = None,
++) -> tuple[SkillLocation, ...]:
++    """Enumerate supported local skill locations in deterministic display order."""
++    workspace = _resolved(workspace_root)
++    search_dirs = _project_search_dirs(workspace, start_dir or workspace)
++    user_home = _resolved(home or Path.home())
++    admin_root = _resolved(admin_skill_root or _DEFAULT_ADMIN_SKILL_ROOT)
++    locations: list[SkillLocation] = []
++    seen: set[Path] = set()
++
++    def add(location: SkillLocation) -> None:
++        if location.path in seen:
++            return
++        seen.add(location.path)
++        locations.append(location)
++
++    for source, relative_root, providers, legacy in _PROJECT_LOCATION_SPECS:
++        for directory in search_dirs:
++            add(
++                SkillLocation(
++                    source=source,
++                    scope="project",
++                    providers=providers,
++                    path=_skill_path(directory, relative_root),
++                    legacy=legacy,
++                )
++            )
++
++    add(
++        SkillLocation(
++            source="project_releaseledger_legacy",
++            scope="project",
++            providers=(),
++            path=_skill_path(workspace, "skills"),
++            legacy=True,
++        )
++    )
++
++    for source, relative_root, providers, legacy in _USER_LOCATION_SPECS:
++        add(
++            SkillLocation(
++                source=source,
++                scope="user",
++                providers=providers,
++                path=_skill_path(user_home, relative_root),
++                legacy=legacy,
++            )
++        )
++
++    add(
++        SkillLocation(
++            source="admin_codex",
++            scope="admin",
++            providers=("codex",),
++            path=_skill_path(admin_root, ""),
++        )
+     )
+-    return next((candidate for candidate in candidates if candidate.is_file()), None)
++    return tuple(locations)
++
++
++def _frontmatter(text: str) -> tuple[dict[str, Any] | None, str | None]:
++    lines = text.splitlines()
++    if not lines or lines[0].strip() != "---":
++        return None, "Skill file is missing YAML frontmatter."
++
++    end = next(
++        (index for index in range(1, len(lines)) if lines[index].strip() == "---"), None
++    )
++    if end is None:
++        return None, "Skill frontmatter is not terminated."
++
++    try:
++        metadata = yaml.safe_load("\n".join(lines[1:end]))
++    except yaml.YAMLError as exc:
++        return None, f"Skill frontmatter is invalid YAML: {exc}"
++    if not isinstance(metadata, dict):
++        return None, "Skill frontmatter must be a mapping."
++    return metadata, None
++
++
++def read_skill_metadata(path: Path) -> tuple[SkillMetadata | None, str | None]:
++    """Read and validate the metadata required by a discoverable skill."""
++    try:
++        text = path.read_text(encoding="utf-8")
++    except (OSError, UnicodeError) as exc:
++        return None, f"Unable to read skill file: {exc}"
++
++    raw, error = _frontmatter(text)
++    if error is not None or raw is None:
++        return None, error or "Skill metadata could not be parsed."
++
++    raw_name = raw.get("name")
++    raw_description = raw.get("description")
++    raw_protocol = raw.get("protocol")
++    name = raw_name if isinstance(raw_name, str) else None
++    description = raw_description if isinstance(raw_description, str) else None
++    protocol = (
++        raw_protocol
++        if isinstance(raw_protocol, int) and not isinstance(raw_protocol, bool)
++        else None
++    )
++
++    errors: list[str] = []
++    if name != SKILL_NAME:
++        errors.append(f"Skill name must be {SKILL_NAME!r}.")
++    if description is None or not description.strip():
++        errors.append("Skill description must be a non-empty string.")
++    if raw_protocol is None:
++        errors.append("Skill protocol is required.")
++    elif protocol is None:
++        errors.append("Skill protocol must be an integer, not a Boolean or string.")
++    return SkillMetadata(name, description, protocol), "; ".join(errors) or None
++
++
++def probe_skill(location: SkillLocation) -> SkillProbe:
++    """Probe one location without allowing filesystem or YAML errors to escape."""
++    try:
++        exists = location.path.is_file()
++    except OSError as exc:
++        return SkillProbe(
++            location, True, None, None, None, f"Unable to inspect skill file: {exc}"
++        )
++    if not exists:
++        return SkillProbe(location, False, None, None, None, None)
++
++    metadata, error = read_skill_metadata(location.path)
++    digest: str | None = None
++    try:
++        digest = sha256(location.path.read_bytes()).hexdigest()
++    except (OSError, UnicodeError):
++        pass
++    if metadata is None:
++        return SkillProbe(location, True, None, None, None, error, digest)
++    return SkillProbe(
++        location,
++        True,
++        metadata.name,
++        metadata.description,
++        metadata.protocol,
++        error,
++        digest,
++    )
++
++
++def discover_skills(
++    workspace_root: Path,
++    *,
++    start_dir: Path | None = None,
++    home: Path | None = None,
++    admin_skill_root: Path | None = None,
++) -> tuple[SkillProbe, ...]:
++    """Inspect every existing skill candidate in the supported local locations."""
++    probes: list[SkillProbe] = []
++    for location in skill_locations(
++        workspace_root,
++        start_dir=start_dir,
++        home=home,
++        admin_skill_root=admin_skill_root,
++    ):
++        try:
++            exists = location.path.is_file()
++        except OSError as exc:
++            probes.append(
++                SkillProbe(
++                    location,
++                    True,
++                    None,
++                    None,
++                    None,
++                    f"Unable to inspect skill file: {exc}",
++                )
++            )
++            continue
++        if exists:
++            probes.append(probe_skill(location))
++    return tuple(probes)
++
++
++def _skill_state(probes: tuple[SkillProbe, ...]) -> str:
++    if not probes:
++        return "missing"
++
++    valid = tuple(probe for probe in probes if probe.error is None)
++    if not valid:
++        return "invalid"
++
++    protocols = {probe.protocol for probe in valid}
++    has_invalid = len(valid) != len(probes)
++    has_match = SKILL_PROTOCOL_VERSION in protocols
++    has_mismatch = any(probe.protocol != SKILL_PROTOCOL_VERSION for probe in valid)
++    if has_invalid and len(probes) > 1:
++        return "conflict"
++    if has_match and has_mismatch:
++        return "conflict"
++    if has_match:
++        return "match"
++    return "mismatch"
++
++
++def _skill_conflicts(
++    probes: tuple[SkillProbe, ...], state: str
++) -> list[dict[str, object]]:
++    if state != "conflict":
++        return []
++    return [
++        {
++            "path": str(probe.location.path),
++            "source": probe.location.source,
++            "declared_protocol": probe.protocol,
++            "error": probe.error,
++        }
++        for probe in probes
++    ]
++
++
++def skill_path(
++    workspace_root: Path,
++    *,
++    start_dir: Path | None = None,
++    home: Path | None = None,
++    admin_skill_root: Path | None = None,
++) -> Path | None:
++    """Return the preferred existing discovered skill path."""
++    probes = discover_skills(
++        workspace_root,
++        start_dir=start_dir,
++        home=home,
++        admin_skill_root=admin_skill_root,
++    )
++    return probes[0].location.path if probes else None
+
+
+ def skill_protocol(path: Path | None) -> int | None:
+-    """Read the protocol field from a skill front matter block."""
++    """Read a valid skill protocol field as a compatibility wrapper."""
+     if path is None:
+         return None
+-    text = path.read_text(encoding="utf-8")
+-    if not text.startswith("---"):
+-        return None
+-    end = text.find("\n---", 3)
+-    if end < 0:
++    metadata, error = read_skill_metadata(path)
++    if metadata is None or error is not None:
+         return None
+-    metadata: Any = yaml.safe_load(text[3:end])
+-    if not isinstance(metadata, dict):
+-        return None
+-    value = metadata.get("protocol")
+-    return value if isinstance(value, int) and not isinstance(value, bool) else None
++    return metadata.protocol
+
+
+-def protocol_diagnostics(workspace_root: Path) -> dict[str, object]:
+-    """Return deterministic CLI/skill compatibility diagnostics."""
+-    path = skill_path(workspace_root)
+-    protocol = skill_protocol(path)
++def protocol_diagnostics(
++    workspace_root: Path,
++    *,
++    start_dir: Path | None = None,
++    home: Path | None = None,
++    admin_skill_root: Path | None = None,
++) -> dict[str, object]:
++    """Return deterministic CLI and skill compatibility diagnostics."""
++    probes = discover_skills(
++        workspace_root,
++        start_dir=start_dir,
++        home=home,
++        admin_skill_root=admin_skill_root,
++    )
++    state = _skill_state(probes)
++    selected = probes[0] if probes else None
+     return {
+         "releaseledger_version": __import__(
+             "releaseledger", fromlist=["__version__"]
+         ).__version__,
+         "skill_protocol": SKILL_PROTOCOL_VERSION,
+-        "skill_path": str(path) if path is not None else None,
+-        "skill_declared_protocol": protocol,
+-        "skill_matches_cli": protocol == SKILL_PROTOCOL_VERSION,
++        "skill_path": str(selected.location.path) if selected else None,
++        "skill_declared_protocol": selected.protocol if selected else None,
++        "skill_matches_cli": state == "match",
++        "skill_state": state,
++        "skill_candidates": [probe.to_dict() for probe in probes],
++        "skill_candidate_count": len(probes),
++        "skill_conflicts": _skill_conflicts(probes, state),
+     }
+diff --git a/releaseledger/services/project_state.py b/releaseledger/services/project_state.py
+index b5cd6d9..cbdbac4 100644
+--- a/releaseledger/services/project_state.py
++++ b/releaseledger/services/project_state.py
+@@ -141,6 +141,49 @@ def project_info(root: Path) -> dict[str, object]:
+     }
+
+
++def _skill_protocol_message(protocol: dict[str, object]) -> str:
++    state = str(protocol.get("skill_state", ""))
++    expected = protocol.get("skill_protocol", "")
++    if state == "missing":
++        return (
++            "Releaseledger Agent Skill was not found in supported local "
++            "discovery locations."
++        )
++    if state == "match":
++        return f"All discovered Releaseledger Agent Skill copies match CLI protocol {expected}."
++    if state == "mismatch":
++        return (
++            "Discovered Releaseledger Agent Skill protocol does not match "
++            f"CLI protocol {expected}."
++        )
++    if state == "conflict":
++        return (
++            "Multiple Releaseledger Agent Skill copies were found with "
++            "conflicting or invalid protocol metadata."
++        )
++    return "Discovered Releaseledger Agent Skill copies could not be validated."
++
++
++def _skill_protocol_remediation(protocol: dict[str, object]) -> list[str]:
++    state = str(protocol.get("skill_state", ""))
++    if state == "match":
++        return []
++    if state == "missing":
++        return [
++            (
++                "Install the skill at .agents/skills/releaseledger/SKILL.md for "
++                "this project, or ~/.agents/skills/releaseledger/SKILL.md for the "
++                "current user."
++            )
++        ]
++    return [
++        (
++            "Update or remove stale Releaseledger skill copies listed in the "
++            "diagnostic data, then rerun `releaseledger doctor --check`."
++        )
++    ]
++
++
+ def project_doctor(root: Path, *, check: bool = False) -> dict[str, object]:
+     """Run deterministic diagnostics without applying repairs."""
+     storage = storage_where(root)
+@@ -211,14 +254,8 @@ def project_doctor(root: Path, *, check: bool = False) -> dict[str, object]:
+         {
+             "code": "skill_protocol",
+             "status": "pass" if protocol_matches else "fail",
+-            "message": (
+-                "Releaseledger skill protocol matches the CLI."
+-                if protocol_matches
+-                else "Releaseledger skill protocol does not match the CLI.",
+-            ),
+-            "remediation": []
+-            if protocol_matches
+-            else ["Install or update skills/releaseledger/SKILL.md."],
++            "message": _skill_protocol_message(protocol),
++            "remediation": _skill_protocol_remediation(protocol),
+             "data": protocol,
+         },
+     )
+diff --git a/tests/test_cli_common_commands.py b/tests/test_cli_common_commands.py
+index 8e40507..859513b 100644
+--- a/tests/test_cli_common_commands.py
++++ b/tests/test_cli_common_commands.py
+@@ -3,15 +3,32 @@
+ from __future__ import annotations
+
+ import hashlib
++import json
+ from pathlib import Path
+
++import pytest
+ from typer.testing import CliRunner
+
++from releaseledger import protocol
+ from releaseledger.cli import app
+
+ runner = CliRunner()
+
+
++def _write_skill(path: Path, declared_protocol: int) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_text(
++        (
++            "---\n"
++            "name: releaseledger\n"
++            "description: Test Releaseledger skill.\n"
++            f"protocol: {declared_protocol}\n"
++            "---\n"
++        ),
++        encoding="utf-8",
++    )
++
++
+ def _snapshot(root: Path) -> dict[str, tuple[int, str]]:
+     result: dict[str, tuple[int, str]] = {}
+     for path in sorted(root.rglob("*")):
+@@ -43,3 +60,114 @@ def test_common_commands_report_initialized_project(tmp_path: Path) -> None:
+     for command in ("status", "info", "doctor", "next-action"):
+         result = runner.invoke(app, ["--root", str(tmp_path), command])
+         assert result.exit_code == 0, (command, result.stdout, result.stderr)
++
++
++def test_doctor_human_and_json_share_skill_protocol_check(
++    monkeypatch: pytest.MonkeyPatch,
++    tmp_path: Path,
++) -> None:
++    monkeypatch.setenv("HOME", str(tmp_path / "home"))
++    workspace_skill = tmp_path / ".agents/skills/releaseledger/SKILL.md"
++    _write_skill(workspace_skill, protocol.SKILL_PROTOCOL_VERSION)
++
++    init = runner.invoke(app, ["--root", str(tmp_path), "init"])
++    assert init.exit_code == 0, init.stdout
++
++    human = runner.invoke(app, ["--root", str(tmp_path), "doctor"])
++    machine = runner.invoke(app, ["--json", "--root", str(tmp_path), "doctor"])
++
++    assert human.exit_code == 0, human.stdout
++    assert machine.exit_code == 0, machine.stdout
++    assert "pass  skill_protocol" in human.stdout
++    assert (
++        "All discovered Releaseledger Agent Skill copies match CLI protocol 2."
++        in human.stdout
++    )
++
++    payload = json.loads(machine.stdout)
++    checks = payload["result"]["checks"]
++    skill_check = next(item for item in checks if item["code"] == "skill_protocol")
++    assert skill_check["status"] == "pass"
++    assert skill_check["message"] == (
++        "All discovered Releaseledger Agent Skill copies match CLI protocol 2."
++    )
++    assert skill_check["data"]["skill_path"] == str(workspace_skill)
++    assert skill_check["data"]["skill_state"] == "match"
++    assert skill_check["data"]["skill_candidate_count"] == 1
++    assert skill_check["data"]["skill_matches_cli"] is True
++
++
++def test_doctor_accepts_host_native_project_skill(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    monkeypatch.setenv("HOME", str(tmp_path / "home"))
++    skill = tmp_path / ".github/skills/releaseledger/SKILL.md"
++    _write_skill(skill, protocol.SKILL_PROTOCOL_VERSION)
++
++    init = runner.invoke(app, ["--root", str(tmp_path), "init"])
++    assert init.exit_code == 0, init.stdout
++
++    result = runner.invoke(app, ["--root", str(tmp_path), "doctor", "--check"])
++
++    assert result.exit_code == 0, result.stdout
++    payload = json.loads(
++        runner.invoke(app, ["--json", "--root", str(tmp_path), "doctor"]).stdout
++    )
++    skill_check = next(
++        item for item in payload["result"]["checks"] if item["code"] == "skill_protocol"
++    )
++    assert skill_check["status"] == "pass"
++    assert skill_check["data"]["skill_candidates"][0]["source"] == "project_github"
++
++
++def test_doctor_reports_skill_conflicts_and_paths(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    monkeypatch.setenv("HOME", str(tmp_path / "home"))
++    project_skill = tmp_path / ".agents/skills/releaseledger/SKILL.md"
++    user_skill = tmp_path / "home/.claude/skills/releaseledger/SKILL.md"
++    _write_skill(project_skill, protocol.SKILL_PROTOCOL_VERSION)
++    _write_skill(user_skill, 1)
++
++    init = runner.invoke(app, ["--root", str(tmp_path), "init"])
++    assert init.exit_code == 0, init.stdout
++
++    human = runner.invoke(app, ["--root", str(tmp_path), "doctor"])
++    machine = runner.invoke(
++        app, ["--json", "--root", str(tmp_path), "doctor", "--check"]
++    )
++
++    assert human.exit_code == 0, human.stdout
++    assert "conflicting or invalid protocol metadata" in human.stdout
++    assert machine.exit_code == 1, machine.stdout
++    payload = json.loads(machine.stdout)
++    skill_check = next(
++        item for item in payload["result"]["checks"] if item["code"] == "skill_protocol"
++    )
++    assert skill_check["status"] == "fail"
++    assert skill_check["data"]["skill_state"] == "conflict"
++    assert skill_check["data"]["skill_candidate_count"] == 2
++    assert (
++        "Update or remove stale Releaseledger skill copies"
++        in skill_check["remediation"][0]
++    )
++    candidate_paths = {item["path"] for item in skill_check["data"]["skill_candidates"]}
++    assert candidate_paths == {str(project_skill), str(user_skill)}
++
++
++def test_doctor_missing_skill_recommends_portable_locations(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    monkeypatch.setenv("HOME", str(tmp_path / "home"))
++    init = runner.invoke(app, ["--root", str(tmp_path), "init"])
++    assert init.exit_code == 0, init.stdout
++
++    machine = runner.invoke(app, ["--json", "--root", str(tmp_path), "doctor"])
++    payload = json.loads(machine.stdout)
++    skill_check = next(
++        item for item in payload["result"]["checks"] if item["code"] == "skill_protocol"
++    )
++
++    assert "not found in supported local discovery locations" in skill_check["message"]
++    assert ".agents/skills/releaseledger/SKILL.md" in skill_check["remediation"][0]
++    assert "~/.agents/skills/releaseledger/SKILL.md" in skill_check["remediation"][0]
+diff --git a/tests/test_protocol.py b/tests/test_protocol.py
+new file mode 100644
+index 0000000..36df13d
+--- /dev/null
++++ b/tests/test_protocol.py
+@@ -0,0 +1,390 @@
++"""Skill protocol discovery behavior."""
++
++from __future__ import annotations
++
++from pathlib import Path
++
++import pytest
++
++from releaseledger import protocol
++
++
++def _write_skill(path: Path, declared_protocol: int) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_text(
++        (
++            "---\n"
++            "name: releaseledger\n"
++            "description: Test Releaseledger skill.\n"
++            f"protocol: {declared_protocol}\n"
++            "---\n"
++        ),
++        encoding="utf-8",
++    )
++
++
++def _diagnostics(
++    workspace: Path,
++    tmp_path: Path,
++    *,
++    start_dir: Path | None = None,
++) -> dict[str, object]:
++    return protocol.protocol_diagnostics(
++        workspace,
++        start_dir=start_dir,
++        home=tmp_path / "home",
++        admin_skill_root=tmp_path / "admin" / "skills",
++    )
++
++
++@pytest.mark.parametrize(
++    ("relative_root", "source", "providers", "legacy"),
++    [
++        (
++            ".agents/skills",
++            "project_agents",
++            ("codex", "opencode", "copilot", "gemini", "cursor"),
++            False,
++        ),
++        (".opencode/skills", "project_opencode", ("opencode",), False),
++        (".github/skills", "project_github", ("copilot", "vscode"), False),
++        (
++            ".claude/skills",
++            "project_claude",
++            ("opencode", "copilot", "claude", "cursor"),
++            False,
++        ),
++        (".gemini/skills", "project_gemini", ("gemini",), False),
++        (".cursor/skills", "project_cursor", ("cursor",), False),
++        (".codex/skills", "project_codex", ("cursor",), False),
++        (
++            "skills",
++            "project_releaseledger_legacy",
++            (),
++            True,
++        ),
++    ],
++)
++def test_project_skill_locations(
++    tmp_path: Path,
++    relative_root: str,
++    source: str,
++    providers: tuple[str, ...],
++    legacy: bool,
++) -> None:
++    workspace = tmp_path / "workspace"
++    workspace.mkdir()
++    skill = workspace / relative_root / "releaseledger" / "SKILL.md"
++    _write_skill(skill, protocol.SKILL_PROTOCOL_VERSION)
++
++    diagnostics = _diagnostics(workspace, tmp_path)
++
++    assert diagnostics["skill_state"] == "match"
++    assert diagnostics["skill_candidate_count"] == 1
++    candidate = diagnostics["skill_candidates"][0]
++    assert candidate == {
++        "path": str(skill),
++        "source": source,
++        "scope": "project",
++        "providers": list(providers),
++        "legacy": legacy,
++        "name": "releaseledger",
++        "declared_protocol": protocol.SKILL_PROTOCOL_VERSION,
++        "matches_cli": True,
++        "error": None,
++    }
++
++
++@pytest.mark.parametrize(
++    ("relative_root", "source", "providers", "legacy"),
++    [
++        (
++            ".agents/skills",
++            "user_agents",
++            ("codex", "opencode", "copilot", "gemini", "cursor"),
++            False,
++        ),
++        (".config/opencode/skills", "user_opencode", ("opencode",), False),
++        (
++            ".config/opencode/skill",
++            "user_opencode_legacy",
++            ("opencode",),
++            True,
++        ),
++        (".copilot/skills", "user_copilot", ("copilot",), False),
++        (
++            ".claude/skills",
++            "user_claude",
++            ("opencode", "vscode", "claude", "cursor"),
++            False,
++        ),
++        (".gemini/skills", "user_gemini", ("gemini",), False),
++        (".cursor/skills", "user_cursor", ("cursor",), False),
++        (".codex/skills", "user_codex", ("cursor",), False),
++    ],
++)
++def test_user_skill_locations(
++    tmp_path: Path,
++    relative_root: str,
++    source: str,
++    providers: tuple[str, ...],
++    legacy: bool,
++) -> None:
++    workspace = tmp_path / "workspace"
++    home = tmp_path / "home"
++    workspace.mkdir()
++    skill = home / relative_root / "releaseledger" / "SKILL.md"
++    _write_skill(skill, protocol.SKILL_PROTOCOL_VERSION)
++
++    diagnostics = protocol.protocol_diagnostics(
++        workspace,
++        home=home,
++        admin_skill_root=tmp_path / "admin" / "skills",
++    )
++
++    assert diagnostics["skill_state"] == "match"
++    assert diagnostics["skill_candidate_count"] == 1
++    candidate = diagnostics["skill_candidates"][0]
++    assert candidate["path"] == str(skill)
++    assert candidate["source"] == source
++    assert candidate["scope"] == "user"
++    assert candidate["providers"] == list(providers)
++    assert candidate["legacy"] is legacy
++    assert candidate["declared_protocol"] == protocol.SKILL_PROTOCOL_VERSION
++
++
++def test_project_legacy_opencode_location(tmp_path: Path) -> None:
++    workspace = tmp_path / "workspace"
++    workspace.mkdir()
++    skill = workspace / ".opencode/skill/releaseledger/SKILL.md"
++    _write_skill(skill, protocol.SKILL_PROTOCOL_VERSION)
++
++    diagnostics = _diagnostics(workspace, tmp_path)
++
++    candidate = diagnostics["skill_candidates"][0]
++    assert candidate["source"] == "project_opencode_legacy"
++    assert candidate["legacy"] is True
++
++
++def test_admin_skill_location_is_injectable(tmp_path: Path) -> None:
++    workspace = tmp_path / "workspace"
++    admin_root = tmp_path / "fake-etc" / "codex" / "skills"
++    workspace.mkdir()
++    skill = admin_root / "releaseledger" / "SKILL.md"
++    _write_skill(skill, protocol.SKILL_PROTOCOL_VERSION)
++
++    diagnostics = protocol.protocol_diagnostics(
++        workspace,
++        home=tmp_path / "home",
++        admin_skill_root=admin_root,
++    )
++
++    candidate = diagnostics["skill_candidates"][0]
++    assert candidate["path"] == str(skill)
++    assert candidate["source"] == "admin_codex"
++    assert candidate["scope"] == "admin"
++    assert candidate["providers"] == ["codex"]
++
++
++def test_nested_project_discovery_is_specific_first_and_bounded(tmp_path: Path) -> None:
++    workspace = tmp_path / "repo"
++    nested = workspace / "packages" / "api"
++    workspace_skill = workspace / ".agents/skills/releaseledger/SKILL.md"
++    nested_skill = nested / ".agents/skills/releaseledger/SKILL.md"
++    workspace.mkdir()
++    _write_skill(workspace_skill, protocol.SKILL_PROTOCOL_VERSION)
++    _write_skill(nested_skill, protocol.SKILL_PROTOCOL_VERSION)
++
++    diagnostics = _diagnostics(workspace, tmp_path, start_dir=nested)
++    candidates = diagnostics["skill_candidates"]
++
++    assert [candidate["path"] for candidate in candidates] == [
++        str(nested_skill),
++        str(workspace_skill),
++    ]
++    assert all(candidate["scope"] == "project" for candidate in candidates)
++
++
++def test_start_directory_outside_workspace_uses_only_workspace(tmp_path: Path) -> None:
++    workspace = tmp_path / "repo"
++    outside = tmp_path / "outside"
++    workspace.mkdir()
++    outside.mkdir()
++    _write_skill(outside / ".agents/skills/releaseledger/SKILL.md", 2)
++
++    locations = protocol.skill_locations(workspace, start_dir=outside)
++    project_agents = [
++        location for location in locations if location.source == "project_agents"
++    ]
++
++    assert len(project_agents) == 1
++    assert project_agents[0].path == workspace / ".agents/skills/releaseledger/SKILL.md"
++
++
++def test_discovery_does_not_search_above_workspace(tmp_path: Path) -> None:
++    parent_skill = tmp_path / ".agents/skills/releaseledger/SKILL.md"
++    workspace = tmp_path / "repo"
++    workspace.mkdir()
++    _write_skill(parent_skill, protocol.SKILL_PROTOCOL_VERSION)
++
++    diagnostics = _diagnostics(workspace, tmp_path)
++
++    assert diagnostics["skill_state"] == "missing"
++    assert diagnostics["skill_candidate_count"] == 0
++
++
++def test_duplicate_matching_copies_are_safe(tmp_path: Path) -> None:
++    workspace = tmp_path / "workspace"
++    workspace.mkdir()
++    _write_skill(
++        workspace / ".agents/skills/releaseledger/SKILL.md",
++        protocol.SKILL_PROTOCOL_VERSION,
++    )
++    _write_skill(
++        tmp_path / "home/.agents/skills/releaseledger/SKILL.md",
++        protocol.SKILL_PROTOCOL_VERSION,
++    )
++
++    diagnostics = _diagnostics(workspace, tmp_path)
++
++    assert diagnostics["skill_state"] == "match"
++    assert diagnostics["skill_matches_cli"] is True
++    assert diagnostics["skill_candidate_count"] == 2
++    assert diagnostics["skill_conflicts"] == []
++
++
++def test_matching_project_and_stale_user_copy_are_a_conflict(tmp_path: Path) -> None:
++    workspace = tmp_path / "workspace"
++    workspace.mkdir()
++    _write_skill(
++        workspace / ".agents/skills/releaseledger/SKILL.md",
++        protocol.SKILL_PROTOCOL_VERSION,
++    )
++    _write_skill(tmp_path / "home/.claude/skills/releaseledger/SKILL.md", 1)
++
++    diagnostics = _diagnostics(workspace, tmp_path)
++
++    assert diagnostics["skill_state"] == "conflict"
++    assert diagnostics["skill_matches_cli"] is False
++    assert diagnostics["skill_candidate_count"] == 2
++    assert str(tmp_path / "home/.claude/skills/releaseledger/SKILL.md") in {
++        item["path"] for item in diagnostics["skill_conflicts"]
++    }
++
++
++def test_all_stale_copies_are_a_mismatch(tmp_path: Path) -> None:
++    workspace = tmp_path / "workspace"
++    workspace.mkdir()
++    _write_skill(workspace / ".agents/skills/releaseledger/SKILL.md", 1)
++    _write_skill(tmp_path / "home/.agents/skills/releaseledger/SKILL.md", 1)
++
++    diagnostics = _diagnostics(workspace, tmp_path)
++
++    assert diagnostics["skill_state"] == "mismatch"
++    assert diagnostics["skill_matches_cli"] is False
++
++
++@pytest.mark.parametrize(
++    "content",
++    [
++        "name: releaseledger\n",
++        "---\nprotocol: [\n---\n",
++        "---\n- releaseledger\n---\n",
++        "---\nname: another\ndescription: test\nprotocol: 2\n---\n",
++        "---\nname: releaseledger\nprotocol: 2\n---\n",
++        "---\nname: releaseledger\ndescription: '   '\nprotocol: 2\n---\n",
++        "---\nname: releaseledger\ndescription: test\n---\n",
++        "---\nname: releaseledger\ndescription: test\nprotocol: true\n---\n",
++        "---\nname: releaseledger\ndescription: test\nprotocol: '2'\n---\n",
++    ],
++)
++def test_malformed_skill_files_are_reported_without_crashing(
++    tmp_path: Path, content: str
++) -> None:
++    workspace = tmp_path / "workspace"
++    workspace.mkdir()
++    skill = workspace / ".agents/skills/releaseledger/SKILL.md"
++    skill.parent.mkdir(parents=True)
++    skill.write_text(content, encoding="utf-8")
++
++    diagnostics = _diagnostics(workspace, tmp_path)
++
++    assert diagnostics["skill_state"] == "invalid"
++    assert diagnostics["skill_matches_cli"] is False
++    assert diagnostics["skill_candidate_count"] == 1
++    assert diagnostics["skill_candidates"][0]["error"]
++
++
++def test_unreadable_skill_file_is_reported_without_crashing(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    workspace = tmp_path / "workspace"
++    workspace.mkdir()
++    skill = workspace / ".agents/skills/releaseledger/SKILL.md"
++    _write_skill(skill, protocol.SKILL_PROTOCOL_VERSION)
++    original_read_text = Path.read_text
++
++    def fail_read_text(path: Path, *args: object, **kwargs: object) -> str:
++        if path == skill:
++            raise OSError("simulated unreadable skill")
++        return original_read_text(path, *args, **kwargs)
++
++    monkeypatch.setattr(Path, "read_text", fail_read_text)
++
++    diagnostics = _diagnostics(workspace, tmp_path)
++
++    assert diagnostics["skill_state"] == "invalid"
++    assert "simulated unreadable skill" in diagnostics["skill_candidates"][0]["error"]
++
++
++def test_symlinked_skill_file_is_discovered_when_supported(
++    tmp_path: Path,
++) -> None:
++    workspace = tmp_path / "workspace"
++    target = tmp_path / "target" / "SKILL.md"
++    link = workspace / ".agents/skills/releaseledger/SKILL.md"
++    workspace.mkdir()
++    _write_skill(target, protocol.SKILL_PROTOCOL_VERSION)
++    link.parent.mkdir(parents=True)
++    try:
++        link.symlink_to(target)
++    except (OSError, NotImplementedError):
++        pytest.skip("symlinks are unavailable")
++
++    diagnostics = _diagnostics(workspace, tmp_path)
++
++    assert diagnostics["skill_state"] == "match"
++    assert diagnostics["skill_candidates"][0]["path"] == str(link)
++
++
++def test_skill_path_and_protocol_compatibility_wrappers(tmp_path: Path) -> None:
++    workspace = tmp_path / "workspace"
++    workspace.mkdir()
++    skill = workspace / ".agents/skills/releaseledger/SKILL.md"
++    _write_skill(skill, protocol.SKILL_PROTOCOL_VERSION)
++
++    assert (
++        protocol.skill_path(
++            workspace,
++            home=tmp_path / "home",
++            admin_skill_root=tmp_path / "admin" / "skills",
++        )
++        == skill
++    )
++    assert protocol.skill_protocol(skill) == protocol.SKILL_PROTOCOL_VERSION
++
++
++def test_source_tree_skill_is_not_an_active_bundled_candidate(tmp_path: Path) -> None:
++    workspace = tmp_path / "workspace"
++    fake_package_skill = tmp_path / "package/skills/releaseledger/SKILL.md"
++    workspace.mkdir()
++    _write_skill(fake_package_skill, protocol.SKILL_PROTOCOL_VERSION)
++
++    assert (
++        protocol.skill_path(
++            workspace,
++            home=tmp_path / "home",
++            admin_skill_root=tmp_path / "admin" / "skills",
++        )
++        is None
++    )
+diff --git a/tests/test_releaseledger_skill_protocol.py b/tests/test_releaseledger_skill_protocol.py
+index ec593f9..396432f 100644
+--- a/tests/test_releaseledger_skill_protocol.py
++++ b/tests/test_releaseledger_skill_protocol.py
+@@ -10,6 +10,8 @@ from __future__ import annotations
+
+ from pathlib import Path
+
++from releaseledger import protocol
++
+ ROOT = Path(__file__).resolve().parents[1]
+ SKILL = ROOT / "skills" / "releaseledger" / "SKILL.md"
+
+@@ -77,3 +79,22 @@ def test_skill_does_not_document_undated_strict_single_build() -> None:
+     text = SKILL.read_text(encoding="utf-8")
+     assert "changelog build VERSION --dry-run --strict --unreleased" in text
+     assert "release prepare VERSION --previous PREV_VERSION" in text
++
++
++def test_canonical_skill_has_valid_discoverable_metadata() -> None:
++    metadata, error = protocol.read_skill_metadata(SKILL)
++    assert error is None
++    assert metadata is not None
++    assert metadata.name == protocol.SKILL_NAME
++    assert metadata.description
++    assert metadata.protocol == protocol.SKILL_PROTOCOL_VERSION
++
++
++def test_canonical_skill_is_source_only_not_package_data() -> None:
++    package_skill = (
++        ROOT / "releaseledger" / "resources" / "skills" / "releaseledger" / "SKILL.md"
++    )
++    assert not package_skill.exists()
++    assert not (
++        ROOT / "releaseledger" / "skills" / "releaseledger" / "SKILL.md"
++    ).exists()

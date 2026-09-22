@@ -1,0 +1,24 @@
+rows:
+  - sha: 848795af918b53e25ec679a37bf4ac16df9c3043
+    inspected: true
+    inspected_paths:
+      - docs/concepts.md
+      - docs/quickstart.md
+      - releaseledger/protocol.py
+      - releaseledger/services/project_state.py
+      - tests/test_cli_common_commands.py
+      - tests/test_protocol.py
+      - tests/test_releaseledger_skill_protocol.py
+    observed_behavior:
+      Skill discovery in releaseledger/protocol.py now probes a bounded
+      set of host-native project, user, and admin skill locations, validates SKILL.md
+      frontmatter metadata (name, description, integer protocol), and classifies discovered
+      copies as missing, match, mismatch, or conflict with per-copy details and sha256
+      digests. The doctor skill_protocol check renders state-aware messages and remediation
+      guidance. Docs describe the canonical skill source and supported discovery roots.
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
