@@ -153,6 +153,29 @@ def test_user_skill_locations(
     assert candidate["declared_protocol"] == protocol.SKILL_PROTOCOL_VERSION
 
 
+def test_default_user_home_honors_home_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    home = tmp_path / "home"
+    workspace.mkdir()
+    skill = home / ".claude/skills/releaseledger/SKILL.md"
+    _write_skill(skill, protocol.SKILL_PROTOCOL_VERSION)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(
+        protocol.Path,
+        "home",
+        classmethod(lambda cls: tmp_path / "unexpected-home"),
+    )
+
+    diagnostics = protocol.protocol_diagnostics(
+        workspace, admin_skill_root=tmp_path / "admin" / "skills"
+    )
+
+    assert diagnostics["skill_state"] == "match"
+    assert diagnostics["skill_candidates"][0]["path"] == str(skill)
+
+
 def test_project_legacy_opencode_location(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

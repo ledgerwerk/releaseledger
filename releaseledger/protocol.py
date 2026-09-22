@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -143,6 +144,12 @@ def _skill_path(root: Path, relative_root: str) -> Path:
     return root / relative_root / SKILL_NAME / SKILL_FILENAME
 
 
+def _default_user_home() -> Path:
+    """Return the user home while honoring the conventional HOME override."""
+    configured = os.environ.get("HOME")
+    return Path(configured) if configured else Path.home()
+
+
 def skill_locations(
     workspace_root: Path,
     *,
@@ -153,7 +160,7 @@ def skill_locations(
     """Enumerate supported local skill locations in deterministic display order."""
     workspace = _resolved(workspace_root)
     search_dirs = _project_search_dirs(workspace, start_dir or workspace)
-    user_home = _resolved(home or Path.home())
+    user_home = _resolved(home or _default_user_home())
     admin_root = _resolved(admin_skill_root or _DEFAULT_ADMIN_SKILL_ROOT)
     locations: list[SkillLocation] = []
     seen: set[Path] = set()
