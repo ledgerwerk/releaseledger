@@ -2834,7 +2834,7 @@ def evaluate_migration_state(
     # 2. Try to load canonical project
     canonical_valid = False
     canonical_error: str | None = None
-    validation_report = None
+    storage_health = None
     if has_canonical:
         try:
             from releaseledger.ledgercore_backend import (
@@ -2845,7 +2845,9 @@ def evaluate_migration_state(
                 workspace_root, allow_missing=False, validate_storage=True
             )
             canonical_valid = True
-            validation_report = layout.validation_report
+            from releaseledger.services.storage_health import assess_storage_layout
+
+            storage_health = assess_storage_layout(layout)
         except Exception as exc:
             canonical_error = str(exc)
 
@@ -2879,9 +2881,18 @@ def evaluate_migration_state(
 
     if (
         canonical_valid
-        and validation_report is not None
-        and not validation_report.valid
+        and storage_health is not None
+        and not storage_health.layout_valid
     ):
+        indexes_mount = next(
+            (mount for mount in storage_health.mounts if mount.name == "indexes"),
+            None,
+        )
+        remediation = (
+            "Run `releaseledger repair index --dry-run`."
+            if indexes_mount is not None and not indexes_mount.effective_valid
+            else "Storage validation failed. Run `releaseledger storage validate --strict`."
+        )
         return {
             "state": "canonical-invalid",
             "legacy_detected": legacy is not None,
@@ -2889,13 +2900,14 @@ def evaluate_migration_state(
             "canonical_detected": True,
             "migration_in_progress": False,
             "migration_recovery_required": False,
-            "remediation": (
-                "Storage validation failed. "
-                "Run `releaseledger storage validate --strict`."
-            ),
+            "raw_layout_valid": storage_health.raw_layout_valid,
+            "layout_valid": storage_health.layout_valid,
+            "indexes_repairable": storage_health.indexes_repairable,
+            "remediation": remediation,
         }
 
     if canonical_valid and legacy is not None:
+        assert storage_health is not None
         # Compute legacy_relation and cleanup_safe for the
         # canonical-with-legacy-artifacts state.
         legacy_relation, cleanup_safe, next_action = _compute_legacy_relation(
@@ -2909,6 +2921,9 @@ def evaluate_migration_state(
             "manifest_path": str(manifest),
             "migration_in_progress": False,
             "migration_recovery_required": False,
+            "raw_layout_valid": storage_health.raw_layout_valid,
+            "layout_valid": storage_health.layout_valid,
+            "indexes_repairable": storage_health.indexes_repairable,
             "legacy_relation": legacy_relation,
             "cleanup_safe": cleanup_safe,
             "next_action": next_action,
@@ -2925,6 +2940,7 @@ def evaluate_migration_state(
         return result
 
     if canonical_valid:
+        assert storage_health is not None
         return {
             "state": "canonical-ready",
             "legacy_detected": False,
@@ -2932,6 +2948,9 @@ def evaluate_migration_state(
             "manifest_path": str(manifest),
             "migration_in_progress": False,
             "migration_recovery_required": False,
+            "raw_layout_valid": storage_health.raw_layout_valid,
+            "layout_valid": storage_health.layout_valid,
+            "indexes_repairable": storage_health.indexes_repairable,
             "legacy_relation": "none",
             "cleanup_safe": False,
             "next_action": "none",

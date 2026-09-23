@@ -435,6 +435,10 @@ def status_command(
             f"health: {result.get('health', '')}\n"
             f"next: {result.get('next_action', {}).get('command', '')}"  # type: ignore[attr-defined]
         )
+        warnings = result.get("warnings", [])
+        warnings = result.get("warnings", [])
+        if isinstance(warnings, list) and warnings:
+            human += "\n" + "\n".join(f"warning: {warning}" for warning in warnings)
         return result, [], human
 
     run_command(
@@ -3883,6 +3887,15 @@ def storage_where_command(ctx: typer.Context) -> None:
 
     def produce() -> CommandResult:
         result = storage_where(state.cwd)
+        bindings = result.get("bindings")
+        indexes = bindings.get("indexes") if isinstance(bindings, dict) else {}
+        if not isinstance(indexes, dict):
+            indexes = {}
+        indexes_state = (
+            str(indexes.get("classification", "unknown"))
+            if isinstance(indexes, dict)
+            else "unknown"
+        )
         lines = [
             f"Project root: {result.get('project_root', '')}",
             f"Project UUID: {result.get('project_uuid', '')}",
@@ -3895,12 +3908,22 @@ def storage_where_command(ctx: typer.Context) -> None:
             f"Data source: {result.get('data_source', '')}",
             f"External root: {result.get('external_root', '')}",
             f"Indexes root: {result.get('indexes_root', '')}",
+            f"Indexes state: {indexes_state}",
+            f"Raw layout valid: {result.get('raw_layout_valid', False)}",
             f"Active ledger: {result.get('active_ledger_ref', '')}",
             f"Active ledger dir: {result.get('active_ledger_dir', '')}",
             f"Layout valid: {result.get('layout_valid', False)}",
             f"Legacy detected: {result.get('legacy_detected', False)}",
             f"Migration state: {result.get('migration_state', '')}",
         ]
+        unexpected_paths = indexes.get("unexpected_paths", [])
+        if isinstance(unexpected_paths, list) and unexpected_paths:
+            lines.append("Unexpected cache paths:")
+            lines.extend(f"  - {path}" for path in unexpected_paths)
+        if result.get("indexes_repairable"):
+            lines.append("Warning: generated indexes cache will be rebound/rebuilt.")
+        if result.get("repair_command"):
+            lines.append(f"Repair: {result['repair_command']}")
         human = "\n".join(lines)
         return result, [], human
 
@@ -3931,20 +3954,45 @@ def storage_validate_command(
 
         result = storage_where(state.cwd)
         validation: dict[str, object] = {
+            "raw_layout_valid": result.get("raw_layout_valid", False),
             "layout_valid": result.get("layout_valid", False),
+            "indexes_repairable": result.get("indexes_repairable", False),
+            "migration_state": result.get("migration_state", ""),
             "bindings": result.get("bindings", {}),
         }
+        bindings = validation["bindings"]
+        indexes = bindings.get("indexes", {}) if isinstance(bindings, dict) else {}
+        if isinstance(indexes, dict) and not bool(indexes.get("valid", True)):
+            validation["repair_command"] = "releaseledger repair index --dry-run"
         if strict:
             data_root = Path(str(result.get("data_root", "")))
             if data_root.is_dir():
                 domain = validate_domain_records(data_root)
                 validation["domain"] = domain
 
-        lines = [f"Layout valid: {validation.get('layout_valid', False)}"]
-        bindings = validation.get("bindings", {})
+        lines = [
+            f"Raw layout valid: {validation['raw_layout_valid']}",
+            f"Layout valid: {validation['layout_valid']}",
+            f"Indexes repairable: {validation['indexes_repairable']}",
+            f"Migration state: {validation['migration_state']}",
+        ]
         if isinstance(bindings, dict):
             for name, status in bindings.items():
-                lines.append(f"  {name}: {status}")
+                if not isinstance(status, dict):
+                    continue
+                lines.append(
+                    f"  {name}: valid={status.get('valid', False)} "
+                    f"raw_valid={status.get('raw_valid', False)} "
+                    f"classification={status.get('classification', 'n/a')}"
+                )
+                if status.get("reason"):
+                    lines.append(f"    reason: {status['reason']}")
+                unexpected_paths = status.get("unexpected_paths", [])
+                if isinstance(unexpected_paths, list):
+                    for path in unexpected_paths:
+                        lines.append(f"    unexpected: {path}")
+        if validation.get("repair_command"):
+            lines.append(f"Repair: {validation['repair_command']}")
         passed = bool(validation.get("layout_valid", False))
         if "domain" in validation:
             domain = validation["domain"]  # type: ignore[assignment]
@@ -3961,6 +4009,70 @@ def storage_validate_command(
         json_output=state.json_output,
         produce=produce,
         check_passed=None,
+    )
+
+
+repair_app = typer.Typer(help="Repair derived Releaseledger state.")
+app.add_typer(repair_app, name="repair")
+
+
+@repair_app.command("index")
+def repair_index_command(
+    ctx: typer.Context,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Inspect without changing the cache.")
+    ] = False,
+    apply: Annotated[bool, typer.Option("--apply", help="Apply the repair.")] = False,
+    quarantine_foreign: Annotated[
+        bool,
+        typer.Option(
+            "--quarantine-foreign",
+            help="Preserve and replace a foreign or mismatched cache.",
+        ),
+    ] = False,
+) -> None:
+    """Inspect or rebuild the disposable Releaseledger index cache."""
+    state = cli_state_from_context(ctx)
+    if dry_run == apply:
+        raise LaunchError(
+            "Choose exactly one of --dry-run or --apply.",
+            code=CODE_USAGE_ERROR,
+            exit_code=2,
+        )
+
+    def produce() -> CommandResult:
+        from releaseledger.services.storage_repair import repair_index
+
+        result = repair_index(
+            state.cwd,
+            apply=apply,
+            quarantine_foreign=quarantine_foreign,
+        )
+        lines = [
+            f"Action: {result['action']}",
+            f"Classification: {result['classification_before']}",
+            f"Source: {result['source']}",
+            f"Binding restored: {result['binding_restored']}",
+            f"Indexes rebuilt: {result['indexes_rebuilt']}",
+            f"Layout valid: {result['layout_valid_after']}",
+        ]
+        if result.get("quarantine_path"):
+            lines.append(f"Quarantine: {result['quarantine_path']}")
+        unexpected_paths = result.get("unexpected_paths", [])
+        if isinstance(unexpected_paths, list):
+            for path in unexpected_paths:
+                lines.append(f"Unexpected: {path}")
+        if result.get("next_command"):
+            lines.append(f"Next: {result['next_command']}")
+        return result, [], "\n".join(lines)
+
+    run_command(
+        command="repair.index",
+        result_type="index_repair",
+        json_output=state.json_output,
+        produce=produce,
+        workspace_root=state.root,
+        mutating=apply,
     )
 
 
@@ -4298,7 +4410,10 @@ def _migration_command_result(
         )
     if operation == "status":
         result = migration_status(root)
-        return result, [], f"Migration state: {result.get('state', 'unknown')}"
+        human = f"Migration state: {result.get('state', 'unknown')}"
+        if result.get("remediation"):
+            human += f"\nRemediation: {result['remediation']}"
+        return result, [], human
     if operation == "recover":
         if policy not in {"auto", "resume", "rollback"}:
             raise LaunchError(

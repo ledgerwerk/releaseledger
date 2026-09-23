@@ -42,6 +42,14 @@ def _latest_released(records: list[dict[str, object]]) -> str | None:
     return str(released[-1].get("version", ""))
 
 
+def _indexes_blocked(storage: dict[str, object]) -> bool:
+    bindings = storage.get("bindings")
+    if not isinstance(bindings, dict):
+        return False
+    indexes = bindings.get("indexes")
+    return isinstance(indexes, dict) and not bool(indexes.get("valid", True))
+
+
 def project_status(root: Path, *, check: bool = False) -> dict[str, object]:
     """Return a concise status without creating or repairing project state."""
     storage = storage_where(root)
@@ -57,6 +65,13 @@ def project_status(root: Path, *, check: bool = False) -> dict[str, object]:
     ]
     active.sort()
     layout_valid = bool(storage.get("layout_valid", False))
+    raw_layout_valid = bool(storage.get("raw_layout_valid", layout_valid))
+    indexes_repairable = bool(storage.get("indexes_repairable", False))
+    warnings = (
+        ["Generated indexes binding will be restored before the next write."]
+        if indexes_repairable
+        else []
+    )
     protocol_matches = bool(protocol_diagnostics(root)["skill_matches_cli"])
     healthy = canonical and layout_valid and protocol_matches
     if not discovered:
@@ -65,10 +80,16 @@ def project_status(root: Path, *, check: bool = False) -> dict[str, object]:
             "reason": "No canonical Releaseledger project is initialized.",
         }
     elif not layout_valid:
-        next_action = {
-            "command": "storage validate --strict",
-            "reason": "The canonical project was discovered but its storage layout is invalid.",
-        }
+        if _indexes_blocked(storage):
+            next_action = {
+                "command": "repair index --dry-run",
+                "reason": "The indexes cache is blocked and requires explicit inspection before quarantine and rebuild.",
+            }
+        else:
+            next_action = {
+                "command": "storage validate --strict",
+                "reason": "The canonical project was discovered but its storage layout is invalid.",
+            }
     elif not protocol_matches:
         next_action = {
             "command": "doctor --check",
@@ -93,6 +114,9 @@ def project_status(root: Path, *, check: bool = False) -> dict[str, object]:
         "discovered": discovered,
         "canonical": canonical,
         "layout_valid": layout_valid,
+        "raw_layout_valid": raw_layout_valid,
+        "indexes_repairable": indexes_repairable,
+        "warnings": warnings,
         "state": "ready" if healthy else state,
         "project_root": str(storage.get("project_root", root.resolve())),
         "ledger_ref": str(storage.get("active_ledger_ref", "")),
@@ -206,26 +230,30 @@ def project_doctor(root: Path, *, check: bool = False) -> dict[str, object]:
     )
     layout_valid = bool(storage.get("layout_valid", False))
     layout_repairable = bool(storage.get("indexes_repairable", False))
-    layout_ok = layout_valid or layout_repairable
+    layout_ok = layout_valid
+    if layout_ok:
+        layout_remediation: list[str] = []
+    elif _indexes_blocked(storage):
+        layout_remediation = ["Run `releaseledger repair index --dry-run`."]
+    else:
+        layout_remediation = ["Run `releaseledger storage validate --strict`."]
+    if layout_repairable:
+        layout_message = (
+            "Storage is operational; the generated indexes cache is unbound and "
+            "will be rebound/rebuilt before the next write."
+        )
+    elif layout_ok:
+        layout_message = "Storage layout is valid."
+    elif _indexes_blocked(storage):
+        layout_message = "The indexes cache is blocked and requires explicit repair."
+    else:
+        layout_message = "Storage layout is unavailable or invalid."
     checks.append(
         {
             "code": "storage_layout",
             "status": "pass" if layout_ok else "fail",
-            "message": (
-                (
-                    "Storage layout is valid; the generated indexes binding "
-                    "will be repaired before the next write."
-                )
-                if layout_repairable and not layout_valid
-                else (
-                    "Storage layout is valid."
-                    if layout_ok
-                    else "Storage layout is unavailable or invalid."
-                )
-            ),
-            "remediation": []
-            if layout_ok
-            else ["Run `releaseledger storage validate --strict`."],
+            "message": layout_message,
+            "remediation": layout_remediation,
         }
     )
     release_ok = True
@@ -281,10 +309,12 @@ def next_action(root: Path) -> dict[str, object]:
         command = "migrate plan storage-layout"
         reason = "Legacy storage requires an explicit migration plan."
     elif discovered and not layout_valid:
-        command = "storage validate --strict"
-        reason = (
-            "The canonical project was discovered but its storage layout is invalid."
-        )
+        if _indexes_blocked(storage):
+            command = "repair index --dry-run"
+            reason = "The indexes cache is blocked and requires explicit inspection before quarantine and rebuild."
+        else:
+            command = "storage validate --strict"
+            reason = "The canonical project was discovered but its storage layout is invalid."
     elif discovered and not protocol_matches:
         command = "doctor --check"
         reason = (

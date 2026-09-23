@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from releaseledger.errors import CODE_USAGE_ERROR, LaunchError
+from releaseledger.errors import CODE_NOT_FOUND, CODE_USAGE_ERROR, LaunchError
 from releaseledger.storage.config import (
     ProjectConfig,
     load_project_config,
@@ -22,161 +22,20 @@ __all__ = [
 ]
 
 
-def _evaluate_migration_state_for_storage(
-    workspace_root: Path,
-    legacy_detected: bool,
-) -> str:
-    """Evaluate migration state for the storage_where diagnostic.
-
-    Uses the shared state evaluator from migration module when available,
-    falling back to simple heuristics if the evaluator raises.
-    """
-    try:
-        from releaseledger.migration import evaluate_migration_state
-
-        state = evaluate_migration_state(workspace_root)
-        return str(state.get("state", "canonical-ready"))
-    except Exception:
-        return "canonical-ready"
+def _find_canonical_manifest(root: Path) -> Path | None:
+    for parent in (root, *root.parents):
+        manifest = parent / ".ledger" / "ledger.toml"
+        if manifest.exists() or manifest.is_symlink():
+            return manifest
+    return None
 
 
-def storage_where(workspace_root: Path) -> dict[str, object]:
-    """Return a read-only diagnostic dict describing the effective storage location.
-
-    Never mutates state. Checks for canonical schema-3 manifest first,
-    then falls back to legacy detection.
-    """
-    root = Path(workspace_root).resolve()
-
-    # Try to load the canonical project (traverses upward).
-    try:
-        from releaseledger.ledgercore_backend import (
-            load_releaseledger_ledger_layout,
-        )
-
-        layout = load_releaseledger_ledger_layout(
-            root, allow_missing=True, validate_storage=True
-        )
-        ledger_ref = ""
-        ledger_dir = ""
-        try:
-            from releaseledger.storage.paths import resolve_project_paths
-
-            paths = resolve_project_paths(root)
-            ledger_ref = paths.ledger_ref
-            ledger_dir = str(paths.ledger_dir)
-        except Exception:
-            pass
-
-        legacy_detected = False
-        from releaseledger.migration import discover_legacy_project
-
-        try:
-            discover_legacy_project(root)
-            legacy_detected = True
-        except Exception:
-            pass
-
-        bindings: dict[str, object] = {}
-        report = layout.validation_report
-        indexes_repairable = False
-        if report is not None:
-            for item in report.results:
-                mount_name = item.binding.mount if item.binding else "unknown"
-                valid = item.valid
-                reason = item.reason or ""
-                if mount_name == "indexes" and not item.valid:
-                    from releaseledger.ledgercore_backend import (
-                        classify_releaseledger_index_cache,
-                    )
-
-                    classification = classify_releaseledger_index_cache(
-                        layout.indexes_root
-                    )
-                    if classification.state in {
-                        "missing",
-                        "empty",
-                        "generated-current",
-                        "generated-legacy",
-                    }:
-                        indexes_repairable = True
-                        valid = True
-                        reason = (
-                            "Generated cache is safe to rebind before the next write."
-                        )
-                    elif classification.unexpected_paths:
-                        reason = "Foreign cache content: " + ", ".join(
-                            str(path) for path in classification.unexpected_paths
-                        )
-                bindings[mount_name] = {
-                    "valid": valid,
-                    "path": str(item.path),
-                    "reason": reason,
-                    "storage": item.binding.storage if item.binding else "",
-                }
-        return {
-            "kind": "storage_location",
-            "discovered": True,
-            "canonical": True,
-            "project_root": str(layout.project_root),
-            "project_uuid": layout.project_uuid,
-            "project_name": layout.project_name or "",
-            "manifest_path": str(layout.manifest_path),
-            "local_config_path": str(layout.local_config_path),
-            "tool_config_path": str(layout.config_path),
-            "data_root": str(layout.data_root),
-            "data_storage": str(layout.data_storage),
-            "data_source": layout.data_source,
-            "external_root": str(layout.external_root) if layout.external_root else "",
-            "indexes_root": str(layout.indexes_root),
-            "active_ledger_ref": ledger_ref,
-            "active_ledger_dir": ledger_dir,
-            "layout_valid": bool(report is None or report.valid or indexes_repairable),
-            "indexes_repairable": indexes_repairable,
-            "bindings": bindings,
-            "mounts": {
-                "data": {
-                    "storage": str(layout.data_storage),
-                    "path": str(layout.data_root),
-                    "source": layout.data_source,
-                },
-                "indexes": {
-                    "storage": "cache",
-                    "path": str(layout.indexes_root),
-                },
-            },
-            "legacy_detected": legacy_detected,
-            "migration_state": _evaluate_migration_state_for_storage(
-                root, legacy_detected
-            ),
-            # Compatibility aliases for one release.
-            "workspace_root": str(layout.project_root),
-            "releaseledger_dir": str(layout.data_root),
-            "inside_workspace": layout.data_storage == "project",
-        }
-    except Exception:
-        pass
-
-    # Legacy detection (no canonical manifest or load failed).
+def _legacy_storage_where(root: Path) -> dict[str, object]:
     from releaseledger.migration import discover_legacy_project
 
     try:
         config_path, _ = discover_legacy_project(root)
-        return {
-            "kind": "storage_location",
-            "discovered": False,
-            "canonical": False,
-            "project_root": str(root),
-            "legacy_detected": True,
-            "legacy_config_path": str(config_path),
-            "migration_state": "legacy",
-            "layout_valid": False,
-            "data_root": "",
-            "indexes_root": "",
-            "workspace_root": str(root),
-            "releaseledger_dir": "",
-        }
-    except Exception:
+    except LaunchError:
         return {
             "kind": "storage_location",
             "discovered": False,
@@ -185,8 +44,123 @@ def storage_where(workspace_root: Path) -> dict[str, object]:
             "legacy_detected": False,
             "migration_state": "uninitialized",
             "layout_valid": False,
+            "raw_layout_valid": False,
             "workspace_root": str(root),
         }
+    return {
+        "kind": "storage_location",
+        "discovered": False,
+        "canonical": False,
+        "project_root": str(root),
+        "legacy_detected": True,
+        "legacy_config_path": str(config_path),
+        "migration_state": "legacy",
+        "layout_valid": False,
+        "raw_layout_valid": False,
+        "data_root": "",
+        "indexes_root": "",
+        "workspace_root": str(root),
+        "releaseledger_dir": "",
+    }
+
+
+def storage_where(workspace_root: Path) -> dict[str, object]:
+    """Return read-only storage diagnostics with normalized mount health."""
+    from releaseledger.ledgercore_backend import load_releaseledger_ledger_layout
+    from releaseledger.migration import (
+        discover_legacy_project,
+        evaluate_migration_state,
+    )
+    from releaseledger.services.storage_health import (
+        assess_storage_layout,
+        storage_health_to_dict,
+    )
+
+    root = Path(workspace_root).resolve()
+    manifest = _find_canonical_manifest(root)
+    try:
+        layout = load_releaseledger_ledger_layout(
+            root, allow_missing=True, validate_storage=True
+        )
+    except LaunchError as exc:
+        if manifest is None:
+            if exc.code != CODE_NOT_FOUND:
+                raise
+            return _legacy_storage_where(root)
+        project_root = manifest.parent.parent
+        return {
+            "kind": "storage_location",
+            "discovered": True,
+            "canonical": True,
+            "project_root": str(project_root),
+            "manifest_path": str(manifest),
+            "canonical_error": exc.message,
+            "migration_state": "canonical-invalid",
+            "layout_valid": False,
+            "raw_layout_valid": False,
+            "indexes_repairable": False,
+            "bindings": {},
+            "legacy_detected": False,
+            "workspace_root": str(project_root),
+            "releaseledger_dir": "",
+        }
+
+    health = storage_health_to_dict(assess_storage_layout(layout))
+    ledger_ref = ""
+    ledger_dir = ""
+    try:
+        from releaseledger.storage.paths import resolve_project_paths
+
+        paths = resolve_project_paths(root)
+        ledger_ref = paths.ledger_ref
+        ledger_dir = str(paths.ledger_dir)
+    except (LaunchError, OSError, ValueError):
+        pass
+
+    legacy_detected = False
+    try:
+        discover_legacy_project(root)
+        legacy_detected = True
+    except LaunchError:
+        pass
+
+    migration = evaluate_migration_state(root)
+    return {
+        "kind": "storage_location",
+        "discovered": True,
+        "canonical": True,
+        "project_root": str(layout.project_root),
+        "project_uuid": layout.project_uuid,
+        "project_name": layout.project_name or "",
+        "manifest_path": str(layout.manifest_path),
+        "local_config_path": str(layout.local_config_path),
+        "tool_config_path": str(layout.config_path),
+        "data_root": str(layout.data_root),
+        "data_storage": str(layout.data_storage),
+        "data_source": layout.data_source,
+        "external_root": str(layout.external_root) if layout.external_root else "",
+        "indexes_root": str(layout.indexes_root),
+        "active_ledger_ref": ledger_ref,
+        "active_ledger_dir": ledger_dir,
+        **health,
+        "mounts": {
+            "data": {
+                "storage": str(layout.data_storage),
+                "path": str(layout.data_root),
+                "source": layout.data_source,
+            },
+            "indexes": {
+                "storage": "cache",
+                "path": str(layout.indexes_root),
+            },
+        },
+        "legacy_detected": legacy_detected,
+        "migration_state": str(migration.get("state", "canonical-ready")),
+        # Compatibility aliases for one release.
+        "workspace_root": str(layout.project_root),
+        "releaseledger_dir": str(layout.data_root),
+        "inside_workspace": layout.data_storage == "project",
+    }
 
 
 def config_show(workspace_root: Path) -> dict[str, object]:

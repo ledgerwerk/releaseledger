@@ -11,6 +11,8 @@ from typer.testing import CliRunner
 
 from releaseledger import protocol
 from releaseledger.cli import app
+from releaseledger.services.releases import create_release
+from releaseledger.storage.paths import resolve_project_paths
 
 runner = CliRunner()
 
@@ -60,6 +62,174 @@ def test_common_commands_report_initialized_project(tmp_path: Path) -> None:
     for command in ("status", "info", "doctor", "next-action"):
         result = runner.invoke(app, ["--root", str(tmp_path), command])
         assert result.exit_code == 0, (command, result.stdout, result.stderr)
+
+
+def test_index_repair_cli_and_storage_validation_share_health(
+    tmp_path: Path,
+) -> None:
+    initialized = runner.invoke(app, ["--root", str(tmp_path), "init"])
+    assert initialized.exit_code == 0, initialized.stdout
+    create_release(tmp_path, version="1.0.0")
+    indexes = resolve_project_paths(tmp_path).project.indexes_root
+    (indexes / ".ledger-project.toml").unlink()
+
+    where = runner.invoke(app, ["--json", "--root", str(tmp_path), "storage", "where"])
+    assert where.exit_code == 0, where.stdout
+    where_result = json.loads(where.stdout)["result"]
+    assert "unknown" not in where_result["bindings"]
+    assert where_result["bindings"]["indexes"]["classification"] == "generated-current"
+    assert where_result["raw_layout_valid"] is False
+    assert where_result["layout_valid"] is True
+    where_human = runner.invoke(app, ["--root", str(tmp_path), "storage", "where"])
+    assert where_human.exit_code == 0, where_human.stdout
+    assert "Indexes state: generated-current" in where_human.stdout
+    assert "Raw layout valid: False" in where_human.stdout
+    assert "Layout valid: True" in where_human.stdout
+
+    validation = runner.invoke(
+        app,
+        ["--json", "--root", str(tmp_path), "storage", "validate", "--strict"],
+    )
+    assert validation.exit_code == 0, validation.stdout
+    assert json.loads(validation.stdout)["result"]["passed"] is True
+    validation_human = runner.invoke(
+        app,
+        ["--root", str(tmp_path), "storage", "validate", "--strict"],
+    )
+    assert validation_human.exit_code == 0, validation_human.stdout
+    assert "Raw layout valid: False" in validation_human.stdout
+    assert "Layout valid: True" in validation_human.stdout
+
+    preview = runner.invoke(
+        app,
+        ["--json", "--root", str(tmp_path), "repair", "index", "--dry-run"],
+    )
+    assert preview.exit_code == 0, preview.stdout
+    assert json.loads(preview.stdout)["result"]["action"] == "rebind-and-rebuild"
+    preview_human = runner.invoke(
+        app,
+        ["--root", str(tmp_path), "repair", "index", "--dry-run"],
+    )
+    assert preview_human.exit_code == 0, preview_human.stdout
+    assert "Action: rebind-and-rebuild" in preview_human.stdout
+    assert not (indexes / ".ledger-project.toml").exists()
+
+    applied = runner.invoke(
+        app,
+        ["--json", "--root", str(tmp_path), "repair", "index", "--apply"],
+    )
+    assert applied.exit_code == 0, applied.stdout
+    repair_result = json.loads(applied.stdout)["result"]
+    assert repair_result["binding_restored"] is True
+    assert repair_result["indexes_rebuilt"] is True
+
+    validation_after = runner.invoke(
+        app,
+        ["--json", "--root", str(tmp_path), "storage", "validate", "--strict"],
+    )
+    assert validation_after.exit_code == 0, validation_after.stdout
+    assert json.loads(validation_after.stdout)["result"]["raw_layout_valid"] is True
+
+
+def test_blocked_cache_cli_reports_repair_and_never_silently_replaces(
+    tmp_path: Path,
+) -> None:
+    init = runner.invoke(app, ["--root", str(tmp_path), "init"])
+    assert init.exit_code == 0, init.stdout
+    create_release(tmp_path, version="1.0.0")
+    indexes = resolve_project_paths(tmp_path).project.indexes_root
+    (indexes / ".ledger-project.toml").unlink()
+    foreign = indexes / "foreign-cache.dat"
+    foreign.write_text("preserve", encoding="utf-8")
+
+    where = runner.invoke(app, ["--json", "--root", str(tmp_path), "storage", "where"])
+    assert where.exit_code == 0, where.stdout
+    where_result = json.loads(where.stdout)["result"]
+    assert where_result["bindings"]["indexes"]["classification"] == "foreign"
+    assert where_result["repair_command"] == "releaseledger repair index --dry-run"
+    where_human = runner.invoke(app, ["--root", str(tmp_path), "storage", "where"])
+    assert where_human.exit_code == 0, where_human.stdout
+    assert "Unexpected cache paths:" in where_human.stdout
+    assert "Repair: releaseledger repair index --dry-run" in where_human.stdout
+
+    validation = runner.invoke(
+        app,
+        ["--json", "--root", str(tmp_path), "storage", "validate", "--strict"],
+    )
+    assert validation.exit_code == 1, validation.stdout
+    assert json.loads(validation.stdout)["result"]["repair_command"] == (
+        "releaseledger repair index --dry-run"
+    )
+    validation_human = runner.invoke(
+        app, ["--root", str(tmp_path), "storage", "validate", "--strict"]
+    )
+    assert validation_human.exit_code == 1, validation_human.stdout
+    assert "Repair: releaseledger repair index --dry-run" in validation_human.stdout
+
+    next_result = runner.invoke(app, ["--json", "--root", str(tmp_path), "next-action"])
+    assert next_result.exit_code == 0, next_result.stdout
+    assert (
+        json.loads(next_result.stdout)["result"]["command"] == "repair index --dry-run"
+    )
+
+    preview = runner.invoke(
+        app,
+        ["--json", "--root", str(tmp_path), "repair", "index", "--dry-run"],
+    )
+    assert preview.exit_code == 0, preview.stdout
+    preview_result = json.loads(preview.stdout)["result"]
+    assert preview_result["action"] == "blocked"
+    assert preview_result["unexpected_paths"] == ["foreign-cache.dat"]
+    assert foreign.read_text(encoding="utf-8") == "preserve"
+
+    refused = runner.invoke(
+        app,
+        ["--root", str(tmp_path), "repair", "index", "--apply"],
+    )
+    assert refused.exit_code == 2, refused.stdout
+    assert foreign.read_text(encoding="utf-8") == "preserve"
+
+    applied = runner.invoke(
+        app,
+        [
+            "--json",
+            "--root",
+            str(tmp_path),
+            "repair",
+            "index",
+            "--apply",
+            "--quarantine-foreign",
+        ],
+    )
+    assert applied.exit_code == 0, applied.stdout
+    assert json.loads(applied.stdout)["result"]["action"] == "quarantine-and-rebuild"
+    assert (indexes / ".ledger-project.toml").is_file()
+
+
+def test_repair_index_appears_in_generated_cli_inventory() -> None:
+    commands = runner.invoke(app, ["--json", "commands"])
+    assert commands.exit_code == 0, commands.stdout
+    inventory = json.loads(commands.stdout)["result"]["commands"]
+    assert any(item["path"] == "repair index" for item in inventory)
+
+    help_group = runner.invoke(app, ["--json", "help", "repair"])
+    assert help_group.exit_code == 0, help_group.stdout
+    assert any(
+        child["path"] == "repair index"
+        for child in json.loads(help_group.stdout)["result"]["children"]
+    )
+    help_command = runner.invoke(app, ["--json", "help", "repair", "index"])
+    assert help_command.exit_code == 0, help_command.stdout
+    assert json.loads(help_command.stdout)["result"]["path"] == "repair index"
+    root_help = runner.invoke(app, ["--help"])
+    assert root_help.exit_code == 0
+    assert "repair" in root_help.stdout
+    commands_human = runner.invoke(app, ["commands"])
+    assert commands_human.exit_code == 0, commands_human.stdout
+    assert "repair index" in commands_human.stdout
+    help_human = runner.invoke(app, ["help", "repair"])
+    assert help_human.exit_code == 0, help_human.stdout
+    assert "repair index" in help_human.stdout
 
 
 def test_doctor_human_and_json_share_skill_protocol_check(

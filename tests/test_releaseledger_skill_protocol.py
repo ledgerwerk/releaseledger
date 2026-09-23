@@ -81,6 +81,17 @@ def test_skill_does_not_document_undated_strict_single_build() -> None:
     assert "release prepare VERSION --previous PREV_VERSION" in text
 
 
+def test_skill_documents_safe_index_cache_recovery() -> None:
+    text = SKILL.read_text(encoding="utf-8")
+    assert "releaseledger repair index --dry-run" in text
+    assert "releaseledger repair index --apply" in text
+    assert "releaseledger repair index --apply --quarantine-foreign" in text
+    assert "inspect `unexpected_paths` and mismatch details" in text
+    assert "Do not use `rm`, `mv`, or direct edits under the cache root." in text
+    assert "Do not route index-cache repair through storage migration." in text
+    assert "same read-only validation command that just failed" in text
+
+
 def test_canonical_skill_has_valid_discoverable_metadata() -> None:
     metadata, error = protocol.read_skill_metadata(SKILL)
     assert error is None

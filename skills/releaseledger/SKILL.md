@@ -42,6 +42,8 @@ Releaseledger is separate from taskledger. Do not treat `.releaseledger/` as tas
 - Do not use git commit messages as changelog entries. Do not paste, paraphrase, title-case, or mechanically convert commit subjects into `summary` values. A commit message is only provenance for locating evidence.
 - Do not run multiple releaseledger mutating commands concurrently. Especially do not fan out `entry add` calls. Use `entry apply ... --dry-run` followed by one `entry apply`, or run single mutating commands sequentially and re-read state after any failure.
 - During normal release work, do not inspect `releaseledger` package internals. If CLI output is insufficient, first try the JSON form of the public command. If the JSON form is still insufficient, write a change request and stop using source code as a workaround unless the user explicitly asks for releaseledger debugging.
+- Do not use `rm`, `mv`, or direct edits under the indexes cache to recover an unbound or foreign cache. Use `repair index`; do not route index-cache repair through storage migration.
+- If `next-action` recommends the same read-only validation command that just failed without adding information, treat it as a Releaseledger CLI bug rather than repeating it indefinitely.
 
 ## Core agent command path
 
@@ -101,6 +103,9 @@ releaseledger changelog build VERSION --strict --unreleased --output CHANGELOG.m
 releaseledger changelog build VERSION --strict --unreleased --output CHANGELOG.md --replace-existing
 
 releaseledger storage where
+releaseledger repair index --dry-run
+releaseledger repair index --apply
+releaseledger repair index --apply --quarantine-foreign
 releaseledger storage validate --strict
 releaseledger migrate status
 releaseledger migrate plan storage-layout --output migration-plan.json
@@ -131,6 +136,15 @@ When `git.tag_creation = "external"`, do not run `git tag`, `git push --tags`, o
 
 In external mode, prepare and audit the release, update and validate the changelog, then stop and tell the user to publish the release through the external workflow. After the external tag exists, resume reconciliation and published checks. 4. Run `releaseledger release list`. 5. For a known release, run `releaseledger release show VERSION`. 6. Run `releaseledger entry list VERSION`. 7. Generate machine context when needed:
 `releaseledger changelog preview VERSION --format json`. 8. Do not inspect `.releaseledger/` internals unless the CLI cannot start and the user explicitly requested forensic inspection.
+
+### Storage index-cache recovery
+
+1. Run `releaseledger --json storage where`.
+2. If `indexes_repairable` is true, normal release work may continue. An ordinary write safely rebinds and rebuilds the generated cache. If the user explicitly requested repair, run `releaseledger repair index --dry-run`, inspect the result, then run `releaseledger repair index --apply`.
+3. If the indexes binding is invalid and its classification is foreign or mismatched, run `releaseledger repair index --dry-run` and inspect `unexpected_paths` and mismatch details.
+4. Do not use `rm`, `mv`, or direct edits under the cache root. Do not route index-cache repair through storage migration.
+5. Use `--quarantine-foreign` only when the user or request explicitly authorizes preserving and replacing the complete blocked cache: `releaseledger repair index --apply --quarantine-foreign`.
+6. Verify with `releaseledger storage validate --strict` and `releaseledger status`.
 
 ## Release creation protocol
 

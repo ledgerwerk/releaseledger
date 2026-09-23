@@ -194,6 +194,11 @@ def build_command_inventory() -> CommandInventory:
     add("storage validate", "Validate storage topology.")
     add("storage set", "Change storage topology.", effect="workspace-write")
     add(
+        "repair index",
+        "Inspect or repair the disposable Releaseledger index cache.",
+        effect="workspace-write",
+    )
+    add(
         "storage clear-override",
         "Clear a local storage override.",
         effect="workspace-write",

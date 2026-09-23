@@ -33,6 +33,7 @@ from typing import Any, Literal, cast
 
 from ledgercore.errors import (
     LedgerCoreError,
+    PathValidationError,
     StorageBindingError,
     StorageError,
 )
@@ -90,6 +91,9 @@ __all__ = [
     "IndexCacheClassification",
     "PreparedReleaseledgerTarget",
     "ReleaseledgerLedgerLayout",
+    "StorageBinding",
+    "StorageValidationReport",
+    "StorageValidationResult",
     "UserNamespace",
     "build_releaseledger_legacy_migration_plan",
     "classify_releaseledger_index_cache",
@@ -565,15 +569,33 @@ def load_releaseledger_ledger_layout(
         external_root=data_mount.external_root,
         user_namespace=user_ns,
     )
-    indexes_root = _resolve_mount_path(
-        project_root=project_root,
-        project_uuid=project_uuid,
-        checkout_id=checkout_id,
-        storage=indexes_mount.storage,
-        mount_name=INDEXES_MOUNT,
-        external_root=indexes_mount.external_root,
-        user_namespace=user_ns,
+    unresolved_indexes_root = (
+        user_ns.user_cache.resolve(strict=False)
+        / TOOL_NAME
+        / project_uuid
+        / checkout_id
+        / INDEXES_MOUNT
     )
+    resolved_indexes_root: Path | None = None
+    try:
+        resolved_indexes_root = _resolve_mount_path(
+            project_root=project_root,
+            project_uuid=project_uuid,
+            checkout_id=checkout_id,
+            storage=indexes_mount.storage,
+            mount_name=INDEXES_MOUNT,
+            external_root=indexes_mount.external_root,
+            user_namespace=user_ns,
+        )
+    except PathValidationError:
+        if not unresolved_indexes_root.is_symlink():
+            raise
+    indexes_root = (
+        unresolved_indexes_root
+        if unresolved_indexes_root.is_symlink()
+        else resolved_indexes_root
+    )
+    assert indexes_root is not None
 
     config_binding = _expected_binding(
         project_uuid=project_uuid,
@@ -631,13 +653,22 @@ def load_releaseledger_ledger_layout(
                 allow_missing=True,
             )
         )
-        results.append(
-            _validate_optional_binding(
+        if (
+            indexes_root.is_symlink()
+            or (indexes_root / ".ledger-project.toml").is_symlink()
+        ):
+            indexes_result = StorageValidationResult(
+                False,
+                indexes_root,
+                reason="indexes path or binding marker is a symlink",
+            )
+        else:
+            indexes_result = _validate_optional_binding(
                 mount_root=indexes_root,
                 expected=indexes_binding,
                 allow_missing=True,
             )
-        )
+        results.append(indexes_result)
         report = StorageValidationReport(tuple(results))
 
     return ReleaseledgerLedgerLayout(
@@ -874,46 +905,41 @@ def classify_releaseledger_index_cache(root: Path) -> IndexCacheClassification:
 
     generated_files = {"releases.json", "entries.json"}
     unexpected: list[Path] = []
-
-    if all(child.name in generated_files for child in children):
-        for child in children:
+    has_ledgers = False
+    for child in children:
+        if child.name in generated_files:
             if child.is_symlink() or not child.is_file():
                 unexpected.append(_cache_relative_path(root, child))
-        if not unexpected:
-            return IndexCacheClassification("generated-legacy")
-        return IndexCacheClassification("foreign", tuple(unexpected))
-
-    ledgers = root / "ledgers"
-    if len(children) == 1 and children[0].name == "ledgers" and ledgers.is_dir():
-        if ledgers.is_symlink():
-            unexpected.append(_cache_relative_path(root, ledgers))
-        else:
-            for ledger_dir in sorted(ledgers.iterdir(), key=lambda path: path.name):
+        elif child.name == "ledgers":
+            has_ledgers = True
+            if child.is_symlink() or not child.is_dir():
+                unexpected.append(_cache_relative_path(root, child))
+                continue
+            for ledger_dir in sorted(child.iterdir(), key=lambda path: path.name):
                 if ledger_dir.is_symlink() or not ledger_dir.is_dir():
                     unexpected.append(_cache_relative_path(root, ledger_dir))
                     continue
-                for child in sorted(ledger_dir.iterdir(), key=lambda path: path.name):
-                    if (
-                        child.is_symlink()
-                        or not child.is_file()
-                        or child.name not in generated_files
-                    ):
-                        unexpected.append(_cache_relative_path(root, child))
-        if not unexpected:
-            return IndexCacheClassification("generated-current")
-        return IndexCacheClassification("foreign", tuple(unexpected))
-
-    for child in children:
-        unexpected.append(_cache_relative_path(root, child))
-        if child.is_dir() and not child.is_symlink():
-            for nested in child.rglob("*"):
-                if (
-                    nested.is_symlink()
-                    or not nested.is_dir()
-                    and nested.name not in generated_files
+                for index_file in sorted(
+                    ledger_dir.iterdir(), key=lambda path: path.name
                 ):
-                    unexpected.append(_cache_relative_path(root, nested))
-    return IndexCacheClassification("foreign", tuple(unexpected))
+                    if (
+                        index_file.is_symlink()
+                        or not index_file.is_file()
+                        or index_file.name not in generated_files
+                    ):
+                        unexpected.append(_cache_relative_path(root, index_file))
+        else:
+            unexpected.append(_cache_relative_path(root, child))
+
+    if unexpected:
+        return IndexCacheClassification("foreign", tuple(unexpected))
+    if has_ledgers:
+        return IndexCacheClassification("generated-current")
+    if all(child.name in generated_files for child in children):
+        return IndexCacheClassification("generated-legacy")
+    return IndexCacheClassification(
+        "foreign", tuple(_cache_relative_path(root, child) for child in children)
+    )
 
 
 def ensure_releaseledger_indexes_binding(
@@ -924,6 +950,16 @@ def ensure_releaseledger_indexes_binding(
     """Ensure the disposable index cache has a valid Ledgercore binding."""
     mount_root = layout.indexes_root
     marker = layout.indexes_binding_path
+    if mount_root.is_symlink():
+        raise LaunchError(
+            "Cannot rebuild indexes through a symlink mount root.",
+            code=CODE_CONFIG_ERROR,
+            exit_code=2,
+            data={"mount": INDEXES_MOUNT, "path": str(mount_root)},
+            remediation=[
+                "Run `releaseledger repair index --dry-run` to inspect the cache."
+            ],
+        )
     expected = _expected_binding(
         project_uuid=layout.project_uuid,
         project_name=layout.project_name,
