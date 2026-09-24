@@ -13,6 +13,7 @@ from releaseledger.ledgercore_backend import (
     load_releaseledger_ledger_layout,
 )
 from releaseledger.migration import migration_status
+from releaseledger.protocol import SKILL_PROTOCOL_VERSION
 from releaseledger.services.config import storage_where
 from releaseledger.services.entries import add_release_entry
 from releaseledger.services.project_state import (
@@ -33,6 +34,19 @@ def _initialized_project(tmp_path: Path) -> Path:
     initialize_project(tmp_path)
     create_release(tmp_path, version="1.0.0")
     return resolve_project_paths(tmp_path).project.indexes_root
+
+
+def _install_matching_skill(root: Path) -> None:
+    skill = root / ".agents" / "skills" / "releaseledger" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\n"
+        "name: releaseledger\n"
+        "description: Test Releaseledger skill.\n"
+        f"protocol: {SKILL_PROTOCOL_VERSION}\n"
+        "---\n",
+        encoding="utf-8",
+    )
 
 
 def _where(tmp_path: Path) -> dict[str, object]:
@@ -128,8 +142,11 @@ def test_missing_indexes_path_remains_named_and_valid(tmp_path: Path) -> None:
 
 
 def test_generated_legacy_cache_is_effectively_valid_and_repairable(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _install_matching_skill(tmp_path)
     indexes = _initialized_project(tmp_path)
     current = indexes / "ledgers" / "main"
     legacy_releases = indexes / "releases.json"
@@ -221,8 +238,11 @@ def test_indexes_root_symlink_is_blocked_without_following_target(
 
 
 def test_generated_cache_health_is_consistent_across_state_surfaces(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _install_matching_skill(tmp_path)
     indexes = _initialized_project(tmp_path)
     (indexes / ".ledger-project.toml").unlink()
 
