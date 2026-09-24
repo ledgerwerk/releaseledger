@@ -180,7 +180,9 @@ def storage_health_to_dict(health: StorageHealth) -> dict[str, object]:
         if mount.classification is not None:
             item["classification"] = mount.classification
         if mount.unexpected_paths:
-            item["unexpected_paths"] = [path.as_posix() for path in mount.unexpected_paths]
+            item["unexpected_paths"] = [
+                path.as_posix() for path in mount.unexpected_paths
+            ]
         bindings[mount.name] = item
     indexes_mount = next(mount for mount in health.mounts if mount.name == "indexes")
     repair_command = (

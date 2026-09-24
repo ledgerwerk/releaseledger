@@ -1,0 +1,61 @@
+rows:
+  - sha: 53a23296cd9b89076d83a93d518375ec19cf3383
+    inspected: true
+    inspected_paths:
+      - releaseledger/cli.py
+      - releaseledger/command_registry.py
+      - releaseledger/ledgercore_backend.py
+      - releaseledger/migration.py
+      - releaseledger/services/config.py
+      - releaseledger/services/project_state.py
+      - releaseledger/services/storage_health.py
+      - releaseledger/services/storage_repair.py
+      - skills/releaseledger/SKILL.md
+      - tests/test_cli_common_commands.py
+      - tests/test_releaseledger_skill_protocol.py
+      - tests/test_storage_health.py
+    observed_behavior: "Reviewed the full patch. Adds a repair index command
+      (releaseledger/services/storage_repair.py) that inspects the disposable indexes
+      cache and applies explicit actions: rebind-and-rebuild for generated or legacy
+      caches, quarantine-and-rebuild for foreign caches behind --quarantine-foreign,
+      and a blocked action otherwise. Adds storage health assessment
+      (releaseledger/services/storage_health.py) that classifies mounts by raw and
+      effective validity and lists unexpected cache paths. Surfaces warnings in status,
+      indexes state and repair guidance in storage where and storage validate, and
+      remediation text in migrate status. Includes skill protocol documentation and
+      tests for the new behavior."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: "Coverage owner for the repair index entry; also supporting source
+      for the storage diagnostics entry."
+    stale: false
+  - sha: 4f515e44c08a27f27aa054461ff820033968305a
+    inspected: true
+    inspected_paths:
+      - tests/test_storage_health.py
+    observed_behavior: "Reviewed the patch. Test-only change: storage health
+      tests now isolate HOME and install a matching skill fixture so user-level Agent
+      Skill discovery cannot leak into test outcomes. No product behavior changes."
+    public_impact: none
+    decision: internal
+    target_entry_key: null
+    target_entry_id: null
+    notes: "Test hardening for the new storage health behavior; represented by
+      an internal entry with rationale and hidden from the public changelog."
+    stale: false
+  - sha: 9404db00e154fcae3a8c8b08de0500cf7a1dd06a
+    inspected: true
+    inspected_paths:
+      - releaseledger/services/storage_health.py
+    observed_behavior:
+      "Reviewed the patch. storage_health_to_dict now serializes
+      unexpected cache paths with POSIX separators so the reported paths are portable
+      across platforms instead of using platform-specific path strings."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: "Coverage owner for the storage diagnostics entry."
+    stale: false

@@ -1,0 +1,2046 @@
+ releaseledger/cli.py                       | 123 +++++++-
+ releaseledger/command_registry.py          |   5 +
+ releaseledger/ledgercore_backend.py        | 122 +++++---
+ releaseledger/migration.py                 |  35 ++-
+ releaseledger/services/config.py           | 268 ++++++++----------
+ releaseledger/services/project_state.py    |  78 +++--
+ releaseledger/services/storage_health.py   | 197 +++++++++++++
+ releaseledger/services/storage_repair.py   | 221 +++++++++++++++
+ skills/releaseledger/SKILL.md              |  14 +
+ tests/test_cli_common_commands.py          | 170 +++++++++++
+ tests/test_releaseledger_skill_protocol.py |  11 +
+ tests/test_storage_health.py               | 439 +++++++++++++++++++++++++++++
+ 12 files changed, 1457 insertions(+), 226 deletions(-)
+
+diff --git a/releaseledger/cli.py b/releaseledger/cli.py
+index 2450516..b881874 100644
+--- a/releaseledger/cli.py
++++ b/releaseledger/cli.py
+@@ -435,6 +435,10 @@ def status_command(
+             f"health: {result.get('health', '')}\n"
+             f"next: {result.get('next_action', {}).get('command', '')}"  # type: ignore[attr-defined]
+         )
++        warnings = result.get("warnings", [])
++        warnings = result.get("warnings", [])
++        if isinstance(warnings, list) and warnings:
++            human += "\n" + "\n".join(f"warning: {warning}" for warning in warnings)
+         return result, [], human
+
+     run_command(
+@@ -3883,6 +3887,15 @@ def storage_where_command(ctx: typer.Context) -> None:
+
+     def produce() -> CommandResult:
+         result = storage_where(state.cwd)
++        bindings = result.get("bindings")
++        indexes = bindings.get("indexes") if isinstance(bindings, dict) else {}
++        if not isinstance(indexes, dict):
++            indexes = {}
++        indexes_state = (
++            str(indexes.get("classification", "unknown"))
++            if isinstance(indexes, dict)
++            else "unknown"
++        )
+         lines = [
+             f"Project root: {result.get('project_root', '')}",
+             f"Project UUID: {result.get('project_uuid', '')}",
+@@ -3895,12 +3908,22 @@ def storage_where_command(ctx: typer.Context) -> None:
+             f"Data source: {result.get('data_source', '')}",
+             f"External root: {result.get('external_root', '')}",
+             f"Indexes root: {result.get('indexes_root', '')}",
++            f"Indexes state: {indexes_state}",
++            f"Raw layout valid: {result.get('raw_layout_valid', False)}",
+             f"Active ledger: {result.get('active_ledger_ref', '')}",
+             f"Active ledger dir: {result.get('active_ledger_dir', '')}",
+             f"Layout valid: {result.get('layout_valid', False)}",
+             f"Legacy detected: {result.get('legacy_detected', False)}",
+             f"Migration state: {result.get('migration_state', '')}",
+         ]
++        unexpected_paths = indexes.get("unexpected_paths", [])
++        if isinstance(unexpected_paths, list) and unexpected_paths:
++            lines.append("Unexpected cache paths:")
++            lines.extend(f"  - {path}" for path in unexpected_paths)
++        if result.get("indexes_repairable"):
++            lines.append("Warning: generated indexes cache will be rebound/rebuilt.")
++        if result.get("repair_command"):
++            lines.append(f"Repair: {result['repair_command']}")
+         human = "\n".join(lines)
+         return result, [], human
+
+@@ -3931,20 +3954,45 @@ def storage_validate_command(
+
+         result = storage_where(state.cwd)
+         validation: dict[str, object] = {
++            "raw_layout_valid": result.get("raw_layout_valid", False),
+             "layout_valid": result.get("layout_valid", False),
++            "indexes_repairable": result.get("indexes_repairable", False),
++            "migration_state": result.get("migration_state", ""),
+             "bindings": result.get("bindings", {}),
+         }
++        bindings = validation["bindings"]
++        indexes = bindings.get("indexes", {}) if isinstance(bindings, dict) else {}
++        if isinstance(indexes, dict) and not bool(indexes.get("valid", True)):
++            validation["repair_command"] = "releaseledger repair index --dry-run"
+         if strict:
+             data_root = Path(str(result.get("data_root", "")))
+             if data_root.is_dir():
+                 domain = validate_domain_records(data_root)
+                 validation["domain"] = domain
+
+-        lines = [f"Layout valid: {validation.get('layout_valid', False)}"]
+-        bindings = validation.get("bindings", {})
++        lines = [
++            f"Raw layout valid: {validation['raw_layout_valid']}",
++            f"Layout valid: {validation['layout_valid']}",
++            f"Indexes repairable: {validation['indexes_repairable']}",
++            f"Migration state: {validation['migration_state']}",
++        ]
+         if isinstance(bindings, dict):
+             for name, status in bindings.items():
+-                lines.append(f"  {name}: {status}")
++                if not isinstance(status, dict):
++                    continue
++                lines.append(
++                    f"  {name}: valid={status.get('valid', False)} "
++                    f"raw_valid={status.get('raw_valid', False)} "
++                    f"classification={status.get('classification', 'n/a')}"
++                )
++                if status.get("reason"):
++                    lines.append(f"    reason: {status['reason']}")
++                unexpected_paths = status.get("unexpected_paths", [])
++                if isinstance(unexpected_paths, list):
++                    for path in unexpected_paths:
++                        lines.append(f"    unexpected: {path}")
++        if validation.get("repair_command"):
++            lines.append(f"Repair: {validation['repair_command']}")
+         passed = bool(validation.get("layout_valid", False))
+         if "domain" in validation:
+             domain = validation["domain"]  # type: ignore[assignment]
+@@ -3964,6 +4012,70 @@ def storage_validate_command(
+     )
+
+
++repair_app = typer.Typer(help="Repair derived Releaseledger state.")
++app.add_typer(repair_app, name="repair")
++
++
++@repair_app.command("index")
++def repair_index_command(
++    ctx: typer.Context,
++    dry_run: Annotated[
++        bool, typer.Option("--dry-run", help="Inspect without changing the cache.")
++    ] = False,
++    apply: Annotated[bool, typer.Option("--apply", help="Apply the repair.")] = False,
++    quarantine_foreign: Annotated[
++        bool,
++        typer.Option(
++            "--quarantine-foreign",
++            help="Preserve and replace a foreign or mismatched cache.",
++        ),
++    ] = False,
++) -> None:
++    """Inspect or rebuild the disposable Releaseledger index cache."""
++    state = cli_state_from_context(ctx)
++    if dry_run == apply:
++        raise LaunchError(
++            "Choose exactly one of --dry-run or --apply.",
++            code=CODE_USAGE_ERROR,
++            exit_code=2,
++        )
++
++    def produce() -> CommandResult:
++        from releaseledger.services.storage_repair import repair_index
++
++        result = repair_index(
++            state.cwd,
++            apply=apply,
++            quarantine_foreign=quarantine_foreign,
++        )
++        lines = [
++            f"Action: {result['action']}",
++            f"Classification: {result['classification_before']}",
++            f"Source: {result['source']}",
++            f"Binding restored: {result['binding_restored']}",
++            f"Indexes rebuilt: {result['indexes_rebuilt']}",
++            f"Layout valid: {result['layout_valid_after']}",
++        ]
++        if result.get("quarantine_path"):
++            lines.append(f"Quarantine: {result['quarantine_path']}")
++        unexpected_paths = result.get("unexpected_paths", [])
++        if isinstance(unexpected_paths, list):
++            for path in unexpected_paths:
++                lines.append(f"Unexpected: {path}")
++        if result.get("next_command"):
++            lines.append(f"Next: {result['next_command']}")
++        return result, [], "\n".join(lines)
++
++    run_command(
++        command="repair.index",
++        result_type="index_repair",
++        json_output=state.json_output,
++        produce=produce,
++        workspace_root=state.root,
++        mutating=apply,
++    )
++
++
+ @storage_app.command("set")
+ def storage_set_command(
+     ctx: typer.Context,
+@@ -4298,7 +4410,10 @@ def _migration_command_result(
+         )
+     if operation == "status":
+         result = migration_status(root)
+-        return result, [], f"Migration state: {result.get('state', 'unknown')}"
++        human = f"Migration state: {result.get('state', 'unknown')}"
++        if result.get("remediation"):
++            human += f"\nRemediation: {result['remediation']}"
++        return result, [], human
+     if operation == "recover":
+         if policy not in {"auto", "resume", "rollback"}:
+             raise LaunchError(
+diff --git a/releaseledger/command_registry.py b/releaseledger/command_registry.py
+index 73aaee8..1d29cad 100644
+--- a/releaseledger/command_registry.py
++++ b/releaseledger/command_registry.py
+@@ -193,6 +193,11 @@ def build_command_inventory() -> CommandInventory:
+     add("storage where", "Show effective storage topology.")
+     add("storage validate", "Validate storage topology.")
+     add("storage set", "Change storage topology.", effect="workspace-write")
++    add(
++        "repair index",
++        "Inspect or repair the disposable Releaseledger index cache.",
++        effect="workspace-write",
++    )
+     add(
+         "storage clear-override",
+         "Clear a local storage override.",
+diff --git a/releaseledger/ledgercore_backend.py b/releaseledger/ledgercore_backend.py
+index fc0d3a4..4982f33 100644
+--- a/releaseledger/ledgercore_backend.py
++++ b/releaseledger/ledgercore_backend.py
+@@ -33,6 +33,7 @@ from typing import Any, Literal, cast
+
+ from ledgercore.errors import (
+     LedgerCoreError,
++    PathValidationError,
+     StorageBindingError,
+     StorageError,
+ )
+@@ -90,6 +91,9 @@ __all__ = [
+     "IndexCacheClassification",
+     "PreparedReleaseledgerTarget",
+     "ReleaseledgerLedgerLayout",
++    "StorageBinding",
++    "StorageValidationReport",
++    "StorageValidationResult",
+     "UserNamespace",
+     "build_releaseledger_legacy_migration_plan",
+     "classify_releaseledger_index_cache",
+@@ -565,15 +569,33 @@ def load_releaseledger_ledger_layout(
+         external_root=data_mount.external_root,
+         user_namespace=user_ns,
+     )
+-    indexes_root = _resolve_mount_path(
+-        project_root=project_root,
+-        project_uuid=project_uuid,
+-        checkout_id=checkout_id,
+-        storage=indexes_mount.storage,
+-        mount_name=INDEXES_MOUNT,
+-        external_root=indexes_mount.external_root,
+-        user_namespace=user_ns,
++    unresolved_indexes_root = (
++        user_ns.user_cache.resolve(strict=False)
++        / TOOL_NAME
++        / project_uuid
++        / checkout_id
++        / INDEXES_MOUNT
++    )
++    resolved_indexes_root: Path | None = None
++    try:
++        resolved_indexes_root = _resolve_mount_path(
++            project_root=project_root,
++            project_uuid=project_uuid,
++            checkout_id=checkout_id,
++            storage=indexes_mount.storage,
++            mount_name=INDEXES_MOUNT,
++            external_root=indexes_mount.external_root,
++            user_namespace=user_ns,
++        )
++    except PathValidationError:
++        if not unresolved_indexes_root.is_symlink():
++            raise
++    indexes_root = (
++        unresolved_indexes_root
++        if unresolved_indexes_root.is_symlink()
++        else resolved_indexes_root
+     )
++    assert indexes_root is not None
+
+     config_binding = _expected_binding(
+         project_uuid=project_uuid,
+@@ -631,13 +653,22 @@ def load_releaseledger_ledger_layout(
+                 allow_missing=True,
+             )
+         )
+-        results.append(
+-            _validate_optional_binding(
++        if (
++            indexes_root.is_symlink()
++            or (indexes_root / ".ledger-project.toml").is_symlink()
++        ):
++            indexes_result = StorageValidationResult(
++                False,
++                indexes_root,
++                reason="indexes path or binding marker is a symlink",
++            )
++        else:
++            indexes_result = _validate_optional_binding(
+                 mount_root=indexes_root,
+                 expected=indexes_binding,
+                 allow_missing=True,
+             )
+-        )
++        results.append(indexes_result)
+         report = StorageValidationReport(tuple(results))
+
+     return ReleaseledgerLedgerLayout(
+@@ -874,46 +905,41 @@ def classify_releaseledger_index_cache(root: Path) -> IndexCacheClassification:
+
+     generated_files = {"releases.json", "entries.json"}
+     unexpected: list[Path] = []
+-
+-    if all(child.name in generated_files for child in children):
+-        for child in children:
++    has_ledgers = False
++    for child in children:
++        if child.name in generated_files:
+             if child.is_symlink() or not child.is_file():
+                 unexpected.append(_cache_relative_path(root, child))
+-        if not unexpected:
+-            return IndexCacheClassification("generated-legacy")
+-        return IndexCacheClassification("foreign", tuple(unexpected))
+-
+-    ledgers = root / "ledgers"
+-    if len(children) == 1 and children[0].name == "ledgers" and ledgers.is_dir():
+-        if ledgers.is_symlink():
+-            unexpected.append(_cache_relative_path(root, ledgers))
+-        else:
+-            for ledger_dir in sorted(ledgers.iterdir(), key=lambda path: path.name):
++        elif child.name == "ledgers":
++            has_ledgers = True
++            if child.is_symlink() or not child.is_dir():
++                unexpected.append(_cache_relative_path(root, child))
++                continue
++            for ledger_dir in sorted(child.iterdir(), key=lambda path: path.name):
+                 if ledger_dir.is_symlink() or not ledger_dir.is_dir():
+                     unexpected.append(_cache_relative_path(root, ledger_dir))
+                     continue
+-                for child in sorted(ledger_dir.iterdir(), key=lambda path: path.name):
++                for index_file in sorted(
++                    ledger_dir.iterdir(), key=lambda path: path.name
++                ):
+                     if (
+-                        child.is_symlink()
+-                        or not child.is_file()
+-                        or child.name not in generated_files
++                        index_file.is_symlink()
++                        or not index_file.is_file()
++                        or index_file.name not in generated_files
+                     ):
+-                        unexpected.append(_cache_relative_path(root, child))
+-        if not unexpected:
+-            return IndexCacheClassification("generated-current")
+-        return IndexCacheClassification("foreign", tuple(unexpected))
++                        unexpected.append(_cache_relative_path(root, index_file))
++        else:
++            unexpected.append(_cache_relative_path(root, child))
+
+-    for child in children:
+-        unexpected.append(_cache_relative_path(root, child))
+-        if child.is_dir() and not child.is_symlink():
+-            for nested in child.rglob("*"):
+-                if (
+-                    nested.is_symlink()
+-                    or not nested.is_dir()
+-                    and nested.name not in generated_files
+-                ):
+-                    unexpected.append(_cache_relative_path(root, nested))
+-    return IndexCacheClassification("foreign", tuple(unexpected))
++    if unexpected:
++        return IndexCacheClassification("foreign", tuple(unexpected))
++    if has_ledgers:
++        return IndexCacheClassification("generated-current")
++    if all(child.name in generated_files for child in children):
++        return IndexCacheClassification("generated-legacy")
++    return IndexCacheClassification(
++        "foreign", tuple(_cache_relative_path(root, child) for child in children)
++    )
+
+
+ def ensure_releaseledger_indexes_binding(
+@@ -924,6 +950,16 @@ def ensure_releaseledger_indexes_binding(
+     """Ensure the disposable index cache has a valid Ledgercore binding."""
+     mount_root = layout.indexes_root
+     marker = layout.indexes_binding_path
++    if mount_root.is_symlink():
++        raise LaunchError(
++            "Cannot rebuild indexes through a symlink mount root.",
++            code=CODE_CONFIG_ERROR,
++            exit_code=2,
++            data={"mount": INDEXES_MOUNT, "path": str(mount_root)},
++            remediation=[
++                "Run `releaseledger repair index --dry-run` to inspect the cache."
++            ],
++        )
+     expected = _expected_binding(
+         project_uuid=layout.project_uuid,
+         project_name=layout.project_name,
+diff --git a/releaseledger/migration.py b/releaseledger/migration.py
+index 879d15d..1596ad9 100644
+--- a/releaseledger/migration.py
++++ b/releaseledger/migration.py
+@@ -2834,7 +2834,7 @@ def evaluate_migration_state(
+     # 2. Try to load canonical project
+     canonical_valid = False
+     canonical_error: str | None = None
+-    validation_report = None
++    storage_health = None
+     if has_canonical:
+         try:
+             from releaseledger.ledgercore_backend import (
+@@ -2845,7 +2845,9 @@ def evaluate_migration_state(
+                 workspace_root, allow_missing=False, validate_storage=True
+             )
+             canonical_valid = True
+-            validation_report = layout.validation_report
++            from releaseledger.services.storage_health import assess_storage_layout
++
++            storage_health = assess_storage_layout(layout)
+         except Exception as exc:
+             canonical_error = str(exc)
+
+@@ -2879,9 +2881,18 @@ def evaluate_migration_state(
+
+     if (
+         canonical_valid
+-        and validation_report is not None
+-        and not validation_report.valid
++        and storage_health is not None
++        and not storage_health.layout_valid
+     ):
++        indexes_mount = next(
++            (mount for mount in storage_health.mounts if mount.name == "indexes"),
++            None,
++        )
++        remediation = (
++            "Run `releaseledger repair index --dry-run`."
++            if indexes_mount is not None and not indexes_mount.effective_valid
++            else "Storage validation failed. Run `releaseledger storage validate --strict`."
++        )
+         return {
+             "state": "canonical-invalid",
+             "legacy_detected": legacy is not None,
+@@ -2889,13 +2900,14 @@ def evaluate_migration_state(
+             "canonical_detected": True,
+             "migration_in_progress": False,
+             "migration_recovery_required": False,
+-            "remediation": (
+-                "Storage validation failed. "
+-                "Run `releaseledger storage validate --strict`."
+-            ),
++            "raw_layout_valid": storage_health.raw_layout_valid,
++            "layout_valid": storage_health.layout_valid,
++            "indexes_repairable": storage_health.indexes_repairable,
++            "remediation": remediation,
+         }
+
+     if canonical_valid and legacy is not None:
++        assert storage_health is not None
+         # Compute legacy_relation and cleanup_safe for the
+         # canonical-with-legacy-artifacts state.
+         legacy_relation, cleanup_safe, next_action = _compute_legacy_relation(
+@@ -2909,6 +2921,9 @@ def evaluate_migration_state(
+             "manifest_path": str(manifest),
+             "migration_in_progress": False,
+             "migration_recovery_required": False,
++            "raw_layout_valid": storage_health.raw_layout_valid,
++            "layout_valid": storage_health.layout_valid,
++            "indexes_repairable": storage_health.indexes_repairable,
+             "legacy_relation": legacy_relation,
+             "cleanup_safe": cleanup_safe,
+             "next_action": next_action,
+@@ -2925,6 +2940,7 @@ def evaluate_migration_state(
+         return result
+
+     if canonical_valid:
++        assert storage_health is not None
+         return {
+             "state": "canonical-ready",
+             "legacy_detected": False,
+@@ -2932,6 +2948,9 @@ def evaluate_migration_state(
+             "manifest_path": str(manifest),
+             "migration_in_progress": False,
+             "migration_recovery_required": False,
++            "raw_layout_valid": storage_health.raw_layout_valid,
++            "layout_valid": storage_health.layout_valid,
++            "indexes_repairable": storage_health.indexes_repairable,
+             "legacy_relation": "none",
+             "cleanup_safe": False,
+             "next_action": "none",
+diff --git a/releaseledger/services/config.py b/releaseledger/services/config.py
+index dae21d2..c14a0ba 100644
+--- a/releaseledger/services/config.py
++++ b/releaseledger/services/config.py
+@@ -8,7 +8,7 @@ from __future__ import annotations
+
+ from pathlib import Path
+
+-from releaseledger.errors import CODE_USAGE_ERROR, LaunchError
++from releaseledger.errors import CODE_NOT_FOUND, CODE_USAGE_ERROR, LaunchError
+ from releaseledger.storage.config import (
+     ProjectConfig,
+     load_project_config,
+@@ -22,171 +22,145 @@ __all__ = [
+ ]
+
+
+-def _evaluate_migration_state_for_storage(
+-    workspace_root: Path,
+-    legacy_detected: bool,
+-) -> str:
+-    """Evaluate migration state for the storage_where diagnostic.
++def _find_canonical_manifest(root: Path) -> Path | None:
++    for parent in (root, *root.parents):
++        manifest = parent / ".ledger" / "ledger.toml"
++        if manifest.exists() or manifest.is_symlink():
++            return manifest
++    return None
+
+-    Uses the shared state evaluator from migration module when available,
+-    falling back to simple heuristics if the evaluator raises.
+-    """
+-    try:
+-        from releaseledger.migration import evaluate_migration_state
+
+-        state = evaluate_migration_state(workspace_root)
+-        return str(state.get("state", "canonical-ready"))
+-    except Exception:
+-        return "canonical-ready"
++def _legacy_storage_where(root: Path) -> dict[str, object]:
++    from releaseledger.migration import discover_legacy_project
++
++    try:
++        config_path, _ = discover_legacy_project(root)
++    except LaunchError:
++        return {
++            "kind": "storage_location",
++            "discovered": False,
++            "canonical": False,
++            "project_root": str(root),
++            "legacy_detected": False,
++            "migration_state": "uninitialized",
++            "layout_valid": False,
++            "raw_layout_valid": False,
++            "workspace_root": str(root),
++        }
++    return {
++        "kind": "storage_location",
++        "discovered": False,
++        "canonical": False,
++        "project_root": str(root),
++        "legacy_detected": True,
++        "legacy_config_path": str(config_path),
++        "migration_state": "legacy",
++        "layout_valid": False,
++        "raw_layout_valid": False,
++        "data_root": "",
++        "indexes_root": "",
++        "workspace_root": str(root),
++        "releaseledger_dir": "",
++    }
+
+
+ def storage_where(workspace_root: Path) -> dict[str, object]:
+-    """Return a read-only diagnostic dict describing the effective storage location.
++    """Return read-only storage diagnostics with normalized mount health."""
++    from releaseledger.ledgercore_backend import load_releaseledger_ledger_layout
++    from releaseledger.migration import (
++        discover_legacy_project,
++        evaluate_migration_state,
++    )
++    from releaseledger.services.storage_health import (
++        assess_storage_layout,
++        storage_health_to_dict,
++    )
+
+-    Never mutates state. Checks for canonical schema-3 manifest first,
+-    then falls back to legacy detection.
+-    """
+     root = Path(workspace_root).resolve()
+-
+-    # Try to load the canonical project (traverses upward).
++    manifest = _find_canonical_manifest(root)
+     try:
+-        from releaseledger.ledgercore_backend import (
+-            load_releaseledger_ledger_layout,
+-        )
+-
+         layout = load_releaseledger_ledger_layout(
+             root, allow_missing=True, validate_storage=True
+         )
+-        ledger_ref = ""
+-        ledger_dir = ""
+-        try:
+-            from releaseledger.storage.paths import resolve_project_paths
+-
+-            paths = resolve_project_paths(root)
+-            ledger_ref = paths.ledger_ref
+-            ledger_dir = str(paths.ledger_dir)
+-        except Exception:
+-            pass
+-
+-        legacy_detected = False
+-        from releaseledger.migration import discover_legacy_project
+-
+-        try:
+-            discover_legacy_project(root)
+-            legacy_detected = True
+-        except Exception:
+-            pass
+-
+-        bindings: dict[str, object] = {}
+-        report = layout.validation_report
+-        indexes_repairable = False
+-        if report is not None:
+-            for item in report.results:
+-                mount_name = item.binding.mount if item.binding else "unknown"
+-                valid = item.valid
+-                reason = item.reason or ""
+-                if mount_name == "indexes" and not item.valid:
+-                    from releaseledger.ledgercore_backend import (
+-                        classify_releaseledger_index_cache,
+-                    )
+-
+-                    classification = classify_releaseledger_index_cache(
+-                        layout.indexes_root
+-                    )
+-                    if classification.state in {
+-                        "missing",
+-                        "empty",
+-                        "generated-current",
+-                        "generated-legacy",
+-                    }:
+-                        indexes_repairable = True
+-                        valid = True
+-                        reason = (
+-                            "Generated cache is safe to rebind before the next write."
+-                        )
+-                    elif classification.unexpected_paths:
+-                        reason = "Foreign cache content: " + ", ".join(
+-                            str(path) for path in classification.unexpected_paths
+-                        )
+-                bindings[mount_name] = {
+-                    "valid": valid,
+-                    "path": str(item.path),
+-                    "reason": reason,
+-                    "storage": item.binding.storage if item.binding else "",
+-                }
++    except LaunchError as exc:
++        if manifest is None:
++            if exc.code != CODE_NOT_FOUND:
++                raise
++            return _legacy_storage_where(root)
++        project_root = manifest.parent.parent
+         return {
+             "kind": "storage_location",
+             "discovered": True,
+             "canonical": True,
+-            "project_root": str(layout.project_root),
+-            "project_uuid": layout.project_uuid,
+-            "project_name": layout.project_name or "",
+-            "manifest_path": str(layout.manifest_path),
+-            "local_config_path": str(layout.local_config_path),
+-            "tool_config_path": str(layout.config_path),
+-            "data_root": str(layout.data_root),
+-            "data_storage": str(layout.data_storage),
+-            "data_source": layout.data_source,
+-            "external_root": str(layout.external_root) if layout.external_root else "",
+-            "indexes_root": str(layout.indexes_root),
+-            "active_ledger_ref": ledger_ref,
+-            "active_ledger_dir": ledger_dir,
+-            "layout_valid": bool(report is None or report.valid or indexes_repairable),
+-            "indexes_repairable": indexes_repairable,
+-            "bindings": bindings,
+-            "mounts": {
+-                "data": {
+-                    "storage": str(layout.data_storage),
+-                    "path": str(layout.data_root),
+-                    "source": layout.data_source,
+-                },
+-                "indexes": {
+-                    "storage": "cache",
+-                    "path": str(layout.indexes_root),
+-                },
+-            },
+-            "legacy_detected": legacy_detected,
+-            "migration_state": _evaluate_migration_state_for_storage(
+-                root, legacy_detected
+-            ),
+-            # Compatibility aliases for one release.
+-            "workspace_root": str(layout.project_root),
+-            "releaseledger_dir": str(layout.data_root),
+-            "inside_workspace": layout.data_storage == "project",
++            "project_root": str(project_root),
++            "manifest_path": str(manifest),
++            "canonical_error": exc.message,
++            "migration_state": "canonical-invalid",
++            "layout_valid": False,
++            "raw_layout_valid": False,
++            "indexes_repairable": False,
++            "bindings": {},
++            "legacy_detected": False,
++            "workspace_root": str(project_root),
++            "releaseledger_dir": "",
+         }
+-    except Exception:
+-        pass
+
+-    # Legacy detection (no canonical manifest or load failed).
+-    from releaseledger.migration import discover_legacy_project
++    health = storage_health_to_dict(assess_storage_layout(layout))
++    ledger_ref = ""
++    ledger_dir = ""
++    try:
++        from releaseledger.storage.paths import resolve_project_paths
++
++        paths = resolve_project_paths(root)
++        ledger_ref = paths.ledger_ref
++        ledger_dir = str(paths.ledger_dir)
++    except (LaunchError, OSError, ValueError):
++        pass
+
++    legacy_detected = False
+     try:
+-        config_path, _ = discover_legacy_project(root)
+-        return {
+-            "kind": "storage_location",
+-            "discovered": False,
+-            "canonical": False,
+-            "project_root": str(root),
+-            "legacy_detected": True,
+-            "legacy_config_path": str(config_path),
+-            "migration_state": "legacy",
+-            "layout_valid": False,
+-            "data_root": "",
+-            "indexes_root": "",
+-            "workspace_root": str(root),
+-            "releaseledger_dir": "",
+-        }
+-    except Exception:
+-        return {
+-            "kind": "storage_location",
+-            "discovered": False,
+-            "canonical": False,
+-            "project_root": str(root),
+-            "legacy_detected": False,
+-            "migration_state": "uninitialized",
+-            "layout_valid": False,
+-            "workspace_root": str(root),
+-        }
++        discover_legacy_project(root)
++        legacy_detected = True
++    except LaunchError:
++        pass
++
++    migration = evaluate_migration_state(root)
++    return {
++        "kind": "storage_location",
++        "discovered": True,
++        "canonical": True,
++        "project_root": str(layout.project_root),
++        "project_uuid": layout.project_uuid,
++        "project_name": layout.project_name or "",
++        "manifest_path": str(layout.manifest_path),
++        "local_config_path": str(layout.local_config_path),
++        "tool_config_path": str(layout.config_path),
++        "data_root": str(layout.data_root),
++        "data_storage": str(layout.data_storage),
++        "data_source": layout.data_source,
++        "external_root": str(layout.external_root) if layout.external_root else "",
++        "indexes_root": str(layout.indexes_root),
++        "active_ledger_ref": ledger_ref,
++        "active_ledger_dir": ledger_dir,
++        **health,
++        "mounts": {
++            "data": {
++                "storage": str(layout.data_storage),
++                "path": str(layout.data_root),
++                "source": layout.data_source,
++            },
++            "indexes": {
++                "storage": "cache",
++                "path": str(layout.indexes_root),
++            },
++        },
++        "legacy_detected": legacy_detected,
++        "migration_state": str(migration.get("state", "canonical-ready")),
++        # Compatibility aliases for one release.
++        "workspace_root": str(layout.project_root),
++        "releaseledger_dir": str(layout.data_root),
++        "inside_workspace": layout.data_storage == "project",
++    }
+
+
+ def config_show(workspace_root: Path) -> dict[str, object]:
+diff --git a/releaseledger/services/project_state.py b/releaseledger/services/project_state.py
+index cbdbac4..7bd8606 100644
+--- a/releaseledger/services/project_state.py
++++ b/releaseledger/services/project_state.py
+@@ -42,6 +42,14 @@ def _latest_released(records: list[dict[str, object]]) -> str | None:
+     return str(released[-1].get("version", ""))
+
+
++def _indexes_blocked(storage: dict[str, object]) -> bool:
++    bindings = storage.get("bindings")
++    if not isinstance(bindings, dict):
++        return False
++    indexes = bindings.get("indexes")
++    return isinstance(indexes, dict) and not bool(indexes.get("valid", True))
++
++
+ def project_status(root: Path, *, check: bool = False) -> dict[str, object]:
+     """Return a concise status without creating or repairing project state."""
+     storage = storage_where(root)
+@@ -57,6 +65,13 @@ def project_status(root: Path, *, check: bool = False) -> dict[str, object]:
+     ]
+     active.sort()
+     layout_valid = bool(storage.get("layout_valid", False))
++    raw_layout_valid = bool(storage.get("raw_layout_valid", layout_valid))
++    indexes_repairable = bool(storage.get("indexes_repairable", False))
++    warnings = (
++        ["Generated indexes binding will be restored before the next write."]
++        if indexes_repairable
++        else []
++    )
+     protocol_matches = bool(protocol_diagnostics(root)["skill_matches_cli"])
+     healthy = canonical and layout_valid and protocol_matches
+     if not discovered:
+@@ -65,10 +80,16 @@ def project_status(root: Path, *, check: bool = False) -> dict[str, object]:
+             "reason": "No canonical Releaseledger project is initialized.",
+         }
+     elif not layout_valid:
+-        next_action = {
+-            "command": "storage validate --strict",
+-            "reason": "The canonical project was discovered but its storage layout is invalid.",
+-        }
++        if _indexes_blocked(storage):
++            next_action = {
++                "command": "repair index --dry-run",
++                "reason": "The indexes cache is blocked and requires explicit inspection before quarantine and rebuild.",
++            }
++        else:
++            next_action = {
++                "command": "storage validate --strict",
++                "reason": "The canonical project was discovered but its storage layout is invalid.",
++            }
+     elif not protocol_matches:
+         next_action = {
+             "command": "doctor --check",
+@@ -93,6 +114,9 @@ def project_status(root: Path, *, check: bool = False) -> dict[str, object]:
+         "discovered": discovered,
+         "canonical": canonical,
+         "layout_valid": layout_valid,
++        "raw_layout_valid": raw_layout_valid,
++        "indexes_repairable": indexes_repairable,
++        "warnings": warnings,
+         "state": "ready" if healthy else state,
+         "project_root": str(storage.get("project_root", root.resolve())),
+         "ledger_ref": str(storage.get("active_ledger_ref", "")),
+@@ -206,26 +230,30 @@ def project_doctor(root: Path, *, check: bool = False) -> dict[str, object]:
+     )
+     layout_valid = bool(storage.get("layout_valid", False))
+     layout_repairable = bool(storage.get("indexes_repairable", False))
+-    layout_ok = layout_valid or layout_repairable
++    layout_ok = layout_valid
++    if layout_ok:
++        layout_remediation: list[str] = []
++    elif _indexes_blocked(storage):
++        layout_remediation = ["Run `releaseledger repair index --dry-run`."]
++    else:
++        layout_remediation = ["Run `releaseledger storage validate --strict`."]
++    if layout_repairable:
++        layout_message = (
++            "Storage is operational; the generated indexes cache is unbound and "
++            "will be rebound/rebuilt before the next write."
++        )
++    elif layout_ok:
++        layout_message = "Storage layout is valid."
++    elif _indexes_blocked(storage):
++        layout_message = "The indexes cache is blocked and requires explicit repair."
++    else:
++        layout_message = "Storage layout is unavailable or invalid."
+     checks.append(
+         {
+             "code": "storage_layout",
+             "status": "pass" if layout_ok else "fail",
+-            "message": (
+-                (
+-                    "Storage layout is valid; the generated indexes binding "
+-                    "will be repaired before the next write."
+-                )
+-                if layout_repairable and not layout_valid
+-                else (
+-                    "Storage layout is valid."
+-                    if layout_ok
+-                    else "Storage layout is unavailable or invalid."
+-                )
+-            ),
+-            "remediation": []
+-            if layout_ok
+-            else ["Run `releaseledger storage validate --strict`."],
++            "message": layout_message,
++            "remediation": layout_remediation,
+         }
+     )
+     release_ok = True
+@@ -281,10 +309,12 @@ def next_action(root: Path) -> dict[str, object]:
+         command = "migrate plan storage-layout"
+         reason = "Legacy storage requires an explicit migration plan."
+     elif discovered and not layout_valid:
+-        command = "storage validate --strict"
+-        reason = (
+-            "The canonical project was discovered but its storage layout is invalid."
+-        )
++        if _indexes_blocked(storage):
++            command = "repair index --dry-run"
++            reason = "The indexes cache is blocked and requires explicit inspection before quarantine and rebuild."
++        else:
++            command = "storage validate --strict"
++            reason = "The canonical project was discovered but its storage layout is invalid."
+     elif discovered and not protocol_matches:
+         command = "doctor --check"
+         reason = (
+diff --git a/releaseledger/services/storage_health.py b/releaseledger/services/storage_health.py
+new file mode 100644
+index 0000000..b325c72
+--- /dev/null
++++ b/releaseledger/services/storage_health.py
+@@ -0,0 +1,197 @@
++"""Releaseledger-specific interpretation of canonical storage validation."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from pathlib import Path
++
++from releaseledger.ledgercore_backend import (
++    ReleaseledgerLedgerLayout,
++    StorageBinding,
++    StorageValidationReport,
++    StorageValidationResult,
++    classify_releaseledger_index_cache,
++)
++
++
++@dataclass(frozen=True, slots=True)
++class MountHealth:
++    """Normalized health for one expected Releaseledger storage mount."""
++
++    name: str
++    path: Path
++    expected_storage: str
++    raw_valid: bool
++    effective_valid: bool
++    repairable: bool
++    reason: str
++    actual_binding: StorageBinding | None
++    classification: str | None = None
++    unexpected_paths: tuple[Path, ...] = ()
++    mismatch: bool = False
++
++
++@dataclass(frozen=True, slots=True)
++class StorageHealth:
++    """Raw and effective storage validity for a resolved project layout."""
++
++    raw_layout_valid: bool
++    layout_valid: bool
++    indexes_repairable: bool
++    mounts: tuple[MountHealth, ...]
++
++
++def _marker_exists_without_following(path: Path) -> bool:
++    try:
++        path.lstat()
++    except FileNotFoundError:
++        return False
++    return True
++
++
++def _expected_storage(layout: ReleaseledgerLedgerLayout, name: str) -> str:
++    if name == "config":
++        return "project"
++    if name == "data":
++        return layout.data_storage
++    if name == "indexes":
++        return "cache"
++    return ""
++
++
++def _validation_results(
++    report: StorageValidationReport | None,
++) -> dict[str, StorageValidationResult]:
++    if report is None:
++        return {}
++    return {str(result.path): result for result in report.results}
++
++
++def assess_storage_layout(layout: ReleaseledgerLedgerLayout) -> StorageHealth:
++    """Apply Releaseledger's derived-index semantics without changing storage."""
++    report = layout.validation_report
++    results = _validation_results(report)
++    paths = (
++        (layout.config_path.parent, "config"),
++        (layout.data_root, "data"),
++        (layout.indexes_root, "indexes"),
++    )
++    mounts: list[MountHealth] = []
++    for path, name in paths:
++        result = results.get(str(path))
++        raw_valid = result.valid if result is not None else True
++        reason = result.reason or "" if result is not None else ""
++        actual = result.binding if result is not None else None
++        classification: str | None = None
++        unexpected: tuple[Path, ...] = ()
++        repairable = False
++        mismatch = False
++        effective_valid = raw_valid
++
++        if name == "indexes":
++            cache = classify_releaseledger_index_cache(path)
++            classification = cache.state
++            unexpected = cache.unexpected_paths
++            marker_is_present = _marker_exists_without_following(
++                layout.indexes_binding_path
++            )
++            unsafe_symlink = (
++                path.is_symlink() or layout.indexes_binding_path.is_symlink()
++            )
++            if unsafe_symlink:
++                effective_valid = False
++                reason = "Indexes path or binding marker is a symlink and is blocked."
++            elif raw_valid and actual is not None:
++                classification = "bound"
++            elif (
++                actual is None
++                and not marker_is_present
++                and cache.state in {"generated-current", "generated-legacy"}
++            ):
++                repairable = True
++                effective_valid = True
++                reason = "Generated index cache is safe to rebind and rebuild."
++            elif actual is not None and not raw_valid:
++                mismatch = True
++                reason = (
++                    f"Indexes binding mismatch: found mount={actual.mount!r}, "
++                    f"storage={actual.storage!r}, project_uuid={actual.project_uuid!r}."
++                )
++            elif cache.state == "foreign":
++                reason = "Foreign or unsafe index cache content is blocked."
++            elif not raw_valid and not reason:
++                reason = "Indexes binding is invalid."
++
++        mounts.append(
++            MountHealth(
++                name=name,
++                path=path,
++                expected_storage=_expected_storage(layout, name),
++                raw_valid=raw_valid,
++                effective_valid=effective_valid,
++                repairable=repairable,
++                reason=reason,
++                actual_binding=actual,
++                classification=classification,
++                unexpected_paths=unexpected,
++                mismatch=mismatch,
++            )
++        )
++
++    raw_layout_valid = report is None or report.valid
++    layout_valid = all(mount.effective_valid for mount in mounts)
++    indexes_repairable = any(
++        mount.name == "indexes" and mount.repairable for mount in mounts
++    )
++    return StorageHealth(
++        raw_layout_valid=raw_layout_valid,
++        layout_valid=layout_valid,
++        indexes_repairable=indexes_repairable,
++        mounts=tuple(mounts),
++    )
++
++
++def storage_health_to_dict(health: StorageHealth) -> dict[str, object]:
++    """Serialize normalized storage health into stable CLI data."""
++    bindings: dict[str, object] = {}
++    for mount in health.mounts:
++        actual = mount.actual_binding
++        actual_binding: dict[str, object] | None = None
++        if actual is not None:
++            actual_binding = {
++                "schema_version": actual.schema_version,
++                "layout_version": actual.layout_version,
++                "project_uuid": actual.project_uuid,
++                "project_name": actual.project_name,
++                "tool": actual.tool,
++                "mount": actual.mount,
++                "storage": actual.storage,
++            }
++        item: dict[str, object] = {
++            "path": str(mount.path),
++            "storage": mount.expected_storage,
++            "raw_valid": mount.raw_valid,
++            "valid": mount.effective_valid,
++            "repairable": mount.repairable,
++            "reason": mount.reason,
++            "actual_binding": actual_binding,
++            "mismatch": mount.mismatch,
++        }
++        if mount.classification is not None:
++            item["classification"] = mount.classification
++        if mount.unexpected_paths:
++            item["unexpected_paths"] = [str(path) for path in mount.unexpected_paths]
++        bindings[mount.name] = item
++    indexes_mount = next(mount for mount in health.mounts if mount.name == "indexes")
++    repair_command = (
++        "releaseledger repair index --dry-run"
++        if not indexes_mount.effective_valid
++        else None
++    )
++    return {
++        "raw_layout_valid": health.raw_layout_valid,
++        "layout_valid": health.layout_valid,
++        "indexes_repairable": health.indexes_repairable,
++        "repair_command": repair_command,
++        "bindings": bindings,
++    }
+diff --git a/releaseledger/services/storage_repair.py b/releaseledger/services/storage_repair.py
+new file mode 100644
+index 0000000..adf94e8
+--- /dev/null
++++ b/releaseledger/services/storage_repair.py
+@@ -0,0 +1,221 @@
++"""Explicit repair operations for derived Releaseledger storage."""
++
++from __future__ import annotations
++
++import os
++from pathlib import Path
++
++from releaseledger.errors import CODE_CONFIG_ERROR, LaunchError
++from releaseledger.ledgercore_backend import (
++    StorageBinding,
++    load_releaseledger_ledger_layout,
++)
++from releaseledger.services.entries import list_release_entries
++from releaseledger.services.releases import list_release_records
++from releaseledger.services.storage_health import (
++    MountHealth,
++    StorageHealth,
++    assess_storage_layout,
++)
++from releaseledger.storage.store import rebuild_indexes
++
++
++def _indexes_mount(health: StorageHealth) -> MountHealth:
++    return next(mount for mount in health.mounts if mount.name == "indexes")
++
++
++def _ledger_refs(root: Path, layout_root: Path, classification: str) -> tuple[str, ...]:
++    from releaseledger.storage.paths import resolve_project_paths
++
++    paths = resolve_project_paths(root)
++    refs = {paths.ledger_ref}
++    for ledger_root in (paths.project.data_root / "ledgers",):
++        if ledger_root.is_dir():
++            refs.update(
++                child.name
++                for child in ledger_root.iterdir()
++                if child.is_dir() and not child.is_symlink()
++            )
++    if classification == "generated-current":
++        index_ledgers = layout_root / "ledgers"
++        if index_ledgers.is_dir():
++            refs.update(
++                child.name
++                for child in index_ledgers.iterdir()
++                if child.is_dir() and not child.is_symlink()
++            )
++    return tuple(sorted(refs))
++
++
++def _binding_details(binding: StorageBinding | None) -> dict[str, object] | None:
++    if binding is None:
++        return None
++    return {
++        "schema_version": binding.schema_version,
++        "layout_version": binding.layout_version,
++        "project_uuid": binding.project_uuid,
++        "project_name": binding.project_name,
++        "tool": binding.tool,
++        "mount": binding.mount,
++        "storage": binding.storage,
++    }
++
++
++def _cache_counts(workspace_root: Path) -> tuple[int, int]:
++    releases = list_release_records(workspace_root)
++    entry_count = sum(
++        len(list_release_entries(workspace_root, str(release["version"])))
++        for release in releases
++    )
++    return len(releases), entry_count
++
++
++def _quarantine_candidate(source: Path) -> Path:
++    suffix = 1
++    while True:
++        name = f"{source.name}.quarantine" + (f"-{suffix}" if suffix > 1 else "")
++        container = source.with_name(name)
++        if not os.path.lexists(container):
++            return container / source.name
++        suffix += 1
++
++
++def _quarantine_cache(source: Path) -> Path:
++    """Move the complete cache into a newly reserved sibling quarantine."""
++    while True:
++        destination = _quarantine_candidate(source)
++        container = destination.parent
++        try:
++            container.mkdir()
++        except FileExistsError:
++            continue
++        try:
++            os.rename(source, destination)
++        except OSError:
++            container.rmdir()
++            raise
++        return destination
++
++
++def repair_index(
++    workspace_root: Path,
++    *,
++    apply: bool = False,
++    quarantine_foreign: bool = False,
++) -> dict[str, object]:
++    """Inspect or repair the disposable indexes cache without changing records."""
++    root = Path(workspace_root).resolve()
++    layout = load_releaseledger_ledger_layout(
++        root, allow_missing=False, validate_storage=True
++    )
++    health = assess_storage_layout(layout)
++    indexes = _indexes_mount(health)
++    classification = indexes.classification or "unknown"
++    source = layout.indexes_root
++    unexpected = [path.as_posix() for path in indexes.unexpected_paths]
++    blocked = not indexes.effective_valid
++    needs_rebuild = classification in {
++        "missing",
++        "empty",
++        "generated-current",
++        "generated-legacy",
++    }
++
++    if blocked and not quarantine_foreign:
++        action = "blocked"
++    elif blocked:
++        action = "quarantine-and-rebuild"
++    elif needs_rebuild:
++        action = "rebind-and-rebuild"
++    else:
++        action = "no-op"
++
++    ledger_refs = _ledger_refs(root, source, classification)
++    quarantine_path: Path | None = None
++    if apply and blocked and not quarantine_foreign:
++        raise LaunchError(
++            "The indexes cache contains foreign, mismatched, or unsafe state. "
++            "No files were changed.",
++            code=CODE_CONFIG_ERROR,
++            exit_code=2,
++            data={
++                "kind": "index_repair",
++                "action": "blocked",
++                "classification_before": classification,
++                "source": str(source),
++                "unexpected_paths": unexpected,
++                "actual_binding": _binding_details(indexes.actual_binding),
++                "applied": False,
++            },
++            remediation=[
++                "Run `releaseledger repair index --dry-run` to inspect the cache.",
++                "Use `--quarantine-foreign` only when preserving and replacing the entire cache is authorized.",
++            ],
++        )
++
++    result: dict[str, object] = {
++        "kind": "index_repair",
++        "applied": apply,
++        "action": action,
++        "classification_before": classification,
++        "source": str(source),
++        "quarantine_path": None,
++        "unexpected_paths": unexpected,
++        "raw_layout_valid_before": health.raw_layout_valid,
++        "mismatch": indexes.mismatch,
++        "reason": indexes.reason,
++        "binding_restored": indexes.raw_valid,
++        "indexes_rebuilt": False,
++        "release_count": 0,
++        "entry_count": 0,
++        "layout_valid_after": health.layout_valid,
++    }
++    if action == "blocked":
++        result["next_command"] = "releaseledger repair index --dry-run"
++        return result
++    if action == "no-op":
++        result["binding_restored"] = True
++        return result
++
++    if not apply:
++        if blocked and quarantine_foreign:
++            result["quarantine_path"] = str(_quarantine_candidate(source))
++        return result
++
++    if blocked:
++        quarantine_path = _quarantine_cache(source)
++        result["quarantine_path"] = str(quarantine_path)
++
++    for ledger_ref in ledger_refs:
++        rebuild_indexes(root, ledger_ref=ledger_ref)
++    after_layout = load_releaseledger_ledger_layout(
++        root, allow_missing=False, validate_storage=True
++    )
++    after_health = assess_storage_layout(after_layout)
++    after_indexes = _indexes_mount(after_health)
++    if not after_health.layout_valid or not after_indexes.raw_valid:
++        raise LaunchError(
++            "Index repair did not produce a valid storage layout.",
++            code=CODE_CONFIG_ERROR,
++            exit_code=1,
++            data={
++                "kind": "index_repair",
++                "source": str(source),
++                "quarantine_path": str(quarantine_path) if quarantine_path else None,
++                "layout_valid_after": after_health.layout_valid,
++            },
++        )
++
++    release_count, entry_count = _cache_counts(root)
++    result.update(
++        {"binding_restored": True, "indexes_rebuilt": True},
++    )
++    result.update(
++        {
++            "release_count": release_count,
++            "entry_count": entry_count,
++            "layout_valid_after": after_health.layout_valid,
++            "raw_layout_valid_after": after_health.raw_layout_valid,
++        }
++    )
++    return result
+diff --git a/skills/releaseledger/SKILL.md b/skills/releaseledger/SKILL.md
+index e564a86..539bcc1 100644
+--- a/skills/releaseledger/SKILL.md
++++ b/skills/releaseledger/SKILL.md
+@@ -42,6 +42,8 @@ Releaseledger is separate from taskledger. Do not treat `.releaseledger/` as tas
+ - Do not use git commit messages as changelog entries. Do not paste, paraphrase, title-case, or mechanically convert commit subjects into `summary` values. A commit message is only provenance for locating evidence.
+ - Do not run multiple releaseledger mutating commands concurrently. Especially do not fan out `entry add` calls. Use `entry apply ... --dry-run` followed by one `entry apply`, or run single mutating commands sequentially and re-read state after any failure.
+ - During normal release work, do not inspect `releaseledger` package internals. If CLI output is insufficient, first try the JSON form of the public command. If the JSON form is still insufficient, write a change request and stop using source code as a workaround unless the user explicitly asks for releaseledger debugging.
++- Do not use `rm`, `mv`, or direct edits under the indexes cache to recover an unbound or foreign cache. Use `repair index`; do not route index-cache repair through storage migration.
++- If `next-action` recommends the same read-only validation command that just failed without adding information, treat it as a Releaseledger CLI bug rather than repeating it indefinitely.
+
+ ## Core agent command path
+
+@@ -101,6 +103,9 @@ releaseledger changelog build VERSION --strict --unreleased --output CHANGELOG.m
+ releaseledger changelog build VERSION --strict --unreleased --output CHANGELOG.md --replace-existing
+
+ releaseledger storage where
++releaseledger repair index --dry-run
++releaseledger repair index --apply
++releaseledger repair index --apply --quarantine-foreign
+ releaseledger storage validate --strict
+ releaseledger migrate status
+ releaseledger migrate plan storage-layout --output migration-plan.json
+@@ -132,6 +137,15 @@ When `git.tag_creation = "external"`, do not run `git tag`, `git push --tags`, o
+ In external mode, prepare and audit the release, update and validate the changelog, then stop and tell the user to publish the release through the external workflow. After the external tag exists, resume reconciliation and published checks. 4. Run `releaseledger release list`. 5. For a known release, run `releaseledger release show VERSION`. 6. Run `releaseledger entry list VERSION`. 7. Generate machine context when needed:
+ `releaseledger changelog preview VERSION --format json`. 8. Do not inspect `.releaseledger/` internals unless the CLI cannot start and the user explicitly requested forensic inspection.
+
++### Storage index-cache recovery
++
++1. Run `releaseledger --json storage where`.
++2. If `indexes_repairable` is true, normal release work may continue. An ordinary write safely rebinds and rebuilds the generated cache. If the user explicitly requested repair, run `releaseledger repair index --dry-run`, inspect the result, then run `releaseledger repair index --apply`.
++3. If the indexes binding is invalid and its classification is foreign or mismatched, run `releaseledger repair index --dry-run` and inspect `unexpected_paths` and mismatch details.
++4. Do not use `rm`, `mv`, or direct edits under the cache root. Do not route index-cache repair through storage migration.
++5. Use `--quarantine-foreign` only when the user or request explicitly authorizes preserving and replacing the complete blocked cache: `releaseledger repair index --apply --quarantine-foreign`.
++6. Verify with `releaseledger storage validate --strict` and `releaseledger status`.
++
+ ## Release creation protocol
+
+ 1. Prepare a planned release and snapshot with:
+diff --git a/tests/test_cli_common_commands.py b/tests/test_cli_common_commands.py
+index 859513b..36ffd1a 100644
+--- a/tests/test_cli_common_commands.py
++++ b/tests/test_cli_common_commands.py
+@@ -11,6 +11,8 @@ from typer.testing import CliRunner
+
+ from releaseledger import protocol
+ from releaseledger.cli import app
++from releaseledger.services.releases import create_release
++from releaseledger.storage.paths import resolve_project_paths
+
+ runner = CliRunner()
+
+@@ -62,6 +64,174 @@ def test_common_commands_report_initialized_project(tmp_path: Path) -> None:
+         assert result.exit_code == 0, (command, result.stdout, result.stderr)
+
+
++def test_index_repair_cli_and_storage_validation_share_health(
++    tmp_path: Path,
++) -> None:
++    initialized = runner.invoke(app, ["--root", str(tmp_path), "init"])
++    assert initialized.exit_code == 0, initialized.stdout
++    create_release(tmp_path, version="1.0.0")
++    indexes = resolve_project_paths(tmp_path).project.indexes_root
++    (indexes / ".ledger-project.toml").unlink()
++
++    where = runner.invoke(app, ["--json", "--root", str(tmp_path), "storage", "where"])
++    assert where.exit_code == 0, where.stdout
++    where_result = json.loads(where.stdout)["result"]
++    assert "unknown" not in where_result["bindings"]
++    assert where_result["bindings"]["indexes"]["classification"] == "generated-current"
++    assert where_result["raw_layout_valid"] is False
++    assert where_result["layout_valid"] is True
++    where_human = runner.invoke(app, ["--root", str(tmp_path), "storage", "where"])
++    assert where_human.exit_code == 0, where_human.stdout
++    assert "Indexes state: generated-current" in where_human.stdout
++    assert "Raw layout valid: False" in where_human.stdout
++    assert "Layout valid: True" in where_human.stdout
++
++    validation = runner.invoke(
++        app,
++        ["--json", "--root", str(tmp_path), "storage", "validate", "--strict"],
++    )
++    assert validation.exit_code == 0, validation.stdout
++    assert json.loads(validation.stdout)["result"]["passed"] is True
++    validation_human = runner.invoke(
++        app,
++        ["--root", str(tmp_path), "storage", "validate", "--strict"],
++    )
++    assert validation_human.exit_code == 0, validation_human.stdout
++    assert "Raw layout valid: False" in validation_human.stdout
++    assert "Layout valid: True" in validation_human.stdout
++
++    preview = runner.invoke(
++        app,
++        ["--json", "--root", str(tmp_path), "repair", "index", "--dry-run"],
++    )
++    assert preview.exit_code == 0, preview.stdout
++    assert json.loads(preview.stdout)["result"]["action"] == "rebind-and-rebuild"
++    preview_human = runner.invoke(
++        app,
++        ["--root", str(tmp_path), "repair", "index", "--dry-run"],
++    )
++    assert preview_human.exit_code == 0, preview_human.stdout
++    assert "Action: rebind-and-rebuild" in preview_human.stdout
++    assert not (indexes / ".ledger-project.toml").exists()
++
++    applied = runner.invoke(
++        app,
++        ["--json", "--root", str(tmp_path), "repair", "index", "--apply"],
++    )
++    assert applied.exit_code == 0, applied.stdout
++    repair_result = json.loads(applied.stdout)["result"]
++    assert repair_result["binding_restored"] is True
++    assert repair_result["indexes_rebuilt"] is True
++
++    validation_after = runner.invoke(
++        app,
++        ["--json", "--root", str(tmp_path), "storage", "validate", "--strict"],
++    )
++    assert validation_after.exit_code == 0, validation_after.stdout
++    assert json.loads(validation_after.stdout)["result"]["raw_layout_valid"] is True
++
++
++def test_blocked_cache_cli_reports_repair_and_never_silently_replaces(
++    tmp_path: Path,
++) -> None:
++    init = runner.invoke(app, ["--root", str(tmp_path), "init"])
++    assert init.exit_code == 0, init.stdout
++    create_release(tmp_path, version="1.0.0")
++    indexes = resolve_project_paths(tmp_path).project.indexes_root
++    (indexes / ".ledger-project.toml").unlink()
++    foreign = indexes / "foreign-cache.dat"
++    foreign.write_text("preserve", encoding="utf-8")
++
++    where = runner.invoke(app, ["--json", "--root", str(tmp_path), "storage", "where"])
++    assert where.exit_code == 0, where.stdout
++    where_result = json.loads(where.stdout)["result"]
++    assert where_result["bindings"]["indexes"]["classification"] == "foreign"
++    assert where_result["repair_command"] == "releaseledger repair index --dry-run"
++    where_human = runner.invoke(app, ["--root", str(tmp_path), "storage", "where"])
++    assert where_human.exit_code == 0, where_human.stdout
++    assert "Unexpected cache paths:" in where_human.stdout
++    assert "Repair: releaseledger repair index --dry-run" in where_human.stdout
++
++    validation = runner.invoke(
++        app,
++        ["--json", "--root", str(tmp_path), "storage", "validate", "--strict"],
++    )
++    assert validation.exit_code == 1, validation.stdout
++    assert json.loads(validation.stdout)["result"]["repair_command"] == (
++        "releaseledger repair index --dry-run"
++    )
++    validation_human = runner.invoke(
++        app, ["--root", str(tmp_path), "storage", "validate", "--strict"]
++    )
++    assert validation_human.exit_code == 1, validation_human.stdout
++    assert "Repair: releaseledger repair index --dry-run" in validation_human.stdout
++
++    next_result = runner.invoke(app, ["--json", "--root", str(tmp_path), "next-action"])
++    assert next_result.exit_code == 0, next_result.stdout
++    assert (
++        json.loads(next_result.stdout)["result"]["command"] == "repair index --dry-run"
++    )
++
++    preview = runner.invoke(
++        app,
++        ["--json", "--root", str(tmp_path), "repair", "index", "--dry-run"],
++    )
++    assert preview.exit_code == 0, preview.stdout
++    preview_result = json.loads(preview.stdout)["result"]
++    assert preview_result["action"] == "blocked"
++    assert preview_result["unexpected_paths"] == ["foreign-cache.dat"]
++    assert foreign.read_text(encoding="utf-8") == "preserve"
++
++    refused = runner.invoke(
++        app,
++        ["--root", str(tmp_path), "repair", "index", "--apply"],
++    )
++    assert refused.exit_code == 2, refused.stdout
++    assert foreign.read_text(encoding="utf-8") == "preserve"
++
++    applied = runner.invoke(
++        app,
++        [
++            "--json",
++            "--root",
++            str(tmp_path),
++            "repair",
++            "index",
++            "--apply",
++            "--quarantine-foreign",
++        ],
++    )
++    assert applied.exit_code == 0, applied.stdout
++    assert json.loads(applied.stdout)["result"]["action"] == "quarantine-and-rebuild"
++    assert (indexes / ".ledger-project.toml").is_file()
++
++
++def test_repair_index_appears_in_generated_cli_inventory() -> None:
++    commands = runner.invoke(app, ["--json", "commands"])
++    assert commands.exit_code == 0, commands.stdout
++    inventory = json.loads(commands.stdout)["result"]["commands"]
++    assert any(item["path"] == "repair index" for item in inventory)
++
++    help_group = runner.invoke(app, ["--json", "help", "repair"])
++    assert help_group.exit_code == 0, help_group.stdout
++    assert any(
++        child["path"] == "repair index"
++        for child in json.loads(help_group.stdout)["result"]["children"]
++    )
++    help_command = runner.invoke(app, ["--json", "help", "repair", "index"])
++    assert help_command.exit_code == 0, help_command.stdout
++    assert json.loads(help_command.stdout)["result"]["path"] == "repair index"
++    root_help = runner.invoke(app, ["--help"])
++    assert root_help.exit_code == 0
++    assert "repair" in root_help.stdout
++    commands_human = runner.invoke(app, ["commands"])
++    assert commands_human.exit_code == 0, commands_human.stdout
++    assert "repair index" in commands_human.stdout
++    help_human = runner.invoke(app, ["help", "repair"])
++    assert help_human.exit_code == 0, help_human.stdout
++    assert "repair index" in help_human.stdout
++
++
+ def test_doctor_human_and_json_share_skill_protocol_check(
+     monkeypatch: pytest.MonkeyPatch,
+     tmp_path: Path,
+diff --git a/tests/test_releaseledger_skill_protocol.py b/tests/test_releaseledger_skill_protocol.py
+index 396432f..00e0d5d 100644
+--- a/tests/test_releaseledger_skill_protocol.py
++++ b/tests/test_releaseledger_skill_protocol.py
+@@ -81,6 +81,17 @@ def test_skill_does_not_document_undated_strict_single_build() -> None:
+     assert "release prepare VERSION --previous PREV_VERSION" in text
+
+
++def test_skill_documents_safe_index_cache_recovery() -> None:
++    text = SKILL.read_text(encoding="utf-8")
++    assert "releaseledger repair index --dry-run" in text
++    assert "releaseledger repair index --apply" in text
++    assert "releaseledger repair index --apply --quarantine-foreign" in text
++    assert "inspect `unexpected_paths` and mismatch details" in text
++    assert "Do not use `rm`, `mv`, or direct edits under the cache root." in text
++    assert "Do not route index-cache repair through storage migration." in text
++    assert "same read-only validation command that just failed" in text
++
++
+ def test_canonical_skill_has_valid_discoverable_metadata() -> None:
+     metadata, error = protocol.read_skill_metadata(SKILL)
+     assert error is None
+diff --git a/tests/test_storage_health.py b/tests/test_storage_health.py
+new file mode 100644
+index 0000000..c8f632a
+--- /dev/null
++++ b/tests/test_storage_health.py
+@@ -0,0 +1,439 @@
++"""Normalized storage health and derived index-cache diagnostics."""
++
++from __future__ import annotations
++
++import shutil
++from pathlib import Path
++
++import pytest
++
++from releaseledger.errors import LaunchError
++from releaseledger.ledgercore_backend import (
++    classify_releaseledger_index_cache,
++    load_releaseledger_ledger_layout,
++)
++from releaseledger.migration import migration_status
++from releaseledger.services.config import storage_where
++from releaseledger.services.entries import add_release_entry
++from releaseledger.services.project_state import (
++    next_action,
++    project_doctor,
++    project_status,
++)
++from releaseledger.services.releases import create_release
++from releaseledger.services.storage_health import (
++    assess_storage_layout,
++    storage_health_to_dict,
++)
++from releaseledger.services.storage_repair import repair_index
++from releaseledger.storage.paths import initialize_project, resolve_project_paths
++
++
++def _initialized_project(tmp_path: Path) -> Path:
++    initialize_project(tmp_path)
++    create_release(tmp_path, version="1.0.0")
++    return resolve_project_paths(tmp_path).project.indexes_root
++
++
++def _where(tmp_path: Path) -> dict[str, object]:
++    layout = load_releaseledger_ledger_layout(tmp_path, validate_storage=True)
++    return storage_health_to_dict(assess_storage_layout(layout))
++
++
++@pytest.mark.parametrize("manifest_kind", ["invalid", "directory"])
++def test_existing_but_unloadable_canonical_manifest_stays_visible(
++    tmp_path: Path, manifest_kind: str
++) -> None:
++    indexes = _initialized_project(tmp_path)
++    manifest = tmp_path / ".ledger" / "ledger.toml"
++    if manifest_kind == "invalid":
++        manifest.write_text("not = [valid toml", encoding="utf-8")
++    else:
++        manifest.unlink()
++        manifest.mkdir()
++
++    result = storage_where(tmp_path)
++    assert result["discovered"] is True
++    assert result["canonical"] is True
++    assert result["project_root"] == str(tmp_path)
++    assert result["manifest_path"] == str(manifest)
++    assert result["migration_state"] == "canonical-invalid"
++    assert result["canonical_error"]
++    assert result["legacy_detected"] is False
++    assert result["bindings"] == {}
++    assert indexes.exists()
++
++
++def _snapshot_files(root: Path) -> dict[str, bytes]:
++    return {
++        path.relative_to(root).as_posix(): path.read_bytes()
++        for path in root.rglob("*")
++        if path.is_file() and not path.is_symlink()
++    }
++
++
++def test_generated_unbound_cache_keeps_indexes_identity_and_is_effectively_valid(
++    tmp_path: Path,
++) -> None:
++    indexes = _initialized_project(tmp_path)
++    (indexes / ".ledger-project.toml").unlink()
++
++    result = _where(tmp_path)
++    bindings = result["bindings"]
++    assert isinstance(bindings, dict)
++    assert "unknown" not in bindings
++    mount = bindings["indexes"]
++    assert isinstance(mount, dict)
++    assert mount["classification"] == "generated-current"
++    assert mount["repairable"] is True
++    assert mount["raw_valid"] is False
++    assert result["raw_layout_valid"] is False
++    assert result["layout_valid"] is True
++    assert result["indexes_repairable"] is True
++
++
++def test_foreign_unbound_cache_is_blocked_and_reports_unexpected_path(
++    tmp_path: Path,
++) -> None:
++    indexes = _initialized_project(tmp_path)
++    (indexes / ".ledger-project.toml").unlink()
++    (indexes / "foreign-cache.dat").write_text("foreign", encoding="utf-8")
++
++    result = _where(tmp_path)
++    bindings = result["bindings"]
++    assert isinstance(bindings, dict)
++    mount = bindings["indexes"]
++    assert isinstance(mount, dict)
++    assert mount["classification"] == "foreign"
++    assert mount["valid"] is False
++    assert mount["repairable"] is False
++    assert result["indexes_repairable"] is False
++    assert result["layout_valid"] is False
++    assert "foreign-cache.dat" in mount["unexpected_paths"]
++
++
++def test_missing_indexes_path_remains_named_and_valid(tmp_path: Path) -> None:
++    indexes = _initialized_project(tmp_path)
++    shutil.rmtree(indexes)
++
++    result = _where(tmp_path)
++    bindings = result["bindings"]
++    assert isinstance(bindings, dict)
++    assert "unknown" not in bindings
++    mount = bindings["indexes"]
++    assert isinstance(mount, dict)
++    assert mount["classification"] == "missing"
++    assert mount["valid"] is True
++    assert result["layout_valid"] is True
++
++
++def test_generated_legacy_cache_is_effectively_valid_and_repairable(
++    tmp_path: Path,
++) -> None:
++    indexes = _initialized_project(tmp_path)
++    current = indexes / "ledgers" / "main"
++    legacy_releases = indexes / "releases.json"
++    legacy_entries = indexes / "entries.json"
++    legacy_releases.write_bytes((current / "releases.json").read_bytes())
++    legacy_entries.write_bytes((current / "entries.json").read_bytes())
++    (indexes / ".ledger-project.toml").unlink()
++    shutil.rmtree(indexes / "ledgers")
++
++    where = storage_where(tmp_path)
++    assert where["bindings"]["indexes"]["classification"] == "generated-legacy"
++    assert where["bindings"]["indexes"]["valid"] is True
++    assert where["bindings"]["indexes"]["raw_valid"] is False
++    assert where["layout_valid"] is True
++    assert where["indexes_repairable"] is True
++    assert where["migration_state"] == "canonical-ready"
++    status = project_status(tmp_path)
++    doctor = project_doctor(tmp_path)
++    recommendation = next_action(tmp_path)
++    checks = {str(item["code"]): item for item in doctor["checks"]}
++    assert status["state"] == "ready"
++    assert status["health"] == "ok"
++    assert checks["storage_layout"]["status"] == "pass"
++    assert recommendation["command"] not in {
++        "storage validate --strict",
++        "repair index --dry-run",
++    }
++
++    preview = repair_index(tmp_path, apply=False)
++    assert preview["action"] == "rebind-and-rebuild"
++    applied = repair_index(tmp_path, apply=True)
++    assert applied["raw_layout_valid_after"] is True
++    assert (indexes / ".ledger-project.toml").is_file()
++    assert (indexes / "ledgers" / "main" / "releases.json").is_file()
++
++
++def test_empty_indexes_path_is_healthy_and_rebuildable(tmp_path: Path) -> None:
++    indexes = _initialized_project(tmp_path)
++    shutil.rmtree(indexes)
++    indexes.mkdir()
++
++    where = storage_where(tmp_path)
++    mount = where["bindings"]["indexes"]
++    assert mount["classification"] == "empty"
++    assert mount["valid"] is True
++    assert mount["raw_valid"] is True
++    assert where["layout_valid"] is True
++    assert where["indexes_repairable"] is False
++
++    repaired = repair_index(tmp_path, apply=True)
++    assert repaired["action"] == "rebind-and-rebuild"
++    assert (indexes / ".ledger-project.toml").is_file()
++
++
++def test_nested_foreign_content_reports_exact_relative_path(tmp_path: Path) -> None:
++    indexes = _initialized_project(tmp_path)
++    (indexes / ".ledger-project.toml").unlink()
++    foreign = indexes / "ledgers" / "main" / "foreign.dat"
++    foreign.write_text("foreign", encoding="utf-8")
++
++    where = storage_where(tmp_path)
++    mount = where["bindings"]["indexes"]
++    assert mount["classification"] == "foreign"
++    assert mount["unexpected_paths"] == ["ledgers/main/foreign.dat"]
++    assert next_action(tmp_path)["command"] == "repair index --dry-run"
++
++
++def test_indexes_root_symlink_is_blocked_without_following_target(
++    tmp_path: Path,
++) -> None:
++    indexes = _initialized_project(tmp_path)
++    target = indexes.with_name("cache-target")
++    shutil.copytree(indexes, target)
++    shutil.rmtree(indexes)
++    try:
++        indexes.symlink_to(target, target_is_directory=True)
++    except OSError:
++        pytest.skip("symlinks are unavailable")
++
++    result = _where(tmp_path)
++    bindings = result["bindings"]
++    assert isinstance(bindings, dict)
++    mount = bindings["indexes"]
++    assert isinstance(mount, dict)
++    assert mount["valid"] is False
++    assert mount["repairable"] is False
++    assert "symlink" in mount["reason"]
++    assert classify_releaseledger_index_cache(indexes).state == "foreign"
++
++
++def test_generated_cache_health_is_consistent_across_state_surfaces(
++    tmp_path: Path,
++) -> None:
++    indexes = _initialized_project(tmp_path)
++    (indexes / ".ledger-project.toml").unlink()
++
++    where = storage_where(tmp_path)
++    migration = migration_status(tmp_path)
++    status = project_status(tmp_path)
++    doctor = project_doctor(tmp_path)
++    recommendation = next_action(tmp_path)
++    checks = {str(item["code"]): item for item in doctor["checks"]}
++
++    assert where["bindings"].get("unknown") is None
++    assert where["bindings"]["indexes"]["classification"] == "generated-current"
++    assert where["raw_layout_valid"] is False
++    assert where["layout_valid"] is True
++    assert where["indexes_repairable"] is True
++    assert where["migration_state"] == "canonical-ready"
++    assert migration["state"] == where["migration_state"]
++    assert migration["raw_layout_valid"] is False
++    assert migration["layout_valid"] is True
++    assert status["migration_state"] == where["migration_state"]
++    assert status["state"] == "ready"
++    assert status["health"] == "ok"
++    assert status["warnings"]
++    assert checks["storage_layout"]["status"] == "pass"
++    assert "unbound" in checks["storage_layout"]["message"]
++    assert recommendation["command"] not in {
++        "storage validate --strict",
++        "repair index --dry-run",
++    }
++
++
++def test_blocked_cache_states_agree_and_recommend_repair(tmp_path: Path) -> None:
++    indexes = _initialized_project(tmp_path)
++    (indexes / ".ledger-project.toml").unlink()
++    (indexes / "foreign-cache.dat").write_text("foreign", encoding="utf-8")
++
++    where = storage_where(tmp_path)
++    migration = migration_status(tmp_path)
++    status = project_status(tmp_path)
++    doctor = project_doctor(tmp_path)
++    recommendation = next_action(tmp_path)
++    checks = {str(item["code"]): item for item in doctor["checks"]}
++
++    assert where["migration_state"] == "canonical-invalid"
++    assert migration["state"] == where["migration_state"]
++    assert status["migration_state"] == where["migration_state"]
++    assert status["next_action"]["command"] == "repair index --dry-run"
++    assert recommendation["command"] == "repair index --dry-run"
++    assert "repair index --dry-run" in migration["remediation"]
++    assert checks["storage_layout"]["status"] == "fail"
++    assert checks["storage_layout"]["remediation"] == [
++        "Run `releaseledger repair index --dry-run`."
++    ]
++
++
++def test_repair_generated_cache_is_read_only_then_rebuilds_all_ledger_refs(
++    tmp_path: Path,
++) -> None:
++    indexes = _initialized_project(tmp_path)
++    add_release_entry(
++        tmp_path,
++        release_version="1.0.0",
++        kind="added",
++        summary="Preserved release entry",
++    )
++    feature = indexes / "ledgers" / "feature"
++    feature.mkdir()
++    (feature / "releases.json").write_text("[]", encoding="utf-8")
++    (feature / "entries.json").write_text("[]", encoding="utf-8")
++    paths = resolve_project_paths(tmp_path)
++    data_before = _snapshot_files(paths.project.data_root)
++    (indexes / ".ledger-project.toml").unlink()
++    cache_before = _snapshot_files(indexes)
++
++    preview = repair_index(tmp_path, apply=False)
++    assert preview["action"] == "rebind-and-rebuild"
++    assert preview["classification_before"] == "generated-current"
++    assert _snapshot_files(indexes) == cache_before
++
++    applied = repair_index(tmp_path, apply=True)
++    assert applied["binding_restored"] is True
++    assert applied["indexes_rebuilt"] is True
++    assert applied["layout_valid_after"] is True
++    assert applied["raw_layout_valid_after"] is True
++    assert applied["release_count"] == 1
++    assert applied["entry_count"] == 1
++    assert _snapshot_files(paths.project.data_root) == data_before
++    assert (indexes / ".ledger-project.toml").is_file()
++    assert (indexes / "ledgers" / "feature" / "releases.json").read_text() == "[]\n"
++    assert (indexes / "ledgers" / "feature" / "entries.json").read_text() == "[]\n"
++
++    repeated = repair_index(tmp_path, apply=True)
++    assert repeated["action"] == "no-op"
++    assert repeated["indexes_rebuilt"] is False
++
++
++def test_foreign_cache_requires_quarantine_and_preserves_old_cache(
++    tmp_path: Path,
++) -> None:
++    indexes = _initialized_project(tmp_path)
++    paths = resolve_project_paths(tmp_path)
++    data_before = _snapshot_files(paths.project.data_root)
++    (indexes / ".ledger-project.toml").unlink()
++    (indexes / "foreign-cache.dat").write_text("preserve me", encoding="utf-8")
++    old_cache = _snapshot_files(indexes)
++    collision = indexes.with_name("indexes.quarantine")
++    collision.mkdir()
++    (collision / "keep.txt").write_text("existing", encoding="utf-8")
++
++    preview = repair_index(tmp_path, apply=False, quarantine_foreign=True)
++    assert preview["action"] == "quarantine-and-rebuild"
++    assert preview["unexpected_paths"] == ["foreign-cache.dat"]
++    assert preview["quarantine_path"] == str(
++        collision.with_name("indexes.quarantine-2") / "indexes"
++    )
++    assert _snapshot_files(indexes) == old_cache
++
++    with pytest.raises(LaunchError, match="No files were changed") as exc:
++        repair_index(tmp_path, apply=True)
++    assert exc.value.data["applied"] is False
++    assert _snapshot_files(indexes) == old_cache
++
++    applied = repair_index(tmp_path, apply=True, quarantine_foreign=True)
++    quarantine = Path(str(applied["quarantine_path"]))
++    assert applied["action"] == "quarantine-and-rebuild"
++    assert _snapshot_files(quarantine) == old_cache
++    assert (collision / "keep.txt").read_text(encoding="utf-8") == "existing"
++    assert (indexes / ".ledger-project.toml").is_file()
++    assert storage_where(tmp_path)["bindings"]["indexes"]["classification"] == "bound"
++    assert _snapshot_files(paths.project.data_root) == data_before
++
++
++def test_mismatched_binding_requires_and_survives_quarantine(tmp_path: Path) -> None:
++    indexes = _initialized_project(tmp_path)
++    other_root = tmp_path / "other-project"
++    initialize_project(other_root)
++    other_indexes = resolve_project_paths(other_root).project.indexes_root
++    (indexes / ".ledger-project.toml").write_bytes(
++        (other_indexes / ".ledger-project.toml").read_bytes()
++    )
++
++    mount = storage_where(tmp_path)["bindings"]["indexes"]
++    assert mount["mismatch"] is True
++    actual = mount["actual_binding"]
++    assert (
++        actual["project_uuid"] == resolve_project_paths(other_root).project.project_uuid
++    )
++    assert (
++        actual["project_uuid"] != resolve_project_paths(tmp_path).project.project_uuid
++    )
++    assert mount["unexpected_paths"] == [".ledger-project.toml"]
++    preview = repair_index(tmp_path, apply=False)
++    assert preview["action"] == "blocked"
++    assert preview["mismatch"] is True
++    mismatched_marker = (indexes / ".ledger-project.toml").read_bytes()
++    with pytest.raises(LaunchError, match="foreign, mismatched"):
++        repair_index(tmp_path, apply=True)
++    assert (indexes / ".ledger-project.toml").read_bytes() == mismatched_marker
++
++    applied = repair_index(tmp_path, apply=True, quarantine_foreign=True)
++    assert applied["action"] == "quarantine-and-rebuild"
++    old_marker = Path(str(applied["quarantine_path"])) / ".ledger-project.toml"
++    assert (
++        old_marker.read_bytes() == (other_indexes / ".ledger-project.toml").read_bytes()
++    )
++    assert (indexes / ".ledger-project.toml").is_file()
++
++
++def test_symlink_cache_is_quarantined_without_following_target(tmp_path: Path) -> None:
++    indexes = _initialized_project(tmp_path)
++    target = tmp_path / "outside-cache-target"
++    shutil.copytree(indexes, target)
++    shutil.rmtree(indexes)
++    try:
++        indexes.symlink_to(target, target_is_directory=True)
++    except OSError:
++        pytest.skip("symlinks are unavailable")
++    target_before = _snapshot_files(target)
++
++    preview = repair_index(tmp_path, apply=False)
++    assert preview["action"] == "blocked"
++    assert preview["classification_before"] == "foreign"
++
++    applied = repair_index(tmp_path, apply=True, quarantine_foreign=True)
++    quarantine = Path(str(applied["quarantine_path"]))
++    assert quarantine.is_symlink()
++    assert quarantine.resolve() == target.resolve()
++    assert _snapshot_files(target) == target_before
++    assert indexes.is_dir() and not indexes.is_symlink()
++    assert (indexes / ".ledger-project.toml").is_file()
++
++
++def test_symlink_binding_marker_is_preserved_by_quarantine(tmp_path: Path) -> None:
++    indexes = _initialized_project(tmp_path)
++    marker = indexes / ".ledger-project.toml"
++    target = tmp_path / "binding-marker-target.toml"
++    target.write_bytes(marker.read_bytes())
++    marker.unlink()
++    try:
++        marker.symlink_to(target)
++    except OSError:
++        pytest.skip("symlinks are unavailable")
++
++    preview = repair_index(tmp_path, apply=False)
++    assert preview["action"] == "blocked"
++    assert preview["unexpected_paths"] == [".ledger-project.toml"]
++    target_before = target.read_bytes()
++
++    applied = repair_index(tmp_path, apply=True, quarantine_foreign=True)
++    quarantine_marker = Path(str(applied["quarantine_path"])) / ".ledger-project.toml"
++    assert quarantine_marker.is_symlink()
++    assert quarantine_marker.resolve() == target.resolve()
++    assert target.read_bytes() == target_before
++    assert (indexes / ".ledger-project.toml").is_file()

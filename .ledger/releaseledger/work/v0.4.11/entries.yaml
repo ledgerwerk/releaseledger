@@ -1,0 +1,78 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.4.11
+git_base_ref: 31b931fdf1bba15ff2f5657fbb677a5b4dc1ea09
+git_base_sha: 31b931fdf1bba15ff2f5657fbb677a5b4dc1ea09
+git_head_ref: 9404db00e154fcae3a8c8b08de0500cf7a1dd06a
+git_head_sha: 9404db00e154fcae3a8c8b08de0500cf7a1dd06a
+include_merges: nontrivial
+entries:
+  - kind: added
+    summary:
+      "Added `repair index` to rebind, rebuild, or quarantine the disposable
+      indexes cache"
+    body: "The command inspects the generated indexes cache and applies explicit
+      actions: rebind-and-rebuild for generated or legacy caches, quarantine-and-rebuild
+      for foreign caches behind --quarantine-foreign, and a blocked action when neither
+      is authorized. Records are never modified."
+    status: accepted
+    internal: false
+    breaking: false
+    source_refs:
+      - git:53a23296cd9b89076d83a93d518375ec19cf3383
+    paths:
+      - releaseledger/cli.py
+      - releaseledger/services/storage_repair.py
+      - releaseledger/services/storage_health.py
+    sources:
+      - git:53a23296cd9b89076d83a93d518375ec19cf3383
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: changed
+    summary:
+      "Changed `status`, `storage where`, and `storage validate` to report
+      storage validity and repair guidance"
+    body:
+      "Storage diagnostics now distinguish raw layout validity from effective
+      validity of the disposable indexes cache, list unexpected cache paths with
+      portable POSIX separators, show the indexes binding classification, and print
+      the matching repair command. `migrate status` additionally prints remediation
+      guidance."
+    status: accepted
+    internal: false
+    breaking: false
+    source_refs:
+      - git:9404db00e154fcae3a8c8b08de0500cf7a1dd06a
+    paths:
+      - releaseledger/services/storage_health.py
+      - releaseledger/cli.py
+    sources:
+      - git:53a23296cd9b89076d83a93d518375ec19cf3383
+      - git:9404db00e154fcae3a8c8b08de0500cf7a1dd06a
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: internal
+    summary: "Improved storage health test isolation from user-level skill discovery"
+    body:
+      "Test-only hardening for the new storage health behavior: tests pin HOME
+      and install a matching skill fixture so user-level Agent Skill discovery cannot
+      affect results. No user-facing behavior change; hidden from the public changelog."
+    status: accepted
+    internal: true
+    breaking: false
+    source_refs:
+      - git:4f515e44c08a27f27aa054461ff820033968305a
+    paths:
+      - tests/test_storage_health.py
+    sources:
+      - git:4f515e44c08a27f27aa054461ff820033968305a
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"

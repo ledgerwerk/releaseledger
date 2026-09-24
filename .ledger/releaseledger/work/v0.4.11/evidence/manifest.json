@@ -1,0 +1,56 @@
+{
+  "candidate_count": 3,
+  "candidates": [
+    {
+      "additions": 1457,
+      "deletions": 226,
+      "patch_file": "53a2329.patch",
+      "patch_sha256": "352f39e411faa5ebab881502ff497c9b94ae3383d54ac4c8712d3e057eef2f23",
+      "paths": [
+        "releaseledger/cli.py",
+        "releaseledger/command_registry.py",
+        "releaseledger/ledgercore_backend.py",
+        "releaseledger/migration.py",
+        "releaseledger/services/config.py",
+        "releaseledger/services/project_state.py",
+        "releaseledger/services/storage_health.py",
+        "releaseledger/services/storage_repair.py",
+        "skills/releaseledger/SKILL.md",
+        "tests/test_cli_common_commands.py",
+        "tests/test_releaseledger_skill_protocol.py",
+        "tests/test_storage_health.py"
+      ],
+      "sha": "53a23296cd9b89076d83a93d518375ec19cf3383",
+      "short_sha": "53a2329",
+      "source_ref": "git:53a23296cd9b89076d83a93d518375ec19cf3383"
+    },
+    {
+      "additions": 20,
+      "deletions": 0,
+      "patch_file": "4f515e4.patch",
+      "patch_sha256": "a6cf08c4191ccc9daf24405fc844c9f3b90ef9d92d298b2434f2b2e8fcf93d85",
+      "paths": ["tests/test_storage_health.py"],
+      "sha": "4f515e44c08a27f27aa054461ff820033968305a",
+      "short_sha": "4f515e4",
+      "source_ref": "git:4f515e44c08a27f27aa054461ff820033968305a"
+    },
+    {
+      "additions": 1,
+      "deletions": 1,
+      "patch_file": "9404db0.patch",
+      "patch_sha256": "105a97eea2361445a97b3c711d3f561591a01b8d903e8eb032176310f6a5b6f2",
+      "paths": ["releaseledger/services/storage_health.py"],
+      "sha": "9404db00e154fcae3a8c8b08de0500cf7a1dd06a",
+      "short_sha": "9404db0",
+      "source_ref": "git:9404db00e154fcae3a8c8b08de0500cf7a1dd06a"
+    }
+  ],
+  "git_base_ref": "31b931fdf1bba15ff2f5657fbb677a5b4dc1ea09",
+  "git_base_sha": "31b931fdf1bba15ff2f5657fbb677a5b4dc1ea09",
+  "git_head_ref": "9404db00e154fcae3a8c8b08de0500cf7a1dd06a",
+  "git_head_sha": "9404db00e154fcae3a8c8b08de0500cf7a1dd06a",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.4.11",
+  "schema_version": 1
+}
