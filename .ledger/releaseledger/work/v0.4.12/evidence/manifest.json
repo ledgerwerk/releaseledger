@@ -1,0 +1,31 @@
+{
+  "candidate_count": 1,
+  "candidates": [
+    {
+      "additions": 352,
+      "deletions": 27,
+      "patch_file": "5e107b1.patch",
+      "patch_sha256": "96a3a40f6fc6255302e4907928ae1bdb3405d6bdf248f6e692041341ab23dd5e",
+      "paths": [
+        "releaseledger/services/audit.py",
+        "releaseledger/services/changelog_build.py",
+        "releaseledger/services/releases.py",
+        "releaseledger/services/review.py",
+        "tests/test_changelog_full_build.py",
+        "tests/test_commit_audit.py",
+        "tests/test_release_reconcile.py"
+      ],
+      "sha": "5e107b15e7df9f27c960d0ee2d50029faa6497ad",
+      "short_sha": "5e107b1",
+      "source_ref": "git:5e107b15e7df9f27c960d0ee2d50029faa6497ad"
+    }
+  ],
+  "git_base_ref": "5fa733fb24b115a5c566df0a619928ba10edf2d4",
+  "git_base_sha": "5fa733fb24b115a5c566df0a619928ba10edf2d4",
+  "git_head_ref": "5e107b15e7df9f27c960d0ee2d50029faa6497ad",
+  "git_head_sha": "5e107b15e7df9f27c960d0ee2d50029faa6497ad",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.4.12",
+  "schema_version": 1
+}

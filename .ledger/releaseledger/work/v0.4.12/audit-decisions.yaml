@@ -1,0 +1,27 @@
+rows:
+  - sha: 5e107b15e7df9f27c960d0ee2d50029faa6497ad
+    inspected: true
+    inspected_paths:
+      - releaseledger/services/audit.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/releases.py
+      - releaseledger/services/review.py
+      - tests/test_changelog_full_build.py
+      - tests/test_commit_audit.py
+      - tests/test_release_reconcile.py
+    observed_behavior: >-
+      Strict changelog builds now treat complete, current internal or rejected
+      audit decisions as coverage when those commits are excluded from public
+      notes. Incomplete or stale rows still block strict builds, and internal-
+      inclusive builds still require an entry for internal commits. Release review
+      uses the same evidence-completeness check. Reconciliation validates the
+      changelog heading against persisted release metadata rather than the tag
+      target commit date, while preserving the release-record-to-heading check.
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: >-
+      Coverage owner is the strict-build audit coverage entry; the reconciliation
+      behavior is documented by a separate entry supported by this commit.
+    stale: false

@@ -1,0 +1,53 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: v0.4.12
+git_base_ref: v0.4.11
+git_base_sha: 5fa733fb24b115a5c566df0a619928ba10edf2d4
+git_head_ref: HEAD
+git_head_sha: 5e107b15e7df9f27c960d0ee2d50029faa6497ad
+git_range: 5fa733fb24b115a5c566df0a619928ba10edf2d4..5e107b15e7df9f27c960d0ee2d50029faa6497ad
+commit_count: 1
+rows:
+  - sha: 5e107b15e7df9f27c960d0ee2d50029faa6497ad
+    source_ref: git:5e107b15e7df9f27c960d0ee2d50029faa6497ad
+    short_sha: 5e107b1
+    changed_paths:
+      - releaseledger/services/audit.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/releases.py
+      - releaseledger/services/review.py
+      - tests/test_changelog_full_build.py
+      - tests/test_commit_audit.py
+      - tests/test_release_reconcile.py
+    stats:
+      files_changed: 7
+      insertions: 352
+      deletions: 27
+    inspected: true
+    inspected_paths:
+      - releaseledger/services/audit.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/releases.py
+      - releaseledger/services/review.py
+      - tests/test_changelog_full_build.py
+      - tests/test_commit_audit.py
+      - tests/test_release_reconcile.py
+    observed_behavior:
+      Strict changelog builds now treat complete, current internal
+      or rejected audit decisions as coverage when those commits are excluded from public
+      notes. Incomplete or stale rows still block strict builds, and internal- inclusive
+      builds still require an entry for internal commits. Release review uses the same
+      evidence-completeness check. Reconciliation validates the changelog heading against
+      persisted release metadata rather than the tag target commit date, while preserving
+      the release-record-to-heading check.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: fix some issues regarding audit and release date"
+    target_entry_id: entry-0001
+    notes:
+      Coverage owner is the strict-build audit coverage entry; the reconciliation
+      behavior is documented by a separate entry supported by this commit.

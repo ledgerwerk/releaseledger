@@ -1,0 +1,54 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.4.12
+git_base_ref: 5fa733fb24b115a5c566df0a619928ba10edf2d4
+git_base_sha: 5fa733fb24b115a5c566df0a619928ba10edf2d4
+git_head_ref: 5e107b15e7df9f27c960d0ee2d50029faa6497ad
+git_head_sha: 5e107b15e7df9f27c960d0ee2d50029faa6497ad
+include_merges: nontrivial
+entries:
+  - kind: changed
+    summary: "Changed strict public builds to accept complete internal or rejected audit decisions as commit coverage"
+    body: >-
+      Strict public changelog builds can now account for commits with complete,
+      current internal or rejected audit decisions without requiring public
+      entries. Incomplete or stale decisions remain uncovered, and internal-
+      inclusive builds still require an entry for internal commits. Release
+      review uses the same evidence-completeness rule.
+    status: accepted
+    internal: false
+    breaking: false
+    source_refs:
+      - git:5e107b15e7df9f27c960d0ee2d50029faa6497ad
+    paths:
+      - releaseledger/services/audit.py
+      - releaseledger/services/changelog_build.py
+      - releaseledger/services/review.py
+      - tests/test_changelog_full_build.py
+      - tests/test_commit_audit.py
+    sources:
+      - git:5e107b15e7df9f27c960d0ee2d50029faa6497ad
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: fixed
+    summary: "Fixed release reconciliation to validate changelog dates against persisted release dates rather than tag target dates"
+    body: >-
+      A tag pointing to a commit with a different target date no longer causes a
+      changelog mismatch. Reconciliation still requires a released section's
+      heading date to match the persisted release date.
+    status: accepted
+    internal: false
+    breaking: false
+    paths:
+      - releaseledger/services/releases.py
+      - tests/test_release_reconcile.py
+    sources:
+      - git:5e107b15e7df9f27c960d0ee2d50029faa6497ad
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
