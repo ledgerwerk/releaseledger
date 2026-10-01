@@ -8,11 +8,15 @@ the whole-target-file rebuild path, while keeping the existing single-section
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from releaseledger.cli import app
+from releaseledger.domain.versioning import bump_versioning
+from releaseledger.storage.store import load_commit_audit_sheet, save_commit_audit_sheet
 
 runner = CliRunner()
 
@@ -599,6 +603,80 @@ class TestFullBuildRegression:
             )
         return sha
 
+    def _seed_audited_git_release(
+        self,
+        tmp_path: Path,
+        *,
+        audit_decision: str,
+        audit_changes: dict[str, object] | None = None,
+    ) -> str:
+        self._init_git(tmp_path)
+        self._git_commit(tmp_path, "Initial commit", tag="v0.1.0")
+        product_sha = self._git_commit(tmp_path, "feat: improve voice selection")
+        other_sha = self._git_commit(tmp_path, "chore: update release bookkeeping")
+
+        _init_project(tmp_path)
+        _write_keepachangelog_config(tmp_path)
+        release = _run(
+            tmp_path,
+            "release",
+            "tag",
+            "0.2.0",
+            "--released-at",
+            "2026-10-01",
+            "--previous",
+            "0.1.0",
+        )
+        assert release.exit_code == 0, _human_error(release)
+        update = _run(
+            tmp_path,
+            "release",
+            "update",
+            "0.2.0",
+            "--git-base",
+            "v0.1.0",
+            "--git-head",
+            "HEAD",
+        )
+        assert update.exit_code == 0, _human_error(update)
+        entry = _run(
+            tmp_path,
+            "entry",
+            "add",
+            "0.2.0",
+            "--kind",
+            "changed",
+            "--summary",
+            "Changed voice selection to target-qualified semantic references",
+            "--source-ref",
+            f"git:{product_sha}",
+        )
+        assert entry.exit_code == 0, _human_error(entry)
+        audit_init = _run(tmp_path, "audit", "init", "0.2.0")
+        assert audit_init.exit_code == 0, _human_error(audit_init)
+
+        sheet = load_commit_audit_sheet(tmp_path, "0.2.0")
+        assert sheet is not None
+        rows = []
+        for row in sheet.rows:
+            changes: dict[str, object] = {
+                "decision": "accepted" if row.sha == product_sha else audit_decision,
+                "inspected": True,
+                "inspected_paths": ("README.md",),
+                "observed_behavior": "Reviewed the implementation and recorded its behavior.",
+                "public_impact": "public" if row.sha == product_sha else "internal",
+            }
+            if row.sha == other_sha and audit_changes:
+                changes.update(audit_changes)
+            rows.append(replace(row, **changes))
+        updated = replace(
+            sheet,
+            versioning=bump_versioning(sheet.versioning),
+            rows=tuple(rows),
+        )
+        save_commit_audit_sheet(tmp_path, updated, overwrite=True)
+        return other_sha
+
     def test_build_no_version_rebuilds_full_file_not_single_section(
         self, tmp_path: Path
     ) -> None:
@@ -779,6 +857,128 @@ class TestFullBuildRegression:
             "--replace-existing",
         )
         assert internal.exit_code == 0, _human_error(internal)
+
+    def test_strict_build_accepts_complete_internal_audit_without_public_entry(
+        self, tmp_path: Path
+    ) -> None:
+        other_sha = self._seed_audited_git_release(
+            tmp_path,
+            audit_decision="internal",
+        )
+
+        audit_validation = _run(
+            tmp_path,
+            "audit",
+            "validate",
+            "0.2.0",
+            "--phase",
+            "complete",
+            "--strict",
+        )
+        assert audit_validation.exit_code == 0, _human_error(audit_validation)
+
+        public = _jrun(tmp_path, "build", "0.2.0", "--strict")
+        assert public.exit_code == 0, _human_error(public)
+        public_result = _json(public)["result"]
+        assert public_result["hidden_internal_git_commit_count"] == 0
+        assert any(
+            "internal/rejected audit decisions" in w for w in public_result["warnings"]
+        )
+        changelog = (tmp_path / "CHANGELOG.md").read_text()
+        assert "release bookkeeping" not in changelog.lower()
+
+        without_internal_entry = _run(
+            tmp_path,
+            "build",
+            "0.2.0",
+            "--strict",
+            "--include-internal",
+            "--replace-existing",
+        )
+        assert without_internal_entry.exit_code != 0
+        assert f"git:{other_sha}" in _human_error(without_internal_entry)
+
+        internal_entry = _run(
+            tmp_path,
+            "entry",
+            "add",
+            "0.2.0",
+            "--kind",
+            "internal",
+            "--summary",
+            "Internal release bookkeeping",
+            "--internal",
+            "--source-ref",
+            f"git:{other_sha}",
+        )
+        assert internal_entry.exit_code == 0, _human_error(internal_entry)
+        with_internal_entry = _run(
+            tmp_path,
+            "build",
+            "0.2.0",
+            "--strict",
+            "--include-internal",
+            "--replace-existing",
+        )
+        assert with_internal_entry.exit_code == 0, _human_error(with_internal_entry)
+        assert "Internal release bookkeeping" in (tmp_path / "CHANGELOG.md").read_text()
+
+    def test_strict_build_accepts_complete_rejected_audit_without_entry(
+        self, tmp_path: Path
+    ) -> None:
+        self._seed_audited_git_release(tmp_path, audit_decision="rejected")
+
+        validation = _run(
+            tmp_path,
+            "audit",
+            "validate",
+            "0.2.0",
+            "--phase",
+            "complete",
+            "--strict",
+        )
+        assert validation.exit_code == 0, _human_error(validation)
+        build = _run(tmp_path, "build", "0.2.0", "--strict")
+        assert build.exit_code == 0, _human_error(build)
+        assert (
+            "release bookkeeping" not in (tmp_path / "CHANGELOG.md").read_text().lower()
+        )
+
+    @pytest.mark.parametrize(
+        "audit_changes",
+        [
+            {"inspected": False},
+            {"inspected_paths": ()},
+            {"observed_behavior": "  "},
+            {"stale": True},
+        ],
+    )
+    def test_strict_build_does_not_exempt_incomplete_or_stale_internal_audit(
+        self,
+        tmp_path: Path,
+        audit_changes: dict[str, object],
+    ) -> None:
+        self._seed_audited_git_release(
+            tmp_path,
+            audit_decision="internal",
+            audit_changes=audit_changes,
+        )
+
+        build = _run(tmp_path, "build", "0.2.0", "--strict")
+        assert build.exit_code != 0
+        assert "git commits not covered" in _human_error(build)
+
+    @pytest.mark.parametrize("decision", ["accepted", "grouped"])
+    def test_strict_build_still_requires_public_coverage_for_public_audit_decisions(
+        self,
+        tmp_path: Path,
+        decision: str,
+    ) -> None:
+        self._seed_audited_git_release(tmp_path, audit_decision=decision)
+
+        build = _run(tmp_path, "build", "0.2.0", "--strict")
+        assert build.exit_code != 0
+        assert "git commits not covered" in _human_error(build)
 
 
 def test_single_build_requires_explicit_unreleased_policy(tmp_path: Path) -> None:

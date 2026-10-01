@@ -2325,18 +2325,6 @@ def _check_release_record_problems(
                     }
                 )
             else:
-                for tag in tags:
-                    tag_date = tag_dates.get(tag)
-                    if tag_date and tag_date != heading_date.group(1):
-                        problems.append(
-                            {
-                                "kind": "tag_changelog_date_mismatch",
-                                "version": record.version,
-                                "tag": tag,
-                                "tag_date": tag_date,
-                                "changelog_date": heading_date.group(1),
-                            }
-                        )
                 if heading_date.group(1) != record.released_at:
                     problems.append(
                         {

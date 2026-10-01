@@ -114,6 +114,69 @@ def test_reconcile_planned_with_tag_includes_tag_date(
     assert problem["tag_date"] == "2026-09-14"
 
 
+def test_reconcile_does_not_compare_tag_target_commit_date_to_release_date(
+    tmp_path: Path, monkeypatch
+) -> None:
+    ensure_canonical_project(tmp_path)
+    create_release(
+        tmp_path,
+        version="0.4.3",
+        status="released",
+        released_at="2026-10-01",
+    )
+    (tmp_path / "CHANGELOG.md").write_text("## [0.4.3] - 2026-10-01\n")
+    monkeypatch.setattr(
+        releases_service.subprocess,
+        "run",
+        _tag_run("v0.4.3\n", date="2026-09-30"),
+    )
+
+    result = reconcile_releases(tmp_path)
+
+    assert result["ok"] is True
+    assert not any(
+        problem["kind"] == "tag_changelog_date_mismatch"
+        for problem in result["problems"]
+    )
+
+
+def test_reconcile_detects_release_record_changelog_date_mismatch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    ensure_canonical_project(tmp_path)
+    create_release(
+        tmp_path,
+        version="0.4.3",
+        status="released",
+        released_at="2026-10-01",
+    )
+    (tmp_path / "CHANGELOG.md").write_text("## [0.4.3] - 2026-09-30\n")
+    monkeypatch.setattr(
+        releases_service.subprocess,
+        "run",
+        _tag_run("v0.4.3\n", date="2026-09-29"),
+    )
+
+    result = reconcile_releases(tmp_path)
+    kinds = {problem["kind"] for problem in result["problems"]}
+
+    assert "release_changelog_date_mismatch" in kinds
+    assert "tag_changelog_date_mismatch" not in kinds
+
+
+def test_reconcile_reports_candidate_with_tag(tmp_path: Path, monkeypatch) -> None:
+    ensure_canonical_project(tmp_path)
+    create_release(tmp_path, version="0.4.4", status="candidate")
+    monkeypatch.setattr(releases_service.subprocess, "run", _tag_run("v0.4.4\n"))
+
+    result = reconcile_releases(tmp_path)
+
+    assert any(
+        problem["kind"] == "planned_with_tag" and problem["status"] == "candidate"
+        for problem in result["problems"]
+    )
+
+
 def test_parse_changelog_headings_canonical(tmp_path: Path) -> None:
     """Canonical ## [VERSION] - DATE headings are parsed correctly."""
     target = tmp_path / "CHANGELOG.md"

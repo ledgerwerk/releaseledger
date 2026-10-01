@@ -15,10 +15,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from releaseledger.domain.audit import CommitAuditRow
 from releaseledger.domain.entry import ReleaseEntryRecord, normalize_entry_status
 from releaseledger.domain.release import ReleaseRecord, release_identity_key
 from releaseledger.domain.source_ref import is_coverable_boundary_ref
 from releaseledger.errors import LaunchError
+from releaseledger.services.audit import audit_row_evidence_complete
 from releaseledger.services.changelog_build import (
     build_changelog_file,
     render_changelog_section,
@@ -754,7 +756,7 @@ def _compute_coverage(
     include_internal: bool,
     git_block: dict[str, object] | None = None,
     git_ref_map: dict[str, object] | None = None,
-    audit_rows: dict[str, object] | None = None,
+    audit_rows: dict[str, CommitAuditRow] | None = None,
     release_source_refs: set[str] | frozenset[str] = frozenset(),
     boundary_ref: str | None = None,
 ) -> list[dict[str, object]]:
@@ -800,16 +802,11 @@ def _compute_coverage(
         )
         if ref.startswith("git:") and audit_rows is not None:
             audit_row = audit_rows.get(ref)
-            decision = getattr(audit_row, "decision", None)
-            inspected = bool(getattr(audit_row, "inspected", False))
-            inspected_paths = tuple(getattr(audit_row, "inspected_paths", ()))
-            observed_behavior = str(getattr(audit_row, "observed_behavior", ""))
-            evidence_complete = bool(
-                audit_row is not None
-                and decision != "needs_review"
-                and inspected
-                and inspected_paths
-                and observed_behavior.strip()
+            decision = audit_row.decision if audit_row is not None else None
+            evidence_complete = (
+                audit_row_evidence_complete(audit_row)
+                if audit_row is not None
+                else False
             )
             row["audit_decision"] = decision
             if not evidence_complete:
@@ -913,7 +910,7 @@ def build_release_review(  # noqa: C901 - orchestrates the consolidated release 
     statuses = tuple(normalize_entry_status(value) for value in include_statuses)
     entries = load_entries(workspace_root, version)
     audit_sheet = load_commit_audit_sheet(workspace_root, version)
-    audit_rows: dict[str, object] | None = (
+    audit_rows: dict[str, CommitAuditRow] | None = (
         {row.source_ref: row for row in audit_sheet.rows}
         if audit_sheet is not None
         else None

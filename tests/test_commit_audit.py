@@ -27,6 +27,7 @@ from releaseledger.domain.audit import (
 from releaseledger.domain.versioning import RecordVersioning, bump_versioning
 from releaseledger.errors import LaunchError
 from releaseledger.services.audit import (
+    audit_row_evidence_complete,
     subject_matches_evidence_subject,
     sync_audit_targets_from_entries,
     validate_commit_audit_sheet,
@@ -63,6 +64,31 @@ def _row(
         public_impact=public_impact,
         target_entry_id=target_entry_id,
     )
+
+
+@pytest.mark.parametrize("decision", ["accepted", "grouped", "internal", "rejected"])
+def test_audit_row_evidence_complete_accepts_completed_evidence(decision: str) -> None:
+    row = replace(
+        _row(decision=decision, inspected=True),
+        inspected_paths=("src/module.py",),
+        observed_behavior="Reviewed behavior.",
+    )
+
+    assert audit_row_evidence_complete(row)
+
+
+def test_audit_row_evidence_complete_rejects_incomplete_or_stale_rows() -> None:
+    row = replace(
+        _row(decision="internal", inspected=True),
+        inspected_paths=("src/module.py",),
+        observed_behavior="Reviewed behavior.",
+    )
+
+    assert not audit_row_evidence_complete(replace(row, decision="needs_review"))
+    assert not audit_row_evidence_complete(replace(row, inspected=False))
+    assert not audit_row_evidence_complete(replace(row, inspected_paths=()))
+    assert not audit_row_evidence_complete(replace(row, observed_behavior="  "))
+    assert not audit_row_evidence_complete(replace(row, stale=True))
 
 
 def _sheet(rows: tuple[CommitAuditRow, ...] = ()) -> CommitAuditSheetRecord:

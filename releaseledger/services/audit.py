@@ -54,7 +54,9 @@ from releaseledger.storage.store import (
 
 __all__ = [
     "apply_commit_audit_annotations",
+    "audit_row_evidence_complete",
     "create_commit_audit_sheet",
+    "nonpublic_audit_source_refs",
     "project_audit_entry_coverage",
     "refresh_commit_audit_sheet",
     "render_commit_audit_decisions_template",
@@ -80,6 +82,34 @@ _MUTABLE_ROW_FIELDS = frozenset(
     }
 )
 _COMPLETED_DECISIONS = frozenset({"accepted", "grouped", "internal", "rejected"})
+
+
+def audit_row_evidence_complete(row: CommitAuditRow) -> bool:
+    """Return whether an audit row has complete, current evidence."""
+    return bool(
+        not row.stale
+        and row.decision in _COMPLETED_DECISIONS
+        and row.inspected
+        and row.inspected_paths
+        and row.observed_behavior.strip()
+    )
+
+
+def nonpublic_audit_source_refs(
+    sheet: CommitAuditSheetRecord,
+    *,
+    include_internal: bool,
+) -> set[str]:
+    """Return complete audit refs that need no entry in this build mode."""
+    return {
+        row.source_ref
+        for row in sheet.rows
+        if audit_row_evidence_complete(row)
+        and (
+            row.decision == "rejected"
+            or (row.decision == "internal" and not include_internal)
+        )
+    }
 
 
 def _as_int(value: object) -> int:

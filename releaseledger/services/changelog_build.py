@@ -44,6 +44,7 @@ from releaseledger.errors import (
     CODE_VALIDATION_ERROR,
     LaunchError,
 )
+from releaseledger.services.audit import nonpublic_audit_source_refs
 from releaseledger.services.entry_lint import lint_release_entries
 from releaseledger.services.git_sources import (
     collect_contributor_history,
@@ -58,7 +59,12 @@ from releaseledger.storage.config import (
     load_project_config,
 )
 from releaseledger.storage.paths import ProjectPaths, resolve_project_paths
-from releaseledger.storage.store import list_releases, load_entries, load_release
+from releaseledger.storage.store import (
+    list_releases,
+    load_commit_audit_sheet,
+    load_entries,
+    load_release,
+)
 
 __all__ = [
     "build_changelog_file",
@@ -1410,6 +1416,12 @@ def _strict_git_range_coverage(
     }
     if not expected:
         return [], 0
+    audit_sheet = load_commit_audit_sheet(workspace_root, release.version)
+    audit_exempt_refs = (
+        nonpublic_audit_source_refs(audit_sheet, include_internal=include_internal)
+        if audit_sheet is not None
+        else set()
+    )
 
     accepted_refs = {
         ref
@@ -1419,7 +1431,7 @@ def _strict_git_range_coverage(
     }
     visible_refs = {ref for entry in entries for ref in entry.source_refs}
 
-    missing = sorted(expected - accepted_refs)
+    missing = sorted(expected - accepted_refs - audit_exempt_refs)
     if missing:
         raise LaunchError(
             f"Strict build for {release.version} has git commits not covered "
@@ -1440,10 +1452,19 @@ def _strict_git_range_coverage(
             ],
         )
 
+    audit_omitted_refs = sorted((expected - accepted_refs) & audit_exempt_refs)
     hidden_internal_refs = (
-        sorted(expected - visible_refs) if not include_internal else []
+        sorted(expected - visible_refs - set(audit_omitted_refs))
+        if not include_internal
+        else []
     )
     warnings: list[str] = []
+    if audit_omitted_refs:
+        warnings.append(
+            f"{release.version}: {len(audit_omitted_refs)} git commit(s) are accounted for "
+            "by complete internal/rejected audit decisions and intentionally omitted "
+            "from this changelog build."
+        )
     if hidden_internal_refs:
         warnings.append(
             f"{release.version}: {len(hidden_internal_refs)} git commit(s) are covered "
